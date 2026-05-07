@@ -14,8 +14,7 @@ data/attendance_extracted/
 data/pdf_resources/
 data/www/
 
-# Thème et certificats SSL (non versionné)
-moove/
+# Certificats SSL (non versionné)
 certbot/
 
 # Claude AI
