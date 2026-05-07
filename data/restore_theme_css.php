@@ -155,6 +155,77 @@ footer .social-links a[href*="mailto"] i,
 
 /* Masquer section copyright Conecti.me */
 .copyright { display: none !important; }
+
+/* Fil d'Ariane */
+#page-navbar,
+.moove-breadcrumb {
+    display: block !important;
+    width: 100% !important;
+    padding: 6px 0 !important;
+}
+.moove-breadcrumb .breadcrumb {
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex-wrap: wrap !important;
+}
+.moove-breadcrumb .breadcrumb-item a {
+    color: #C9A227 !important;
+    text-decoration: none !important;
+    font-size: 0.875rem !important;
+}
+.moove-breadcrumb .breadcrumb-item a:hover {
+    text-decoration: underline !important;
+    color: #C9A227 !important;
+}
+.moove-breadcrumb .breadcrumb-item.active {
+    color: #555555 !important;
+    font-size: 0.875rem !important;
+}
+.moove-breadcrumb .breadcrumb-item + .breadcrumb-item::before {
+    color: #C9A227 !important;
+    content: "›" !important;
+}
+
+/* Responsive – espacement boxes chiffres */
+@media (max-width: 768px) {
+    #page-site-index #numbers .rate-box {
+        margin-bottom: 32px !important;
+    }
+    #page-site-index #numbers [class*="col-"],
+    #page-site-index #numbers .col {
+        padding-bottom: 16px !important;
+    }
+    .idnumber {
+        display: none !important;
+    }
+}
+
+/* Responsive – barre de recherche */
+@media (max-width: 992px) {
+    #page-course-management .tertiary-navigation .navitem.ms-auto,
+    .tertiary-navigation .navitem.ms-auto,
+    .navitem.ms-auto {
+        flex: 0 0 100% !important;
+        width: 100% !important;
+        margin-left: 0 !important;
+        margin-top: 8px !important;
+    }
+    .tertiary-navigation .d-flex,
+    #page-course-management .d-flex.align-items-center {
+        flex-wrap: wrap !important;
+    }
+    .navitem.ms-auto .input-group,
+    .navitem.ms-auto form,
+    .navitem.ms-auto .simplesearchform {
+        width: 100% !important;
+    }
+    .navitem.ms-auto input[type="text"],
+    .navitem.ms-auto .form-control {
+        flex: 1 !important;
+        min-width: 0 !important;
+    }
+}
 CSS;
 
 set_config('scsspre', $scsspre, 'theme_moove');

@@ -115,7 +115,8 @@
                             <div class="row">
                                 {{#marketingboxes}}
                                     <div class="col-sm-6 mt-4">
-                                        <div class="card card-body shadow">
+                                        {{#url}}<a href="{{{url}}}" class="text-decoration-none">{{/url}}
+                                        <div class="card card-body shadow h-100" style="cursor:{{#url}}pointer{{/url}}{{^url}}default{{/url}}; transition: transform 0.2s, box-shadow 0.2s;">
                                             <div class="d-flex">
                                                 <div class="icon-lg text-white rounded-circle">
                                                     <img src="{{{icon}}}">
@@ -126,6 +127,7 @@
                                                 </div>
                                             </div>
                                         </div>
+                                        {{#url}}</a>{{/url}}
                                     </div>
                                 {{/marketingboxes}}
                             </div>
