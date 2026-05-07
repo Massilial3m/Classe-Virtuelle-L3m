@@ -14,8 +14,8 @@ $scsspre = <<<'CSS'
 .navbar-brand,
 .primary-navigation .nav-link,
 .navbar .navbar-nav .nav-link,
-.editmode-switch-form label,
-.form-check-label {
+.navbar .editmode-switch-form label,
+.navbar .form-check-label {
     color: #FFFFFF !important;
 }
 .navbar .nav-link:hover { color: #C9A227 !important; }
@@ -226,10 +226,85 @@ footer .social-links a[href*="mailto"] i,
         min-width: 0 !important;
     }
 }
+
+/* Page connexion – design sombre L3M */
+#page-login-index body,
+body#page-login-index {
+    background-color: #1A1A1A !important;
+}
+#page-login-index #page-wrapper,
+#page-login-index #page {
+    background-color: #1A1A1A !important;
+}
+#page-login-index .login-container,
+#page-login-index .card,
+#page-login-index .login-card {
+    background-color: #2A2A2A !important;
+    border: none !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+    padding: 40px 36px !important;
+}
+#page-login-index h2,
+#page-login-index .login-heading,
+#page-login-index .card-title,
+#page-login-index p,
+#page-login-index label,
+#page-login-index .form-label {
+    color: #FFFFFF !important;
+}
+#page-login-index input[type="text"],
+#page-login-index input[type="password"],
+#page-login-index input[type="email"] {
+    background-color: #FFFFFF !important;
+    border: 2px solid #C9A227 !important;
+    border-radius: 6px !important;
+    color: #1A1A1A !important;
+}
+#page-login-index input[type="text"]:focus,
+#page-login-index input[type="password"]:focus {
+    border-color: #C9A227 !important;
+    box-shadow: 0 0 0 3px rgba(201,162,39,0.3) !important;
+}
+#page-login-index .btn-primary,
+#page-login-index [type="submit"],
+#page-login-index .btn[name="loginbtn"] {
+    background-color: #C9A227 !important;
+    border-color: #C9A227 !important;
+    color: #1A1A1A !important;
+    font-weight: bold !important;
+    border-radius: 6px !important;
+}
+#page-login-index a {
+    color: #C9A227 !important;
+}
+#page-login-index .form-text,
+#page-login-index small {
+    color: #AAAAAA !important;
+}
 CSS;
+
+$footer_js = <<<'JS'
+<script>
+setTimeout(function() {
+    try {
+        if (window.location.pathname.indexOf("/mod/") === -1) return;
+        var courseMatch = document.body.className.match(/course-(\d+)/);
+        if (!courseMatch) return;
+        var courseUrl = M.cfg.wwwroot + "/course/view.php?id=" + courseMatch[1];
+        var div = document.createElement("div");
+        div.style.cssText = "padding:10px 20px 0 20px;";
+        div.innerHTML = "<a href='" + courseUrl + "' style='background-color:#C9A227;color:#1A1A1A;font-weight:bold;padding:8px 18px;border-radius:6px;text-decoration:none;display:inline-block;'>← Retour au cours</a>";
+        var main = document.getElementById("region-main");
+        if (main) main.insertBefore(div, main.firstChild);
+    } catch(e) {}
+}, 800);
+</script>
+JS;
 
 set_config('scsspre', $scsspre, 'theme_moove');
 set_config('scss', $scss, 'theme_moove');
+set_config('additionalhtmlfooter', $footer_js);
 purge_all_caches();
 
 cli_writeln('CSS thème restauré avec succès.');
