@@ -1,0 +1,29 @@
+# Archives
+*.tgz
+*.zip
+
+# Config sensible
+config.php
+
+# Données Docker
+data/db/
+data/moodledata/
+
+# Plugins extraits et code Moodle (géré séparément)
+data/attendance_extracted/
+data/pdf_resources/
+data/www/
+
+# Thème et certificats SSL (non versionné)
+moove/
+certbot/
+
+# Claude AI
+.claude/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

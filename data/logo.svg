@@ -1,0 +1,30 @@
+<svg width="320" height="110" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .gold { fill: #c9a000; }
+    .black { fill: #ffffff; }
+    .stroke { stroke: #ffffff; stroke-width: 3; fill: none; }
+    .text { font-family: Arial, Helvetica, sans-serif; font-weight: 700; letter-spacing: 1px; }
+  </style>
+
+  <!-- CUBE -->
+  <g transform="translate(15,15)">
+    <!-- Face droite -->
+    <polygon points="45,0 90,25 90,70 45,45" class="gold"></polygon>
+    
+    <!-- Face gauche (blanche) -->
+    <polygon points="45,0 0,25 0,70 45,45" fill="#ffffff"></polygon>
+
+    <!-- Contour cube -->
+    <polygon points="45,0 90,25 90,70 45,95 0,70 0,25" class="stroke"></polygon>
+
+    <!-- Chiffre 3 stylisé -->
+    <text x="12" y="60" font-size="55" class="gold text">3</text>
+  </g>
+
+  <!-- TEXTE L3M -->
+  <text x="125" y="70" font-size="52" class="text">
+    <tspan class="black">L</tspan>
+    <tspan class="gold">3</tspan>
+    <tspan class="black">M</tspan>
+  </text>
+</svg>
