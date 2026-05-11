@@ -109,7 +109,96 @@ $content = [
                     ],
                 ],
             ],
-            // ==================== SECTION 2 : NOS FORMATIONS ====================
+            // ==================== SECTION 2 : CHIFFRES CLÉS ====================
+            (object)[
+                'settings' => (object)[
+                    'admin_label' => 'Chiffres clés',
+                    'pt'          => 60,
+                    'pb'          => 30,
+                    'bgcolor'     => '#FFFFFF',
+                    'scheme'      => 'light',
+                ],
+                'attr' => [
+                    (object)[
+                        'settings' => (object)[
+                            'admin_label' => 'Row Chiffres',
+                            'gutter'      => 'none',
+                        ],
+                        'attr' => [
+                            (object)[
+                                'settings' => (object)[
+                                    'id'     => 'pbcolumn',
+                                    'col'    => 12,
+                                    'pt'     => 0,
+                                    'pb'     => 0,
+                                    'align'  => 'center',
+                                    'alignc' => 'center',
+                                    'scheme' => 'light',
+                                ],
+                                'attr' => [
+                                    (object)[
+                                        'settings' => (object)[
+                                            'id'            => 'animnum',
+                                            'admin_label'   => 'Chiffres clés',
+                                            'columns'       => 4,
+                                            'mt'            => 0,
+                                            'mb'            => 0,
+                                            'gutter'        => 'normal',
+                                            'icon'          => 1,
+                                            'center'        => 1,
+                                            'colornumber'   => '#C9A227',
+                                            'colortitle'    => '#1A1A1A',
+                                            'colorsubtitle' => '#666666',
+                                            'coloricon'     => '#C9A227',
+                                            'sizenumber'    => 3,
+                                            'sizetitle'     => 1,
+                                        ],
+                                        'attr' => [
+                                            (object)[
+                                                'settings' => (object)[
+                                                    'id'       => 'animnum_item',
+                                                    'number'   => 11,
+                                                    'icon'     => 'fa fa-book',
+                                                    'title'    => 'Modules',
+                                                    'subtitle' => 'de formation ECSR',
+                                                ],
+                                            ],
+                                            (object)[
+                                                'settings' => (object)[
+                                                    'id'       => 'animnum_item',
+                                                    'number'   => 60,
+                                                    'icon'     => 'fa fa-clock-o',
+                                                    'title'    => 'Heures',
+                                                    'subtitle' => 'de contenu en ligne',
+                                                ],
+                                            ],
+                                            (object)[
+                                                'settings' => (object)[
+                                                    'id'       => 'animnum_item',
+                                                    'number'   => 25,
+                                                    'icon'     => 'fa fa-users',
+                                                    'title'    => 'Apprenants max',
+                                                    'subtitle' => 'par classe virtuelle',
+                                                ],
+                                            ],
+                                            (object)[
+                                                'settings' => (object)[
+                                                    'id'       => 'animnum_item',
+                                                    'number'   => 100,
+                                                    'icon'     => 'fa fa-laptop',
+                                                    'title'    => '% en ligne',
+                                                    'subtitle' => 'à votre rythme',
+                                                ],
+                                            ],
+                                        ],
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            // ==================== SECTION 3 : NOS FORMATIONS ====================
             (object)[
                 'settings' => (object)[
                     'admin_label' => 'Nos formations',
