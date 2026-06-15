@@ -71,7 +71,7 @@ $content = [
                                             'fwcls'        => 'bold',
                                             'mt'           => 0,
                                             'mb'           => 20,
-                                            'text'         => 'Formation ECSR – Titre Professionnel',
+                                            'text'         => 'Devenez Éducateur en Centres de Ressources',
                                         ],
                                     ],
                                     // Sous-titre
@@ -136,6 +136,20 @@ $content = [
                                     'scheme' => 'light',
                                 ],
                                 'attr' => [
+                                    (object)[
+                                        'settings' => (object)[
+                                            'id'          => 'heading',
+                                            'admin_label' => 'Titre Chiffres',
+                                            'tag'         => 'h2',
+                                            'size'        => 1.8,
+                                            'align'       => 'center',
+                                            'color'       => '#1A1A1A',
+                                            'fwcls'       => 'bold',
+                                            'mt'          => 0,
+                                            'mb'          => 40,
+                                            'text'        => 'La formation en chiffres',
+                                        ],
+                                    ],
                                     (object)[
                                         'settings' => (object)[
                                             'id'            => 'animnum',
