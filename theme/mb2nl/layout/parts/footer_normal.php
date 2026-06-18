@@ -269,6 +269,10 @@ $html .= '<script>(function(){
 $html .= '<style>
 #acsb-menu_launcher,.acsb-trigger,#acsb-menu { display:none!important; }
 #fitem_id_allowupdatestatus { display:none!important; }
+/* Evite que l image de fond du header intercepte les clics sur le bouton d edition */
+.page-header-img { pointer-events:none!important; }
+/* Le theme desactive tous les liens dans #page-header — reetablir pour le bouton edition */
+#page-header a.theme-turnediting { pointer-events:auto!important; cursor:pointer!important; }
 </style>';
 $html .= '<script>(function(){
     function hideStatusbar(){
@@ -725,6 +729,8 @@ HTML;
     }
 }
 
+
+
 // [L3M] Hide mycourse badge for teachers/admins, keep for students
 global $DB, $USER;
 if (isloggedin() && !isguestuser()) {
@@ -755,11 +761,16 @@ $html .= '<script>(function(){
                 el.style.cssText="display:none!important";
             });
         });
-        document.querySelectorAll("a[href*=\'/course/edit.php\']").forEach(function(a){(a.closest("li")||a.parentElement||a).style.cssText="display:none!important";});
+        var isTeacher=document.body.classList.contains("roleshortname-editingteacher")||document.body.classList.contains("roleshortname-teacher");
+        // Cacher les liens course/edit seulement pour les \u00e9tudiants (pas les formateurs)
+        if(!isTeacher){
+            document.querySelectorAll("a[href*=\'/course/edit.php\']").forEach(function(a){(a.closest("li")||a.parentElement||a).style.cssText="display:none!important";});
+        }
         document.querySelectorAll("a[href*=\'/contentbank/\']").forEach(function(a){(a.closest("li")||a.parentElement||a).style.cssText="display:none!important";});
         document.querySelectorAll("a").forEach(function(a){
             var t=a.textContent.trim();
-            if(t==="Importer ou exporter des calendriers"||t==="Nouvel \u00e9v\u00e9nement"||t==="Modifier les param\u00e8tres du cours"){
+            // "Modifier les param\u00e8tres du cours" visible pour le formateur, cach\u00e9 pour les \u00e9tudiants
+            if(t==="Importer ou exporter des calendriers"||t==="Nouvel \u00e9v\u00e9nement"||(t==="Modifier les param\u00e8tres du cours"&&!isTeacher)){
                 (a.closest("li")||a.parentElement||a).style.cssText="display:none!important";
             }
         });
@@ -1137,7 +1148,93 @@ if (strpos($PAGE->pagetype, 'mod-quiz-attempt') !== false) {
 $html .= '</body>';
 $html .= '</html>';
 
+// [L3M] Bouton WhatsApp groupe — visible pour les étudiants sur les cours ECSR
+global $COURSE, $USER, $DB;
+$ecsr_courses = [2,3,4,5,6,7,8,9,10,11,12];
+if (isloggedin() && !isguestuser() && !is_siteadmin()
+    && isset($COURSE->id) && in_array($COURSE->id, $ecsr_courses)) {
+    // Vérifier que l'utilisateur n'est pas formateur
+    $teacherroleid = $DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
+    $isTeacher = $teacherroleid && $DB->record_exists('role_assignments', ['userid' => $USER->id, 'roleid' => $teacherroleid]);
+    if (!$isTeacher) {
+        $whatsapp_link = 'https://chat.whatsapp.com/CAqlpOsGrzJIHKPGxogmY3';
+        $html .= '<a id="l3m-whatsapp-banner" style="'
+            . 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);'
+            . 'background:#25D366;color:#fff;font-weight:700;font-size:14px;'
+            . 'padding:12px 24px;border-radius:50px;z-index:99999;'
+            . 'box-shadow:0 4px 16px rgba(0,0,0,.25);display:flex;align-items:center;gap:10px;'
+            . 'text-decoration:none;white-space:nowrap;'
+            . '" href="' . $whatsapp_link . '" target="_blank">'
+            . '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="white" viewBox="0 0 24 24">'
+            . '<path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15'
+            . '-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475'
+            . '-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52'
+            . '.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207'
+            . '-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372'
+            . '-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074'
+            . '.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625'
+            . '.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413'
+            . '.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>'
+            . '<path d="M12 0C5.373 0 0 5.373 0 12c0 2.136.561 4.14 1.535 5.874L0 24l6.335-1.507'
+            . 'A11.945 11.945 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.882'
+            . 'a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.981.999-3.648-.235-.374'
+            . 'A9.867 9.867 0 012.118 12C2.118 6.533 6.533 2.118 12 2.118'
+            . 'c5.466 0 9.882 4.415 9.882 9.882 0 5.466-4.416 9.882-9.882 9.882z"/>'
+            . '</svg>'
+            . 'Rejoindre le groupe WhatsApp'
+            . '</a>';
+    }
+}
+
 echo $html;
+
+// [L3M] Page création/édition utilisateur — déplacer champ téléphone en haut
+$html2 = '<script>(function(){
+    var path = window.location.pathname;
+    if (path.indexOf("/user/editadvanced.php") === -1 && path.indexOf("/user/edit.php") === -1) return;
+    function movePhone(){
+        var phoneInput = document.querySelector("input[name=\'phone1\']");
+        if (!phoneInput) return;
+        // Remonter jusqu\'au conteneur de ligne du champ
+        var phoneRow = phoneInput.parentElement;
+        while (phoneRow && !phoneRow.classList.contains("fitem") && phoneRow.tagName !== "FIELDSET" && phoneRow !== document.body) {
+            phoneRow = phoneRow.parentElement;
+        }
+        if (!phoneRow || phoneRow === document.body) return;
+        // Trouver le champ email
+        var emailInput = document.querySelector("input[name=\'email\']");
+        if (!emailInput) return;
+        var emailRow = emailInput.parentElement;
+        while (emailRow && !emailRow.classList.contains("fitem") && emailRow !== document.body) {
+            emailRow = emailRow.parentElement;
+        }
+        if (!emailRow || !emailRow.parentNode || emailRow === document.body) return;
+        // Badge WhatsApp sur le label
+        if (!document.querySelector(".l3m-whatsapp-badge")) {
+            var lbl = phoneRow.querySelector("label");
+            if (lbl) {
+                var badge = document.createElement("span");
+                badge.className = "l3m-whatsapp-badge";
+                badge.style.cssText = "background:#25D366;color:#fff;font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px;font-weight:700;vertical-align:middle";
+                badge.textContent = "WhatsApp ✓";
+                lbl.appendChild(badge);
+            }
+        }
+        // Déplacer juste après le champ email
+        emailRow.parentNode.insertBefore(phoneRow, emailRow.nextSibling);
+    }
+    // Lancer après chargement complet + délais pour Moodle lazy-render
+    function tryMove(attempts) {
+        movePhone();
+        if (attempts > 0) setTimeout(function(){ tryMove(attempts - 1); }, 600);
+    }
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function(){ tryMove(5); });
+    } else {
+        tryMove(5);
+    }
+})();</script>';
+echo $html2;
 
 if ($quickview = theme_mb2nl_theme_setting($PAGE, 'quickview')) {
     $PAGE->requires->js_call_amd('theme_mb2nl/quickview', 'init', [$quickview]);
