@@ -133,29 +133,91 @@ if (count($partnerlogos) && ! $footerid) {
 
 $html .= '<footer id="footer" class="' . $footercss . ' main-footer">';
 
-if ($footerid) {
+// [L3M] override mb2nl footer builder — notre footer multi-colonnes toujours affiché
+if (false) {
     $html .= theme_mb2nl_format_txt('[mb2footer footerid="' . $footerid . '"]', FORMAT_HTML);
 } else {
-    $html .= '<div class="container-fluid">';
-    $html .= '<div class="row">';
-    $html .= '<div class="col-md-12">';
-    $html .= '<div class="footer-content flexcols">';
-    $html .= '<div class="footer-text">';
-    $html .= '<p>' . $footcontent . '</p>';
-    $html .= theme_mb2nl_language_list('footer');
+    // [L3M] Footer multi-colonnes — 4 colonnes : Brand · Navigation · Contact · Légal
+    $l3m_year = date('Y');
+    $html .= '<style>
+/* L3M Footer multi-colonnes */
+.main-footer { padding:0!important; border-top:none!important; }
+.l3m-footer-grid {
+    display:grid;
+    grid-template-columns: 2fr 1.2fr 1.2fr 1fr;
+    gap:40px;
+    padding:48px 40px 40px;
+    max-width:1280px;
+    margin:0 auto;
+}
+@media(max-width:900px){
+    .l3m-footer-grid { grid-template-columns:1fr 1fr; gap:32px; padding:36px 24px; }
+}
+@media(max-width:560px){
+    .l3m-footer-grid { grid-template-columns:1fr; gap:24px; padding:28px 20px; }
+}
+.l3m-footer-logo { display:flex;align-items:center;gap:10px;margin-bottom:14px; }
+.l3m-footer-logo-mark { width:36px;height:36px;background:#C9A227;border-radius:8px;display:flex;align-items:center;justify-content:center; }
+.l3m-footer-logo-mark svg { width:20px;height:20px; }
+.l3m-footer-logo-name { font-size:17px;font-weight:800;color:#fff;letter-spacing:-.01em; }
+.l3m-footer-logo-name span { color:#C9A227; }
+.l3m-footer-tagline { color:#6B7A95;font-size:13px;line-height:1.65;margin-bottom:20px;max-width:280px; }
+.l3m-footer-copy { color:#445066;font-size:11px;line-height:1.6; }
+.l3m-footer-title { color:#fff;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid #1E2E44; }
+.l3m-footer-links { list-style:none;padding:0;margin:0; }
+.l3m-footer-links li { margin-bottom:9px; }
+.l3m-footer-links a { color:#6B7A95;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:7px;transition:color .18s; }
+.l3m-footer-links a:hover,.l3m-footer-links a:focus { color:#C9A227; }
+.l3m-footer-links a i { font-size:14px;flex-shrink:0; }
+.l3m-footer-tools { display:none; }
+</style>';
+    $html .= '<div class="l3m-footer-grid">';
+
+    // Column 1 — Brand
+    $html .= '<div class="l3m-fcol">';
+    $html .= '<div class="l3m-footer-logo">';
+    $html .= '<div class="l3m-footer-logo-mark"><svg viewBox="0 0 20 20" fill="none"><path d="M4 15L10 5l6 10H4z" fill="white" opacity=".9"/></svg></div>';
+    $html .= '<span class="l3m-footer-logo-name"><span>L3M</span> Formation</span>';
+    $html .= '</div>';
+    $html .= '<p class="l3m-footer-tagline">Votre plateforme de formation professionnelle en ligne, adaptée à votre rythme.</p>';
+    $html .= '<p class="l3m-footer-copy">&copy; ' . $l3m_year . ' L3M Formation<br>Tous droits réservés</p>';
     $html .= '</div>';
 
-    if (theme_mb2nl_theme_setting($PAGE, 'socialfooter') == 1) {
-        $html .= '<div class="footer-social">';
-        $html .= theme_mb2nl_social_icons(['tt' => $socilatt, 'pos' => 'footer']);
-        $html .= '</div>';
-    }
-
+    // Column 2 — Navigation
+    $html .= '<div class="l3m-fcol">';
+    $html .= '<h4 class="l3m-footer-title">Navigation</h4>';
+    $html .= '<ul class="l3m-footer-links">';
+    $html .= '<li><a href="/"><i class="ri-home-4-line"></i>Accueil</a></li>';
+    $html .= '<li><a href="/course/index.php"><i class="ri-graduation-cap-line"></i>Nos formations</a></li>';
+    $html .= '<li><a href="/my/"><i class="ri-dashboard-line"></i>Mon apprentissage</a></li>';
+    $html .= '<li><a href="https://l3m.glowbl.com/l3m-ecsr" target="_blank"><i class="ri-video-chat-line"></i>Classe virtuelle</a></li>';
+    $html .= '</ul>';
     $html .= '</div>';
+
+    // Column 3 — Contact
+    $html .= '<div class="l3m-fcol">';
+    $html .= '<h4 class="l3m-footer-title">Contactez-nous</h4>';
+    $html .= '<ul class="l3m-footer-links">';
+    $html .= '<li><a href="https://wa.me/33600000000" target="_blank"><i class="ri-whatsapp-line"></i>WhatsApp</a></li>';
+    $html .= '<li><a href="tel:+33600000000"><i class="ri-phone-line"></i>Téléphone</a></li>';
+    $html .= '<li><a href="mailto:contact@l3m-formation.fr"><i class="ri-mail-line"></i>Email</a></li>';
+    $html .= '<li><a href="#" target="_blank"><i class="ri-linkedin-box-line"></i>LinkedIn</a></li>';
+    $html .= '</ul>';
+    $html .= '</div>';
+
+    // Column 4 — Légal
+    $html .= '<div class="l3m-fcol">';
+    $html .= '<h4 class="l3m-footer-title">Légal</h4>';
+    $html .= '<ul class="l3m-footer-links">';
+    $html .= '<li><a href="/mod/page/view.php?id=168"><i class="ri-shield-check-line"></i>Politique de confidentialité (RGPD)</a></li>';
+    $html .= '</ul>';
+    $html .= '</div>';
+
+    $html .= '</div>'; // l3m-footer-grid
+
+    // Keep Moodle footer tools (hidden) for compatibility
+    $html .= '<div class="l3m-footer-tools">';
     $html .= $OUTPUT->theme_part('footer_tools');
-
-    $html .= '</div>';
-    $html .= '</div>';
     $html .= '</div>';
 }
 
@@ -303,14 +365,15 @@ $html .= $OUTPUT->standard_end_of_body_html();
 
 // [L3M] Redirection formateur : dashboard → Espace formateur
 global $PAGE, $USER, $DB;
-if (isloggedin() && !isguestuser() && in_array($PAGE->pagetype, ['my-index', 'my-courses'])) {
-    $teacherroleid = $DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
-    $isteacher = $teacherroleid && $DB->record_exists('role_assignments', ['userid' => $USER->id, 'roleid' => $teacherroleid]);
-    if ($isteacher) {
-        $html .= '<script>window.location.replace("/mod/page/view.php?id=169");</script>';
-    }
-}
+// [L3M] Redirect formateur déplacé dans head.php
 
+// [L3M] Cacher la cloche de notifications pour le formateur
+$teacherroleid_notif = $DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
+if ($teacherroleid_notif && $DB->record_exists('role_assignments', ['userid' => $USER->id, 'roleid' => $teacherroleid_notif])) {
+    $html .= '<style>
+#nav-notification-popover-container { display:none!important; }
+</style>';
+}
 
 // [L3M] Page journal activités – nettoyage complet vue formateur
 $html .= '<script>(function(){
@@ -559,6 +622,61 @@ obs.observe(document.body,{childList:true,subtree:true});
 })();</script>';
 
 
+// [L3M] Temoignages — section homepage
+if (in_array($PAGE->pagetype, ['site-index'])) {
+    $html .= '<style>
+#l3m-testimonials{background:#0D1824;padding:72px 20px;margin-top:0}
+#l3m-testimonials .l3m-t-inner{max-width:1140px;margin:0 auto}
+#l3m-testimonials .l3m-t-eyebrow{color:#C9A227;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;text-align:center;margin-bottom:10px}
+#l3m-testimonials .l3m-t-title{color:#fff;font-size:clamp(22px,3vw,34px);font-weight:800;text-align:center;margin-bottom:48px;line-height:1.2}
+#l3m-testimonials .l3m-t-title span{color:#C9A227}
+#l3m-testimonials .l3m-t-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+@media(max-width:820px){#l3m-testimonials .l3m-t-grid{grid-template-columns:1fr}}
+#l3m-testimonials .l3m-t-card{background:#111E2D;border:1px solid #1E2E44;border-radius:14px;padding:28px 26px 24px;display:flex;flex-direction:column;gap:16px;position:relative}
+#l3m-testimonials .l3m-t-card::before{content:open-quote;position:absolute;top:16px;right:22px;font-size:72px;line-height:1;color:#C9A22722;font-family:Georgia,serif}
+#l3m-testimonials .l3m-t-stars{color:#C9A227;font-size:14px;letter-spacing:2px}
+#l3m-testimonials .l3m-t-text{color:#8CA0B8;font-size:14px;line-height:1.7;flex:1}
+#l3m-testimonials .l3m-t-author{display:flex;align-items:center;gap:12px;margin-top:4px;border-top:1px solid #1E2E44;padding-top:16px}
+#l3m-testimonials .l3m-t-avatar{width:40px;height:40px;border-radius:50%;background:#C9A227;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#0D1824;flex-shrink:0}
+#l3m-testimonials .l3m-t-name{color:#fff;font-size:14px;font-weight:700;line-height:1.2}
+#l3m-testimonials .l3m-t-role{color:#4A6080;font-size:12px}
+</style>';
+    $html .= '<script>(function(){
+var TESTIMONIALS=[
+  {stars:5,text:"La formation est tres bien structuree et le formateur est disponible et reactif. Contenu clair, progressif, et les classes virtuelles permettent de poser ses questions en direct. J\'ai reussi mon examen du premier coup !",name:"Sophie M.",role:"Apprenante ECSR - CCP1",initials:"SM"},
+  {stars:5,text:"J\'avais quelques apprehensions sur le format 100 % en ligne, mais tout est bien explique etape par etape. Les modules sont concis et on avance vraiment a son rythme. Je recommande vivement.",name:"Thomas L.",role:"Apprenant ECSR - CCP2",initials:"TL"},
+  {stars:5,text:"Plateforme intuitive, contenu de qualite et suivi personnalise. Le tableau de bord apprenant permet de voir sa progression en temps reel. Une vraie difference par rapport aux formations classiques.",name:"Marie D.",role:"Apprenante ECSR - CCP1",initials:"MD"}
+];
+function buildTestimonials(){
+  if(document.getElementById("l3m-testimonials")) return;
+  var footer=document.getElementById("page-footer")||document.querySelector(".main-footer")||document.querySelector("footer");
+  if(!footer) return;
+  var sec=document.createElement("section");
+  sec.id="l3m-testimonials";
+  var cards=TESTIMONIALS.map(function(t){
+    var stars="";
+    for(var i=0;i<t.stars;i++) stars+="&#9733;";
+    return "<div class=\"l3m-t-card\">"
+      +"<div class=\"l3m-t-stars\">"+stars+"</div>"
+      +"<p class=\"l3m-t-text\">"+t.text+"</p>"
+      +"<div class=\"l3m-t-author\">"
+      +"<div class=\"l3m-t-avatar\">"+t.initials+"</div>"
+      +"<div><div class=\"l3m-t-name\">"+t.name+"</div>"
+      +"<div class=\"l3m-t-role\">"+t.role+"</div></div>"
+      +"</div></div>";
+  }).join("");
+  sec.innerHTML="<div class=\"l3m-t-inner\">"
+    +"<p class=\"l3m-t-eyebrow\">Temoignages</p>"
+    +"<h2 class=\"l3m-t-title\">Ce que disent nos <span>apprenants</span></h2>"
+    +"<div class=\"l3m-t-grid\">"+cards+"</div>"
+    +"</div>";
+  footer.parentNode.insertBefore(sec,footer);
+}
+if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",buildTestimonials);
+else buildTestimonials();
+})();</script>';
+}
+
 // [L3M] Hero background image + formateur hero selector fix — applied via JS
 if (in_array($PAGE->pagetype, ['site-index'])) {
     $html .= '<script>(function(){
@@ -656,7 +774,7 @@ if (isloggedin() && !isguestuser()) {
                     ['cid' => $c->id, 'mid' => $bbbmodid]
                 );
                 if ($cmid) {
-                    $bbblink = '/mod/bigbluebuttonbn/view.php?id=' . $cmid;
+                    $bbblink = 'https://l3m.glowbl.com/l3m-ecsr';
                 }
             }
             $coursedata[$c->id] = [
@@ -681,7 +799,7 @@ if(hero){
     +'<h1 style="color:#C9A227;font-size:2.6em;font-weight:700;margin:0;line-height:1.2">'
     +'Bonjour {$firstname}&nbsp;👋'
     +'<br><span style="font-size:0.48em;font-weight:400;color:#fff;opacity:0.85">'
-    +'{$ncourses} formations &nbsp;&bull;&nbsp; {$totalstudents} étudiants inscrits'
+    +'{$ncourses} cours &nbsp;&bull;&nbsp; {$totalstudents} étudiants inscrits'
     +'</span></h1>'
     +'<p style="color:#ddd;font-size:1.05em;margin:0;max-width:600px">'
     +'Retrouvez vos cours, suivez la progression de vos étudiants et accédez à vos classes virtuelles.'
@@ -906,6 +1024,7 @@ $html .= '<script>(function(){
     function hideItems(root){
         (root||document).querySelectorAll("a,li").forEach(function(el){
             if(el.children.length>2)return;
+            if(el.closest("#region-main,[role=\'main\'],#page-content,.activity"))return;
             var t=norm(el.textContent);
             HIDE.forEach(function(k){
                 if(t===k||t.startsWith(k)){
@@ -1186,6 +1305,157 @@ if (isloggedin() && !isguestuser() && !is_siteadmin()
     }
 }
 
+
+
+
+
+
+// [L3M] BBB -> Google Meet
+$l3m_gmeet = 'https://l3m.glowbl.com/l3m-ecsr';
+$html .= '<script>
+(function(){
+    var gm="' . $l3m_gmeet . '";
+    if(window.location.pathname.indexOf("/mod/bigbluebuttonbn/")===0){
+        window.location.replace(gm);return;
+    }
+    document.addEventListener("click",function(e){
+        var a=e.target.closest("a");
+        if(a&&a.href&&a.href.indexOf("/mod/bigbluebuttonbn/")!==-1){
+            e.preventDefault();
+            window.open(gm,"_blank");
+        }
+    },true);
+})();
+</script>';
+
+// [L3M] Cacher le bloc "Mes cours" dans la sidebar des cours
+if (strpos($PAGE->pagetype, 'course-') === 0) {
+    $html .= '<style>
+.sidebar-col .block_navigation li[aria-label="Mes cours"],
+.sidebar-col .block_navigation li[title="Mes cours"],
+.sidebar-col .block h3 + ul > li:first-child > p > a[title="Mes cours"],
+.sidebar-col .block_navigation .block_tree > ul > li.contains_branch:has(p a[title="Mes cours"]) { display:none!important; }
+</style>';
+    $html .= '<script>(function(){
+    function hideMesCours(){
+        document.querySelectorAll(".sidebar-col .block, .sidebar-col section.block").forEach(function(bl){
+            var h=bl.querySelector("h2,h3,h4,.card-header,.block-header,.h5");
+            if(h && h.textContent.trim()==="Mes cours"){
+                bl.style.cssText="display:none!important";
+            }
+        });
+    }
+    if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",hideMesCours);
+    else hideMesCours();
+    setTimeout(hideMesCours,800);
+})();</script>';
+}
+
+
+// [L3M] Barre de recherche visible dans le header
+$html .= '<style>
+#l3m-hsearch{display:flex;align-items:center;background:rgba(0,0,0,.05);border:1.5px solid rgba(0,0,0,.18);border-radius:22px;padding:0 6px 0 14px;height:34px;transition:border-color .2s,background .2s;flex-shrink:0;gap:2px}
+#l3m-hsearch:focus-within{border-color:#C9A227;background:rgba(255,255,255,.15)}
+#l3m-hsearch input{background:none;border:none;outline:none;color:#fff;font-size:13px;width:160px;min-width:0}
+#l3m-hsearch input::placeholder{color:rgba(255,255,255,.42)}
+#l3m-hsearch button{background:none;border:none;cursor:pointer;color:#C9A227;font-size:16px;padding:4px 6px;display:flex;align-items:center}
+#theme-search-btn{display:none!important}
+</style>';
+
+$html .= '<script>(function(){
+function go(){
+    if(document.getElementById("l3m-hsearch"))return;
+    var sb=document.getElementById("theme-search-btn");
+    if(!sb)return;
+    var form=document.createElement("form");
+    form.id="l3m-hsearch";
+    form.action="/course/search.php";
+    form.method="get";
+    var inp=document.createElement("input");
+    inp.type="text";inp.name="search";
+    inp.placeholder="Rechercher une formation…";
+    inp.autocomplete="off";inp.setAttribute("aria-label","Rechercher");
+    var btn=document.createElement("button");
+    btn.type="submit";btn.setAttribute("aria-label","Rechercher");
+    var ico=document.createElement("i");
+    ico.className="ri-search-line";
+    btn.appendChild(ico);
+    form.appendChild(inp);form.appendChild(btn);
+    sb.parentNode.insertBefore(form,sb);
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",go);
+else go();
+})();</script>';
+
+// [L3M] Hover cartes + Messagerie pleine page
+$html .= '<style>
+/* Cacher le bloc Catégories de cours */
+.block.block_course_list { display:none!important; }
+/* Cacher Mode edition */
+.editmode-switch-form, [data-region="editmode-switch"], .editmode-switch, .theme-turnediting { display:none!important; }
+
+/* ── Hover cartes cours ─────────────────────────────────────────── */
+.dashboard-card,
+.myc-item.card,
+.coursebox {
+    transition: transform .22s ease, box-shadow .22s ease !important;
+    will-change: transform;
+}
+.dashboard-card:hover,
+.myc-item.card:hover {
+    transform: translateY(-6px) !important;
+    box-shadow: 0 16px 36px rgba(0,0,0,.14) !important;
+}
+.coursebox:hover {
+    transform: translateY(-6px) !important;
+    box-shadow: 0 16px 36px rgba(0,0,0,.14) !important;
+    border-color: #C9A227 !important;
+}
+/* Zoom image fond (div background-image) */
+.dashboard-card-img,
+.courseimage {
+    overflow: hidden;
+    transition: transform .35s ease !important;
+}
+.dashboard-card:hover .dashboard-card-img,
+.myc-item.card:hover .dashboard-card-img {
+    transform: scale(1.06) !important;
+}
+.coursebox:hover .courseimage {
+    transform: scale(1.06) !important;
+}
+/* ── Messagerie : cacher le panneau latéral, lien pleine page ───── */
+</style>';
+
+$html .= '<script>(function(){
+/* Hover cartes — clip overflow pour que le zoom image reste propre */
+function clipCourseImages(){
+    document.querySelectorAll(".courseimage, .card-img-top, [data-course-id] img").forEach(function(el){
+        el.style.overflow = "hidden";
+    });
+}
+
+/* Messagerie — intercepte le clic sur le bouton drawer et redirige */
+function interceptMsg(){
+    document.addEventListener("click", function(e){
+        var btn = e.target.closest(
+            "[data-region=\"popover-region-messages\"] a," +
+            "a[id^=\"message-drawer-toggle-\"]"
+        );
+        if(!btn) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        window.location.href = "/message/index.php";
+    }, true);
+}
+
+if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", function(){ clipCourseImages(); interceptMsg(); });
+} else {
+    clipCourseImages(); interceptMsg();
+}
+})();</script>';
+
 echo $html;
 
 // [L3M] Page création/édition utilisateur — déplacer champ téléphone en haut
@@ -1234,6 +1504,37 @@ $html2 = '<script>(function(){
         tryMove(5);
     }
 })();</script>';
+
+// [L3M] Recherche formateurs + prevention Enter
+$html2 .= '<script>
+(function(){
+    // Filtrage formateurs
+    document.addEventListener("input", function(e){
+        if (!e.target || e.target.id !== "l3m-trainer-search-inpt") return;
+        var q = e.target.value.toLowerCase().trim();
+        var panel = document.getElementById("cfilter_instructors");
+        if (!panel) return;
+        var items = panel.querySelectorAll("ul li.filter-form-field");
+        var visible = 0;
+        items.forEach(function(li){
+            var txt = (li.querySelector("label") || li).textContent.toLowerCase();
+            var match = !q || txt.indexOf(q) !== -1;
+            li.style.display = match ? "" : "none";
+            if (match) visible++;
+        });
+        var nm = document.getElementById("l3m-no-trainer");
+        if (nm) nm.style.display = visible === 0 ? "block" : "none";
+    });
+    // Bloquer Enter dans le champ de recherche formateurs
+    document.addEventListener("keydown", function(e){
+        if (e.target && e.target.id === "l3m-trainer-search-inpt" && (e.key === "Enter" || e.keyCode === 13)){
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        }
+    }, true);
+})();
+</script>';
 echo $html2;
 
 if ($quickview = theme_mb2nl_theme_setting($PAGE, 'quickview')) {
