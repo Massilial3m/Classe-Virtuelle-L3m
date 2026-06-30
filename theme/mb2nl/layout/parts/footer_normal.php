@@ -677,27 +677,188 @@ else buildTestimonials();
 })();</script>';
 }
 
-// [L3M] Hero background image + formateur hero selector fix — applied via JS
+// [L3M] Hero premium public + background
 if (in_array($PAGE->pagetype, ['site-index'])) {
+
+$isTeacher = isloggedin() && !isguestuser() &&
+    (function() use ($DB, $USER) {
+        $rid = $DB->get_field('role','id',['shortname'=>'editingteacher']);
+        return $rid && $DB->record_exists('role_assignments',['userid'=>$USER->id,'roleid'=>$rid]);
+    })();
+
+$html .= '<style>
+/* ── Hero section premium ───────────────────────────────── */
+.l3m-hero-wrap {
+  position:relative;
+  min-height:480px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  padding:80px 60px 40px;
+  box-sizing:border-box;
+  overflow:hidden;
+}
+.l3m-hero-overlay {
+  position:absolute;inset:0;
+  background:linear-gradient(90deg,rgba(10,22,40,.88) 40%,rgba(10,22,40,.45));
+  z-index:1;
+}
+.l3m-hero-content {
+  position:relative;z-index:2;max-width:620px;
+}
+.l3m-hero-badge {
+  display:inline-flex;align-items:center;gap:6px;
+  border:1px solid rgba(201,162,39,.55);
+  color:#C9A227;font-size:11px;font-weight:600;
+  letter-spacing:.12em;text-transform:uppercase;
+  padding:4px 14px;border-radius:20px;
+  margin-bottom:22px;
+}
+.l3m-hero-badge::before {
+  content:"";width:6px;height:6px;border-radius:50%;
+  background:#C9A227;flex-shrink:0;
+}
+.l3m-hero-h1 {
+  font-size:clamp(2rem,4vw,3rem);font-weight:800;
+  line-height:1.18;color:#fff;margin:0 0 16px;
+  text-wrap:balance;
+}
+.l3m-hero-h1 span { color:#C9A227; }
+.l3m-hero-sub {
+  font-size:15px;color:rgba(255,255,255,.72);
+  line-height:1.6;margin:0 0 32px;max-width:520px;
+}
+.l3m-hero-ctas {
+  display:flex;gap:16px;flex-wrap:wrap;align-items:center;
+}
+.l3m-cta-primary {
+  background:#C9A227;color:#111;
+  font-weight:700;font-size:14px;
+  padding:13px 28px;border-radius:4px;
+  text-decoration:none;
+  transition:opacity .18s;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.l3m-cta-primary:hover { opacity:.88; }
+.l3m-cta-outline {
+  border:1.5px solid rgba(255,255,255,.4);color:#fff;
+  font-weight:600;font-size:14px;
+  padding:12px 24px;border-radius:4px;
+  text-decoration:none;
+  transition:border-color .18s;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.l3m-cta-outline:hover { border-color:#fff; color:#fff; }
+
+/* ── Stats bar ───────────────────────────────────────────── */
+.l3m-stats-bar {
+  display:flex;
+  background:#0F1B2D;
+  border-top:2px solid rgba(201,162,39,.25);
+  padding:20px 60px;
+  gap:0;
+  flex-wrap:wrap;
+}
+.l3m-stat-item {
+  flex:1 1 180px;
+  display:flex;align-items:center;gap:14px;
+  padding:8px 24px 8px 0;
+  border-right:1px solid rgba(255,255,255,.08);
+}
+.l3m-stat-item:last-child { border-right:none; }
+.l3m-stat-icon {
+  font-size:22px;color:#C9A227;flex-shrink:0;
+}
+.l3m-stat-num {
+  font-size:20px;font-weight:800;color:#fff;
+  font-variant-numeric:tabular-nums;line-height:1;
+}
+.l3m-stat-lbl {
+  font-size:11px;color:rgba(255,255,255,.5);
+  letter-spacing:.04em;margin-top:3px;
+}
+@media(max-width:768px){
+  .l3m-hero-wrap{padding:60px 24px 32px;}
+  .l3m-stats-bar{padding:16px 24px;}
+  .l3m-stat-item{border-right:none;padding:8px 0;}
+}
+</style>';
+
+if (!$isTeacher) {
     $html .= '<script>(function(){
 function applyHeroBg(){
-    // Find the hero section — first .mb2-pb-fpsection in the page
-    var hero=null;
-    var candidates=document.querySelectorAll(".mb2-pb-fpsection");
-    if(candidates.length) hero=candidates[0];
-    if(!hero){
-        candidates=document.querySelectorAll(".mb2-pb-section");
-        if(candidates.length) hero=candidates[0];
-    }
+    var hero=document.querySelector(".mb2-pb-fpsection")||document.querySelector(".mb2-pb-section");
     if(!hero) return;
-
-    // Store reference globally so teacher JS can find it
     window.L3M_HERO=hero;
 
-    // Apply background image on the section-inner (which carries the bgcolor)
+    var inner=hero.querySelector(".mb2-pb-section-inner,.section-inner")||hero;
+
+    // Background image
+    inner.style.setProperty("background-image","url(\"/theme/mb2nl/pix/hero_bg.jpg\")","important");
+    inner.style.setProperty("background-size","cover","important");
+    inner.style.setProperty("background-position","center center","important");
+    inner.style.setProperty("background-repeat","no-repeat","important");
+    inner.style.setProperty("min-height","480px","important");
+    inner.style.setProperty("display","flex","important");
+    inner.style.setProperty("align-items","center","important");
+    inner.style.setProperty("position","relative","important");
+
+    if(document.getElementById("l3m-hero-content")) return;
+
+    // Dark overlay
+    var overlay=document.createElement("div");
+    overlay.className="l3m-hero-overlay";
+    inner.insertBefore(overlay, inner.firstChild);
+
+    // Hero content
+    var wrap=document.createElement("div");
+    wrap.className="l3m-hero-wrap";
+    wrap.id="l3m-hero-content";
+    wrap.innerHTML=
+      "<div class=\"l3m-hero-content\">"
+      +"<span class=\"l3m-hero-badge\">Certifications ECSR reconnues</span>"
+      +"<h1 class=\"l3m-hero-h1\">Formez-vous aujourd\'hui,<br>"
+      +"<span>devenez expert demain</span></h1>"
+      +"<p class=\"l3m-hero-sub\">Préparez-vous aux certifications ECSR avec des formations "
+      +"en ligne 100 % flexibles et adaptées à votre rythme.</p>"
+      +"<div class=\"l3m-hero-ctas\">"
+      +"<a href=\"/course/index.php\" class=\"l3m-cta-primary\">"
+      +"Découvrir nos formations →</a>"
+      +"<a href=\"/login/index.php\" class=\"l3m-cta-outline\">"
+      +"▶ Mon espace formation</a>"
+      +"</div>"
+      +"</div>";
+    inner.appendChild(wrap);
+
+    // Stats bar after hero section
+    if(!document.getElementById("l3m-stats-bar")){
+        var stats=document.createElement("div");
+        stats.id="l3m-stats-bar";
+        stats.className="l3m-stats-bar";
+        stats.innerHTML=
+          "<div class=\"l3m-stat-item\"><span class=\"l3m-stat-icon\"><i class=\"ri-user-3-line\"></i></span>"
+          +"<div><div class=\"l3m-stat-num\">+25</div><div class=\"l3m-stat-lbl\">Apprenants formés</div></div></div>"
+          +"<div class=\"l3m-stat-item\"><span class=\"l3m-stat-icon\"><i class=\"ri-medal-line\"></i></span>"
+          +"<div><div class=\"l3m-stat-num\">98 %</div><div class=\"l3m-stat-lbl\">Taux de réussite</div></div></div>"
+          +"<div class=\"l3m-stat-item\"><span class=\"l3m-stat-icon\"><i class=\"ri-group-line\"></i></span>"
+          +"<div><div class=\"l3m-stat-num\">Formateurs</div><div class=\"l3m-stat-lbl\">Experts métiers</div></div></div>"
+          +"<div class=\"l3m-stat-item\"><span class=\"l3m-stat-icon\"><i class=\"ri-award-line\"></i></span>"
+          +"<div><div class=\"l3m-stat-num\">Certifications</div><div class=\"l3m-stat-lbl\">Reconnues</div></div></div>";
+        hero.insertAdjacentElement("afterend", stats);
+    }
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",applyHeroBg);
+else applyHeroBg();
+})();</script>';
+} else {
+    $html .= '<script>(function(){
+function applyHeroBg(){
+    var hero=document.querySelector(".mb2-pb-fpsection")||document.querySelector(".mb2-pb-section");
+    if(!hero) return;
+    window.L3M_HERO=hero;
     var inner=hero.querySelector(".mb2-pb-section-inner,.section-inner");
     if(inner){
-        inner.style.setProperty("background-image","url(\"/theme/mb2nl/pix/hero_bg.jpg\")","important");
+        inner.style.setProperty("background-image","url(\\"/theme/mb2nl/pix/hero_bg.jpg\\")","important");
         inner.style.setProperty("background-size","cover","important");
         inner.style.setProperty("background-position","center center","important");
         inner.style.setProperty("background-repeat","no-repeat","important");
@@ -707,6 +868,7 @@ function applyHeroBg(){
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",applyHeroBg);
 else applyHeroBg();
 })();</script>';
+}
 }
 
 
@@ -1361,6 +1523,306 @@ $html .= '<style>
 #l3m-hsearch button{background:none;border:none;cursor:pointer;color:#C9A227;font-size:16px;padding:4px 6px;display:flex;align-items:center}
 #theme-search-btn{display:none!important}
 </style>';
+
+
+// [L3M] Navigation dark premium
+$html .= '<style>
+/* ── Background header dark + variables dropdown ────────── */
+#main-header .master-header-inner-bg,
+#main-header { background:#1A1A1A !important; }
+#main-header .header-innner { border-bottom: none !important; }
+
+/* Écrasement des variables CSS du menu mb2mm */
+#main-header {
+  --mb2mm-ddbgcolor: #1A1A1A;
+  --mb2mm-mddbgcolor: #1A1A1A;
+  --mb2mm-ddcolor: #ffffff;
+  --mb2mm-ddhcolor: #C9A227;
+  --mb2mm-ddhbgcolor: rgba(255,255,255,.06);
+  --mb2mm-ddsubcolor: rgba(255,255,255,.6);
+  --mb2mm-ddsubhcolor: #C9A227;
+  --mb2mm-ddbordercolor: rgba(255,255,255,.09);
+  --mb2mm-hcolor: #ffffff;
+  --mb2mm-hhcolor: #C9A227;
+}
+
+/* ── Nav liens ──────────────────────────────────────────── */
+/* ── Nav liens blancs gras ──────────────────────────────── */
+#main-header .mb2mm a.mb2mm-action,
+#main-header .mb2mm a.mb2mm-action span,
+#main-header .mb2mm a.mb2mm-action .mb2mm-label,
+#main-header .mb2mm a.mb2mm-action .mb2mm-item-content {
+  color:rgba(255,255,255,.82) !important;
+  font-size:14px !important;
+  font-weight:700 !important;
+  letter-spacing:.02em !important;
+  transition:color .18s !important;
+}
+#main-header .mb2mm > li.level-1 > a.mb2mm-action:hover,
+#main-header .mb2mm > li.level-1 > a.mb2mm-action:hover span {
+  color:#fff !important;
+}
+/* Lien actif gold — classe posée par JS */
+#main-header .mb2mm > li.level-1 > a.l3m-nav-active,
+#main-header .mb2mm > li.level-1 > a.l3m-nav-active span {
+  color:#C9A227 !important;
+}
+#main-header .mb2mm > li.level-1 > a.l3m-nav-active {
+  border-bottom:2.5px solid #C9A227 !important;
+  padding-bottom:3px !important;
+}
+
+
+/* ── Alignement : logo gauche, nav centré, outils droite ── */
+#main-header .flexcols {
+  display:flex !important;
+  align-items:center !important;
+  justify-content:space-between !important;
+  gap:0 !important;
+}
+#main-header .logo-wrap {
+  flex:0 0 auto !important;
+  margin-right:32px !important;
+}
+#main-header #main-navigation {
+  flex:1 1 auto !important;
+  display:flex !important;
+  align-items:center !important;
+}
+#main-header .navigation-header {
+  flex:1 1 auto !important;
+}
+#main-header ul.mb2mm {
+  display:flex !important;
+  align-items:center !important;
+  gap:6px !important;
+  padding:0 !important;
+  margin:0 !important;
+}
+#main-header ul.mb2mm > li.level-1 {
+  padding:0 !important;
+}
+#main-header ul.mb2mm > li.level-1 > a.mb2mm-action {
+  padding:6px 14px !important;
+  display:flex !important;
+  align-items:center !important;
+  height:54px !important;
+}
+/* Outils (search, avatar) collés à droite */
+#main-header .header-tools {
+  flex:0 0 auto !important;
+  margin-left:16px !important;
+}
+
+/* ── Dropdown menus fond noir + texte blanc ──────────────── */
+.mb2mm-dd { background:#1A1A1A !important; }
+.mb2mm-dd * { background:transparent !important; }
+.mb2mm-dd,
+.mb2mm-dd li,
+.mb2mm-dd a,
+.mb2mm-dd a span,
+.mb2mm-dd .mb2mm-label {
+  color:#fff !important;
+}
+.mb2mm-dd { border-top:2.5px solid #C9A227 !important; box-shadow:0 8px 24px rgba(0,0,0,.45) !important; }
+.mb2mm-dd a:hover, .mb2mm-dd a:hover span { color:#C9A227 !important; }
+
+/* ── Bouton "Mon espace" → pill or ─────────────────────── */
+#btn-menu-logincontainer {
+  background:#C9A227 !important;
+  border-radius:4px !important;
+  padding:6px 16px !important;
+  flex-direction:row !important;
+  gap:6px !important;
+  align-items:center !important;
+  font-size:12px !important;
+  font-weight:700 !important;
+  letter-spacing:.05em !important;
+  margin-left:8px !important;
+}
+#btn-menu-logincontainer i.icon1,
+#btn-menu-logincontainer .label {
+  color:#1A1A1A !important;
+  margin-top:0 !important;
+  font-size:12px !important;
+}
+
+/* ── Tous les boutons / icônes header en blanc ───────────── */
+#main-header .header-tools-link,
+#main-header .header-tools-link i,
+#main-header .header-tools-link .text1,
+#main-header .header-mtools-link,
+#main-header .header-mtools-link i,
+#main-header [data-region="popover-region-messages"] button,
+#main-header [data-region="popover-region-messages"] i,
+#main-header .popover-region-toggle i,
+#main-header .count-container,
+#btn-menu-searchcontainer,
+#btn-menu-searchcontainer i.icon1,
+#btn-menu-searchcontainer .label {
+  color:rgba(255,255,255,.75) !important;
+  margin-top:0 !important;
+}
+#main-header .header-tools-link:hover,
+#main-header .header-tools-link:hover i,
+#main-header .header-mtools-link:hover i {
+  color:#fff !important;
+}
+/* Sauf "Mon espace" qui reste gold */
+#main-header .header-tools-link.loginbtn,
+#main-header .header-tools-link.loginbtn i,
+#main-header .header-tools-link.loginbtn .text1 {
+  color:#1A1A1A !important;
+}
+
+/* ── Barre recherche compacte & premium ──────────────────── */
+#l3m-hsearch {
+  background:rgba(255,255,255,.07) !important;
+  border:1.5px solid rgba(255,255,255,.18) !important;
+  border-radius:20px !important;
+  height:36px !important;
+  padding:0 8px 0 14px !important;
+  max-width:200px !important;
+  transition:border-color .2s, max-width .2s !important;
+}
+#l3m-hsearch:focus-within {
+  border-color:#C9A227 !important;
+  background:rgba(255,255,255,.11) !important;
+  max-width:230px !important;
+}
+#l3m-hsearch input { color:#fff !important; font-size:12.5px !important; width:130px !important; }
+#l3m-hsearch input::placeholder { color:rgba(255,255,255,.38) !important; }
+#l3m-hsearch button { color:#C9A227 !important; font-size:15px !important; }
+
+/* ── Avatar utilisateur — contour or ─────────────────────── */
+#main-header .userinitials,
+#main-header .user-picture .userinitials {
+  background:#111 !important;
+  color:#C9A227 !important;
+  border:2px solid #C9A227 !important;
+  font-weight:700 !important;
+  font-size:13px !important;
+}
+#main-header .user-picture img {
+  border:2px solid #C9A227 !important;
+  border-radius:50% !important;
+}
+
+/* ── Icône personne (mtool-login) : masquée ──────────────── */
+#main-header .header-mtools-link.mtool-login,
+#main-header .header-tools-link.mtool-login { display:none !important; }
+
+/* ── Icône message — style premium ───────────────────────── */
+#main-header [data-region="popover-region-messages"] .popover-region-toggle {
+  width:38px !important; height:38px !important;
+  display:inline-flex !important;
+  align-items:center !important; justify-content:center !important;
+  border-radius:50% !important;
+  background:rgba(255,255,255,.08) !important;
+  border:1.5px solid rgba(255,255,255,.22) !important;
+  transition:border-color .2s, background .2s !important;
+  position:relative !important;
+}
+#main-header [data-region="popover-region-messages"] .popover-region-toggle:hover {
+  border-color:#C9A227 !important;
+  background:rgba(201,162,39,.12) !important;
+}
+#main-header [data-region="popover-region-messages"] .popover-region-toggle i,
+#main-header [data-region="popover-region-messages"] .popover-region-toggle .fa {
+  font-size:17px !important;
+  color:#fff !important;
+}
+/* Badge compteur messages */
+#main-header [data-region="popover-region-messages"] .count-container {
+  background:#C9A227 !important;
+  color:#111 !important;
+  font-size:9px !important;
+  font-weight:700 !important;
+  min-width:16px !important;
+  height:16px !important;
+  border-radius:8px !important;
+  top:-3px !important; right:-3px !important;
+}
+
+/* ── Masquer texte labels dans header tools ───────────────── */
+[data-region="popover-region-messages"] .text1,
+[data-region="popover-region-messages"] span:not(.icon):not(.count-container):not([aria-hidden="true"]):not(.sr-only),
+#main-header .header-tools-link .text1,
+#main-header .header-mtools-link .text1 { display:none !important; }
+
+/* ── Espacement zone droite ───────────────────────────────── */
+#main-header .header-tools { display:flex !important; align-items:center !important; gap:10px !important; }
+
+/* ── Hamburger menu mobile ───────────────────────────────── */
+#main-header .show-menu i { color:#fff !important; }
+
+/* ── Menu extracontent contrôles ─────────────────────────── */
+.menu-extracontent-controls { gap:4px !important; }
+</style>';
+
+$html .= '<script>(function(){
+// Dropdown fond noir + texte blanc via inline styles
+function l3mDropdown(){
+    document.querySelectorAll(".mb2mm-dd").forEach(function(dd){
+        dd.style.setProperty("background","#1A1A1A","important");
+        dd.style.setProperty("border-top","2.5px solid #C9A227","important");
+        dd.style.setProperty("box-shadow","0 8px 24px rgba(0,0,0,.5)","important");
+        dd.querySelectorAll("a, span, li").forEach(function(el){
+            el.style.setProperty("background","transparent","important");
+            if(el.tagName==="A"||el.tagName==="SPAN"||el.tagName==="LI"){
+                el.style.setProperty("color","#fff","important");
+            }
+        });
+        dd.querySelectorAll("a").forEach(function(a){
+            a.addEventListener("mouseenter",function(){
+                a.style.setProperty("color","#C9A227","important");
+            });
+            a.addEventListener("mouseleave",function(){
+                a.style.setProperty("color","#fff","important");
+            });
+        });
+    });
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",l3mDropdown);
+else l3mDropdown();
+// Re-appliquer au hover sur items parents (dropdown apparaît après)
+document.querySelectorAll(".mb2mm > li.isparent").forEach(function(li){
+    li.addEventListener("mouseenter",function(){setTimeout(l3mDropdown,50);});
+    li.addEventListener("click",function(){setTimeout(l3mDropdown,50);});
+});
+})();</script>';
+
+$html .= '<style>
+/* CSS override logo-light src */
+.main-logo img.logo-light {
+  content: url("/theme/mb2nl/pix/logo_l3m_white.png") !important;
+}
+</style>';
+$html .= '<script>(function(){
+function l3mLogo(){
+    var img = document.querySelector(".main-logo img.logo-light, .logo-wrap img.logo-light");
+    if(!img) return;
+    img.setAttribute("src","/theme/mb2nl/pix/logo_l3m_white.png?v=3");
+    img.style.setProperty("height","40px","important");
+    img.style.setProperty("width","auto","important");
+}
+l3mLogo();
+document.addEventListener("DOMContentLoaded", l3mLogo);
+setTimeout(l3mLogo, 200);
+setTimeout(l3mLogo, 800);
+})();</script>';
+
+$html .= '<script>(function(){
+function l3mNavActive(){
+    var cur=window.location.pathname.replace(/\/$/,"");
+    document.querySelectorAll("#main-header ul.mb2mm > li.level-1 > a.mb2mm-action").forEach(function(a){
+        var p=new URL(a.href,window.location.origin).pathname.replace(/\/$/,"");
+        if(p===cur||(cur===""&&p===""))a.classList.add("l3m-nav-active");
+    });
+}
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",l3mNavActive);
+else l3mNavActive();
+})();</script>';
 
 $html .= '<script>(function(){
 function go(){
