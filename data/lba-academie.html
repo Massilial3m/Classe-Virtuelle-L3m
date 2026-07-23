@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>La Bonne Allure | Devenez enseignant·e de la conduite (Titre pro ECSR)</title>
+<meta name="description" content="Formation au Titre professionnel d'Enseignant de la conduite et de la sécurité routière (ECSR), RNCP niveau 4. Méthode hybride : e-learning, classes virtuelles avec des formateurs qualifiés, pratique près de chez vous. Finançable CPF / France Travail.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy:#1C293B; --navy2:#243347; --teal:#379F8C; --teal-d:#2A8272;
+    --gold:#FF8A00; --gold-d:#E67A00; --cream:#FAFAFA; --ink:#1C293B;
+    --muted:#5F6E7A; --line:#E5E5E5; --card:#ffffff;
+    --coral:#EC6E64;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:'Poppins',system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:var(--cream);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .serif{font-family:Georgia,"Times New Roman",serif}
+  h1,h2,h3,h4{font-family:'Poppins',system-ui,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 24px}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:14px 26px;border-radius:10px;font-weight:700;font-size:15px;cursor:pointer;border:0;transition:.15s;line-height:1}
+  .btn-gold{background:#FF8A00;color:#FFFFFF}
+  .btn-gold:hover{background:#E67A00}
+  .btn-ghost{background:transparent;color:#fff;border:1.5px solid rgba(255,255,255,.35)}
+  .btn-ghost:hover{border-color:#fff}
+  .btn-teal{background:#379F8C;color:#FFFFFF}
+  .btn-teal:hover{background:#2A8272}
+  .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:12px;font-weight:700;color:var(--teal)}
+  h2{font-size:34px;line-height:1.15;font-weight:800;letter-spacing:-.01em;margin:10px 0 14px}
+  section{padding:72px 0}
+  .lead{font-size:18px;color:var(--muted);max-width:680px}
+
+  /* Header */
+  header{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.96);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .nav{display:flex;align-items:center;justify-content:space-between;height:74px;color:var(--ink)}
+  .logo{display:flex;align-items:center;gap:12px;font-weight:800;font-size:20px;color:var(--ink);text-decoration:none}
+  .logo svg{width:42px;height:auto;flex-shrink:0}
+  .logo .brand{display:flex;flex-direction:column;line-height:1;gap:3px}
+  .logo .brand b{font-weight:800;letter-spacing:-.02em;color:var(--teal-d);font-size:17px}
+  .logo .brand small{font-size:11px;color:var(--gold-d);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .nav nav{display:flex;gap:26px;font-size:15px;font-weight:600}
+  .nav nav a{opacity:.75;color:var(--ink)}.nav nav a:hover{opacity:1;color:var(--teal-d)}
+  .nav .cta{display:flex;gap:12px;align-items:center}
+  @media(max-width:860px){.nav nav{display:none}}
+
+  /* Hero */
+  .hero{background:linear-gradient(160deg,#1C293B 0%,#243347 100%);color:#fff;padding:84px 0 92px;position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;right:-120px;top:-60px;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,rgba(243,150,27,.25),transparent 70%)}
+  .hero:before{content:"";position:absolute;left:-100px;bottom:-80px;width:340px;height:340px;border-radius:50%;background:radial-gradient(circle,rgba(55,159,140,.18),transparent 70%)}
+  .hero .tag{display:inline-block;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);padding:7px 14px;border-radius:100px;font-size:12.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--gold)}
+  .hero h1{font-size:52px;line-height:1.05;font-weight:800;letter-spacing:-.02em;margin:22px 0 18px;max-width:760px}
+  .hero h1 em{font-style:normal;color:var(--gold)}
+  .hero p{font-size:18px;color:rgba(255,255,255,.82);max-width:640px}
+  .hero .actions{display:flex;gap:14px;margin:30px 0 34px;flex-wrap:wrap}
+  .hero .points{display:flex;gap:26px;flex-wrap:wrap;font-size:14.5px;color:rgba(255,255,255,.9)}
+  .hero .points div{display:flex;gap:9px;align-items:flex-start;max-width:250px}
+  .hero .points b{color:var(--gold);font-size:16px}
+  @media(max-width:640px){.hero h1{font-size:36px}}
+
+  /* Badges strip */
+  .badges{background:var(--navy2);color:#fff;padding:0}
+  .badges .row{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:rgba(255,255,255,.08)}
+  .badges .b{background:var(--navy2);padding:22px 20px}
+  .badges .b .k{font-weight:800;font-size:16px;display:flex;align-items:center;gap:9px}
+  .badges .b .s{font-size:13px;color:rgba(255,255,255,.6);margin-top:3px}
+  .chip{width:34px;height:24px;border-radius:5px;background:var(--gold);color:var(--navy);font-size:11px;font-weight:800;display:inline-flex;align-items:center;justify-content:center}
+  @media(max-width:760px){.badges .row{grid-template-columns:repeat(2,1fr)}}
+
+  /* Method */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:36px}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px}
+  .step .n{width:36px;height:36px;border-radius:9px;background:var(--teal);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;margin-bottom:14px}
+  .step h3{font-size:18px;margin-bottom:8px}
+  .step p{font-size:14.5px;color:var(--muted)}
+  .callout{margin-top:26px;background:#eef4f1;border:1px solid #d5e5df;border-radius:14px;padding:20px 24px;font-size:15px;color:var(--teal-d)}
+  @media(max-width:760px){.steps{grid-template-columns:1fr}}
+
+  /* Platform */
+  .platform{background:var(--navy);color:#fff}
+  .platform .grid{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center}
+  .platform ul{list-style:none;margin-top:20px}
+  .platform li{padding:11px 0;border-bottom:1px solid rgba(255,255,255,.1);font-size:15px;display:flex;gap:10px}
+  .platform li:before{content:"▸";color:var(--gold);font-weight:800}
+  .mock{background:#fff;color:var(--ink);border-radius:16px;padding:22px;box-shadow:0 20px 50px rgba(0,0,0,.3)}
+  .mock .top{display:flex;justify-content:space-between;align-items:center;font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700}
+  .mock .av{width:30px;height:30px;border-radius:50%;background:var(--teal);color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center}
+  .mock .prog{margin:16px 0;font-size:13px;color:var(--muted)}
+  .mock .bar{height:8px;background:#eee;border-radius:6px;margin-top:6px;overflow:hidden}
+  .mock .bar i{display:block;height:100%;width:52%;background:var(--teal)}
+  .mock .item{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-top:1px solid var(--line);font-size:14px}
+  .mock .item span.pill{font-size:11px;font-weight:700;padding:4px 9px;border-radius:100px;background:#eef4f1;color:var(--teal-d)}
+  @media(max-width:760px){.platform .grid{grid-template-columns:1fr}}
+
+  /* Formation */
+  .formation .box{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:34px;margin-top:22px}
+  .formation h3{font-size:23px}
+  .formation .subtitle{color:var(--teal);font-weight:700;font-size:14px;margin-bottom:16px}
+  .tags{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 18px}
+  .tags span{font-size:12.5px;font-weight:700;background:#eef4f1;color:var(--teal-d);padding:6px 12px;border-radius:100px}
+  .formation ul{margin:8px 0 20px 0;padding-left:20px;color:var(--ink)}
+  .formation ul li{margin:7px 0;font-size:15px}
+  .finance{background:#fbf6e9;border:1px solid #efdca8;border-radius:12px;padding:16px 20px;font-size:15px;margin-bottom:18px}
+
+  /* Réseau / two-col */
+  .reseau{background:#eef4f1}
+  .reseau .quote{margin-top:20px;font-size:15px;color:var(--teal-d);font-style:italic;border-left:3px solid var(--teal);padding-left:16px}
+
+  /* Process */
+  .proc{counter-reset:s}
+  .proc .p{display:flex;gap:20px;padding:22px 0;border-bottom:1px solid var(--line)}
+  .proc .p .num{counter-increment:s;min-width:44px;height:44px;border-radius:11px;background:var(--navy);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center}
+  .proc .p .num:before{content:counter(s)}
+  .proc .p .when{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:var(--teal);font-weight:700}
+  .proc .p h4{font-size:17px;margin:2px 0 4px}
+  .proc .p p{font-size:14.5px;color:var(--muted);max-width:720px}
+
+  /* Testimonials */
+  .tst{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:34px}
+  .tst .c{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}
+  .tst .c p{font-size:15px}
+  .tst .who{display:flex;gap:11px;align-items:center;margin-top:18px}
+  .tst .who .a{width:38px;height:38px;border-radius:50%;background:var(--teal);color:#fff;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center}
+  .tst .who b{display:block;font-size:14px}.tst .who small{color:var(--muted)}
+  @media(max-width:760px){.tst{grid-template-columns:1fr}}
+
+  /* Recruit */
+  .recruit{background:var(--navy);color:#fff}
+  .recruit .card{display:flex;justify-content:space-between;gap:30px;align-items:center;flex-wrap:wrap}
+
+  /* Contact */
+  .contact{background:linear-gradient(160deg,#123f42,#0e2733);color:#fff}
+  form{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:26px;max-width:640px}
+  form .full{grid-column:1/3}
+  .contact-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:36px;margin-top:26px;align-items:start}
+  .contact-grid form{margin-top:0;max-width:none}
+  .chans{display:flex;flex-direction:column;gap:14px}
+  .chans .ch{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:18px 22px;font-size:14.5px;line-height:1.5;color:rgba(255,255,255,.85)}
+  .chans .ch b{display:block;color:var(--gold);font-size:15.5px;margin-bottom:4px}
+  @media(max-width:900px){.contact-grid{grid-template-columns:1fr}}
+  label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:rgba(255,255,255,.7);display:block;margin-bottom:6px}
+  input,select{width:100%;padding:13px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.06);color:#fff;font-size:15px}
+  input::placeholder{color:rgba(255,255,255,.4)}
+  .tiny{font-size:12.5px;color:rgba(255,255,255,.55);margin-top:12px}
+  @media(max-width:640px){form{grid-template-columns:1fr}form .full{grid-column:1}}
+
+  /* Footer */
+  footer{background:#08191f;color:rgba(255,255,255,.7);padding:52px 0 30px;font-size:14px}
+  .fgrid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:30px}
+  footer h5{color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:14px}
+  footer a{display:block;padding:5px 0;opacity:.8}footer a:hover{opacity:1}
+  .legal{border-top:1px solid rgba(255,255,255,.1);margin-top:34px;padding-top:20px;font-size:12.5px;color:rgba(255,255,255,.45);line-height:1.7}
+  @media(max-width:760px){.fgrid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a href="#" class="logo" aria-label="La Bonne Allure, Accueil">
+      <img src="/logo-la-bonne-allure.png" alt="La Bonne Allure" style="height:62px;width:auto">
+    </a>
+    <nav>
+      <a href="#methode">La méthode</a>
+      <a href="#formation">La formation</a>
+      <a href="#reseau">Le réseau</a>
+      <a href="#process">Comment ça se passe</a>
+      <a href="#contact">Contact</a>
+    </nav>
+    <div class="cta"><a href="#contact" class="btn btn-gold">Être conseillé·e</a></div>
+  </div>
+</header>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <span class="tag">Organisme de formation · Rentrée prioritaire ouverte</span>
+    <h1>Reprenez le volant de <em>votre carrière.</em></h1>
+    <p>Devenez enseignant·e de la conduite, un métier de terrain qui offre un titre reconnu par l'État et l'autonomie que vous êtes venu·e chercher. Que vous soyez en reconversion ou que vous rouliez déjà pour votre compte (VTC, chauffeur indépendant), ce parcours vous mène, étape par étape, jusqu'au titre professionnel.</p>
+    <div class="actions">
+      <a href="#contact" class="btn btn-gold">Voir si je suis éligible →</a>
+      <a href="#contact" class="btn btn-ghost">Parler à un·e conseiller·ère</a>
+    </div>
+    <div class="points">
+      <div><b>✓</b><span>Titre professionnel reconnu par l'État -<b style="font-size:14.5px">RNCP niveau 4</b></span></div>
+      <div><b>✓</b><span>Formation finançable par le CPF et France Travail</span></div>
+      <div><b>✓</b><span>Formateurs qualifiés BAFM, de vrais professionnels de la route</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- BADGES -->
+<div class="badges">
+  <div class="wrap"><div class="row">
+    <div class="b"><div class="k"><span class="chip">QU</span> Qualiopi</div><div class="s">Démarche en cours</div></div>
+    <div class="b"><div class="k"><span class="chip">CPF</span> CPF</div><div class="s">Formation éligible</div></div>
+    <div class="b"><div class="k"><span class="chip">FT</span> France Travail</div><div class="s">Financements possibles</div></div>
+    <div class="b"><div class="k"><span class="chip">RN</span> RNCP niv. 4</div><div class="s">Titre reconnu par l'État</div></div>
+  </div></div>
+</div>
+
+<!-- MÉTHODE -->
+<section id="methode">
+  <div class="wrap">
+    <span class="eyebrow">La méthode</span>
+    <h2>Une formation qui s'adapte à votre quotidien</h2>
+    <p class="lead" style="max-width:none">Vous avez déjà un rythme de vie, parfois une activité en cours (VTC, salariat). Notre parcours s'organise autour de vous : consolider en ligne à votre rythme, apprendre en direct avec des professionnels, pratiquer sur le terrain près de chez vous.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <h3>E-learning</h3>
+        <p>Le socle que vous travaillez en autonomie. Modules courts, exercices concrets, mise en application immédiate, pour renforcer les notions vues en classe virtuelle et avancer entre deux missions.</p>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <h3>Classes virtuelles</h3>
+        <p>L'expertise de vrais professionnels de la route, en direct. Formateurs BAFM et spécialistes (pédagogie, psychologie de l'apprentissage, droit routier) en visioconférence. Un enseignement structuré, avec un vrai suivi individuel.</p>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <h3>Présentiel de proximité</h3>
+        <p>La pratique, sur le terrain, près de chez vous. Un moniteur qualifié de votre région vous accompagne. Aucun déplacement national ni hébergement à organiser pendant la formation pratique.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PLATEFORME -->
+<section class="platform">
+  <div class="wrap grid">
+    <div>
+      <span class="eyebrow" style="color:var(--gold)">La plateforme</span>
+      <h2>Un espace, un calendrier, zéro improvisation</h2>
+      <p style="color:rgba(255,255,255,.8)">Vous gardez le contrôle total de votre temps : modules, classes virtuelles, séances de conduite, tout est centralisé. Ce même sens de l'organisation qui fait un bon indépendant, appliqué à votre formation.</p>
+      <ul>
+        <li>Vos modules e-learning, avec votre progression suivie par votre formateur référent</li>
+        <li>Vos classes virtuelles : horaires, rappels, accès en un clic</li>
+        <li>Vos séances de conduite et votre stage : dates, lieux, convocations</li>
+        <li>Vos documents, votre messagerie formateur et votre dossier professionnel</li>
+      </ul>
+    </div>
+    <div class="mock">
+      <div class="top"><span>Mon espace · Parcours ECSR</span><span class="av">KT</span></div>
+      <div class="prog">Module 14/28 · L'évaluation formative<div class="bar"><i></i></div></div>
+      <div class="item"><span>Chapitre : la pédagogie par objectifs</span><span class="pill">à faire</span></div>
+      <div class="item"><span>Classe virtuelle : psychologie de l'apprenant</span><span class="pill">Rejoindre</span></div>
+      <div class="item"><span>Séance de conduite : [votre ville]</span><span class="pill">Confirmé</span></div>
+      <div class="item"><span>Stage en auto-école partenaire</span><span class="pill">Planifié</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- FORMATION -->
+<section id="formation" class="formation">
+  <div class="wrap">
+    <span class="eyebrow">Notre formation</span>
+    <h2>Une formation pensée pour les métiers de terrain</h2>
+    <p class="lead" style="max-width:none">E-learning, classes virtuelles, séances pratiques : chaque format vous rapproche d'un métier utile, recherché, où vous choisissez votre secteur et, à terme si vous le souhaitez, votre propre structure.</p>
+    <div class="box">
+      <h3>Enseignant·e de la conduite (ECSR)</h3>
+      <div class="subtitle">Titre professionnel · RNCP niveau 4</div>
+      <div class="tags"><span>E-learning</span><span>Classes virtuelles</span><span>Séances pratiques + stage</span></div>
+      <ul>
+        <li>Des formateurs BAFM qui ont eux-mêmes vécu la route et l'enseignement, pas des théoriciens.</li>
+        <li>Un suivi individuel à chaque séance de conduite : on corrige vos gestes, pas juste vos notes.</li>
+        <li>Un moniteur de votre région, pour construire dès maintenant le réseau professionnel qui vous emploiera.</li>
+        <li>Prérequis principal : permis B en cours de validité (hors période probatoire). Pas de diplôme exigé, juste un test écrit et un entretien d'entrée.</li>
+      </ul>
+      <div class="finance">CPF, France Travail, ou transition VTC → ECSR : on regarde avec vous ce qui finance votre projet.</div>
+      <a href="#contact" class="btn btn-teal">Je veux étudier mon financement</a>
+    </div>
+  </div>
+</section>
+
+<!-- RÉSEAU -->
+<section id="reseau" class="reseau">
+  <div class="wrap">
+    <span class="eyebrow">Notre réseau</span>
+    <h2>Votre réseau professionnel, là où vous vivez</h2>
+    <p class="lead">Un organisme classique vous forme là où il a ses locaux. La Bonne Allure vous forme là où vous vivez : un réseau d'auto-écoles partenaires partout en France accueille nos stagiaires, et beaucoup les recrutent directement à la sortie.</p>
+    <div class="quote">Une formation pensée pour votre bassin d'emploi, pas pour le nôtre. Seul l'examen final du titre se déroule en présentiel, à Montlhéry : c'est la seule période pour laquelle un hébergement peut être à prévoir.</div>
+  </div>
+</section>
+
+<!-- PROCESS -->
+<section id="process">
+  <div class="wrap">
+    <span class="eyebrow">Comment ça se passe</span>
+    <h2>De votre premier contact à votre diplôme</h2>
+    <div class="proc">
+      <div class="p"><div class="num"></div><div><div class="when">2 minutes</div><h4>Vous nous écrivez</h4><p>Formulaire, WhatsApp ou téléphone. Pas de compte à créer, pas d'engagement.</p></div></div>
+      <div class="p"><div class="num"></div><div><div class="when">Sous 24 h ouvrées</div><h4>Un·e conseiller·ère vous rappelle</h4><p>On regarde votre projet, vos prérequis et votre financement, et on vous dit franchement si cette formation est faite pour vous.</p></div></div>
+      <div class="p"><div class="num"></div><div><div class="when">Sur rendez-vous</div><h4>Dossier et évaluation d'entrée</h4><p>Permis B en cours de validité (hors période probatoire), test écrit et entretien. Aucun diplôme exigé.</p></div></div>
+      <div class="p"><div class="num"></div><div><div class="when">Toutes les 2 semaines</div><h4>Votre rentrée</h4><p>Un rythme de rentrées rapide, rendu possible par une théorie essentiellement en visioconférence et un large réseau de moniteurs partout en France.</p></div></div>
+      <div class="p"><div class="num"></div><div><div class="when">Jusqu'au titre</div><h4>Vous suivez votre parcours</h4><p>E-learning, classes virtuelles, séances de conduite près de chez vous : un calendrier hybride, jusqu'à l'examen final à Montlhéry.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- TÉMOIGNAGES -->
+<section style="background:#eef4f1">
+  <div class="wrap">
+    <span class="eyebrow">Ils en parlent mieux que nous</span>
+    <h2>Ce que nos stagiaires nous disent</h2>
+    <div class="tst">
+      <div class="c"><p>« En reconversion après dix ans de VTC, j'ai pu suivre la théorie en visio le temps de réorganiser mon activité, et faire la conduite près de chez moi. J'ai eu mon titre. »</p><div class="who"><span class="a">KT</span><span><b>Karim T.</b><small>Enseignant de la conduite</small></span></div></div>
+      <div class="c"><p>« Ce qui a fait la différence, c'est le formateur référent joignable tout du long. Quand j'ai bloqué sur la pédagogie par objectifs, on a repris la notion en visio en trente minutes. »</p><div class="who"><span class="a">JM</span><span><b>Julie M.</b><small>Enseignante de la conduite</small></span></div></div>
+      <div class="c"><p>« Aucun déplacement national à gérer pendant la formation : j'ai gardé mon emploi jusqu'à l'examen. Le seul présentiel, c'était l'examen final. »</p><div class="who"><span class="a">SR</span><span><b>Samir R.</b><small>Enseignant de la conduite</small></span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- RECRUTEMENT -->
+<section class="recruit">
+  <div class="wrap card">
+    <div style="max-width:640px">
+      <span class="eyebrow" style="color:var(--gold)">Recrutement</span>
+      <h2 style="color:#fff">Vous êtes formateur·rice ? Ce modèle est aussi pensé pour vous.</h2>
+      <p style="color:rgba(255,255,255,.8)">Enseignant·e de la conduite expérimenté·e, titulaire du BAFM : intervenez sur les créneaux qui vous conviennent, en visioconférence ou en accompagnement de proximité. Vous enseignez ; la plateforme gère les supports, le suivi des élèves et les émargements.</p>
+    </div>
+    <a href="#contact" class="btn btn-gold">Proposer ma candidature</a>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section id="contact" class="contact">
+  <div class="wrap">
+    <span class="eyebrow" style="color:var(--gold)">Contact</span>
+    <h2 style="color:#fff">Parlons de votre projet, sans engagement</h2>
+    <p style="color:rgba(255,255,255,.8);max-width:620px">Une question sur le parcours ou sur votre financement ? Un·e conseiller·ère vous répond sous 24 h ouvrées. Pas de standard, pas de robot.</p>
+    <div class="contact-grid">
+      <form id="lead-form">
+        <div><label>Prénom</label><input type="text" name="firstname" placeholder="Prénom" required></div>
+        <div><label>Nom</label><input type="text" name="lastname" placeholder="Nom" required></div>
+        <div><label>Téléphone</label><input type="tel" name="phone" placeholder="06 12 34 56 78" required></div>
+        <div><label>E-mail</label><input type="email" name="email" placeholder="vous@email.fr" required></div>
+        <div><label>Code postal</label><input type="text" name="postal_code" placeholder="Pour vous orienter"></div>
+        <div><label>Votre situation</label>
+          <select name="situation"><option>En reconversion (en poste)</option><option>Chauffeur VTC / indépendant</option><option>Demandeur d'emploi</option><option>Autre</option></select>
+        </div>
+        <input type="text" name="website" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" aria-hidden="true">
+        <div class="full"><button class="btn btn-gold" id="lead-submit" style="width:100%;justify-content:center">Être rappelé·e sous 24 h</button></div>
+        <p class="tiny full" id="lead-msg" style="display:none"></p>
+      </form>
+      <div class="chans">
+        <div class="ch"><b>WhatsApp</b>Réponse rapide, même le soir</div>
+        <div class="ch"><b>Appel direct</b>02 38 12 34 56 · sans standard, sans robot</div>
+        <div class="ch"><b>Rendez-vous en ligne</b>Visio de 20 min avec un·e conseiller·ère</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+          <img src="/logo-la-bonne-allure.png" alt="La Bonne Allure" style="height:52px;width:auto">
+        </div>
+        <p style="max-width:280px">Organisme de formation au métier d'enseignant de la conduite. Méthode hybride : e-learning, classes virtuelles avec des formateurs qualifiés, pratique de proximité.</p>
+      </div>
+      <div><h5>Formation</h5><a href="#formation">Enseignant·e de la conduite (ECSR)</a><a href="#methode">La méthode hybride</a><a href="#reseau">Notre réseau</a></div>
+      <div><h5>L'organisme</h5><a href="#recruit">Rejoindre l'équipe</a><a href="#">Espace élève</a><a href="#contact">Contact</a></div>
+      <div><h5>Contact</h5><a href="#">WhatsApp</a><a href="#">Être rappelé·e</a></div>
+    </div>
+    <div class="legal">
+      La Bonne Allure, organisme de formation professionnelle. Le Titre professionnel d'Enseignant de la conduite et de la sécurité routière (ECSR) est enregistré au RNCP sous le n° 35329, de niveau 4. L'examen du titre professionnel se déroule obligatoirement en présentiel, sur le site de Montlhéry.<br>
+      © 2026 La Bonne Allure · Mentions légales · Politique de confidentialité · CGV
+    </div>
+  </div>
+</footer>
+
+<script>
+document.getElementById('lead-form').addEventListener('submit', function(ev) {
+  ev.preventDefault();
+  var form = ev.target;
+  var btn = document.getElementById('lead-submit');
+  var msg = document.getElementById('lead-msg');
+  btn.disabled = true;
+  btn.textContent = 'Envoi en cours…';
+  fetch('/lba-lead.php', { method: 'POST', body: new FormData(form) })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      msg.style.display = 'block';
+      if (d.ok) {
+        form.reset();
+        form.querySelectorAll(':scope > div').forEach(function(el) { el.style.display = 'none'; });
+        msg.textContent = 'Merci ! Un·e conseiller·ère vous recontacte sous 24 h ouvrées.';
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Être rappelé·e sous 24 h';
+        msg.textContent = 'Erreur : ' + (d.msg || 'veuillez réessayer.');
+      }
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = 'Être rappelé·e sous 24 h';
+      msg.style.display = 'block';
+      msg.textContent = 'Erreur réseau, veuillez réessayer.';
+    });
+});
+</script>
+
+</body>
+</html>

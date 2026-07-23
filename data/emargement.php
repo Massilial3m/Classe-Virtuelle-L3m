@@ -10,6 +10,7 @@ $courseid  = optional_param('courseid', 0, PARAM_INT);
 $export    = optional_param('export', '', PARAM_ALPHA);
 $date_from = optional_param('date_from', '', PARAM_TEXT);
 $date_to   = optional_param('date_to', '', PARAM_TEXT);
+$embed     = optional_param('embed', 0, PARAM_INT);
 $gap_secs  = 30 * 60;
 
 $student_roleid = $DB->get_field('role', 'id', ['shortname' => 'student']);
@@ -153,64 +154,78 @@ if ($export === 'excel' && $student) {
     exit;
 }
 
-// PAGE
-$PAGE->set_url('/emargement.php');
-$PAGE->set_context(context_system::instance());
+// Page Moodle standard avec header/footer du thème
+$PAGE->set_url(new moodle_url('/emargement.php'));
 $PAGE->set_title('Émargement – L3M Formation');
-$PAGE->set_heading('Émargement – L3M Formation');
-echo $OUTPUT->header();
-?>
-<style>
-.l3m-em{max-width:980px;margin:0 auto;padding:20px 16px;}
-.l3m-em h2{color:#C9A227;margin-bottom:4px;}
-.l3m-em .subtitle{color:#888;font-size:13px;margin-bottom:24px;}
+$PAGE->set_heading('Émargement');
+$PAGE->set_pagelayout('standard');
+if ($embed) {
+    echo '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Émargement</title></head><body>';
+} else {
+    echo $OUTPUT->header();
+}
+?><style>
+a{color:#2E9488;}
+.l3m-em{max-width:980px;margin:0 auto;padding:20px 16px;color:#24333C;font-family:"Segoe UI",system-ui,sans-serif;}
+.l3m-em h2{color:#1C5F58;margin-bottom:4px;}
+.l3m-em .subtitle{color:#68767E;font-size:13px;margin-bottom:24px;}
 .l3m-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:24px;}
-.l3m-filters select{
-  padding:8px 16px;border-radius:6px;border:1.5px solid #C9A227;
-  background:#1A1A1A;color:#fff;font-size:13px;cursor:pointer;
+.l3m-filters select,
+.l3m-filters input[type=date]{
+  padding:8px 16px !important;border-radius:8px !important;
+  border:1.5px solid #E4E1D6 !important;
+  background:#F7F6F1 !important;
+  color:#24333C !important;
+  font-size:13px !important;cursor:pointer;font-family:inherit;
 }
 .btn-export{
   display:inline-flex;align-items:center;gap:6px;
-  padding:8px 18px;border-radius:6px;font-size:13px;font-weight:700;
+  padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;
   text-decoration:none;border:none;cursor:pointer;transition:opacity .15s;
 }
 .btn-export:hover{opacity:.85;}
 .btn-excel{background:#217346;color:#fff;}
 .btn-pdf{background:#c0392b;color:#fff;}
 .em-header-card{
-  background:#111;border:1px solid #333;border-radius:10px;
+  background:#FFFFFF;border:1px solid #E4E1D6;border-radius:12px;
   padding:16px 22px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;
 }
-.em-student-name{font-size:17px;font-weight:700;color:#fff;}
-.em-student-email{font-size:12px;color:#888;margin-top:2px;}
+.em-student-name{font-size:17px;font-weight:700;color:#24333C;}
+.em-student-email{font-size:12px;color:#68767E;margin-top:2px;}
 .em-stats{display:flex;gap:20px;flex-wrap:wrap;}
 .em-stat{text-align:center;}
-.em-stat-val{font-size:20px;font-weight:700;color:#C9A227;}
-.em-stat-lbl{font-size:11px;color:#888;text-transform:uppercase;}
-.l3m-em table{width:100%;border-collapse:collapse;font-size:13px;}
+.em-stat-val{font-size:20px;font-weight:700;color:#2E9488;}
+.em-stat-lbl{font-size:11px;color:#68767E;text-transform:uppercase;}
+.l3m-em table{width:100%;border-collapse:collapse;font-size:13px;background:#FFFFFF;}
 .l3m-em thead th{
-  background:#111;color:#888;text-transform:uppercase;font-size:11px;
-  padding:10px 12px;text-align:left;border-bottom:2px solid #333;white-space:nowrap;
+  background:#F7F6F1;color:#68767E;text-transform:uppercase;font-size:11px;
+  padding:10px 12px;text-align:left;border-bottom:2px solid #E4E1D6;white-space:nowrap;
 }
-.l3m-em tbody tr:hover{background:rgba(201,162,39,.06);}
-.l3m-em td{padding:9px 12px;border-bottom:1px solid #222;vertical-align:middle;}
-.date-cell{font-weight:600;color:#fff;white-space:nowrap;}
-.time-cell{color:#ccc;white-space:nowrap;}
-.dur-cell{color:#C9A227;font-weight:600;white-space:nowrap;}
-.mod-cell{color:#888;font-size:12px;}
-.em-total-row td{background:#1a1a1a;font-weight:700;color:#C9A227;border-top:2px solid #C9A227;}
-.em-generated{font-size:11px;color:#555;margin-top:14px;font-style:italic;}
+.l3m-em tbody tr{background:#FFFFFF;}
+.l3m-em tbody tr:nth-child(even){background:#FAF9F5;}
+.l3m-em tbody tr:hover{background:#E3F2EF;}
+.l3m-em td{padding:9px 12px;border-bottom:1px solid #E4E1D6;vertical-align:middle;}
+.date-cell{font-weight:600;color:#24333C !important;white-space:nowrap;}
+.time-cell{color:#68767E !important;white-space:nowrap;}
+.dur-cell{color:#1C5F58 !important;font-weight:600;white-space:nowrap;}
+.mod-cell{color:#68767E !important;font-size:12px;}
+.l3m-em td{color:#24333C !important;}
+.em-total-row td{background:#E3F2EF;font-weight:700;color:#1C5F58;border-top:2px solid #2E9488;}
+.em-generated{font-size:11px;color:#68767E;margin-top:14px;font-style:italic;}
 .overflow-x{overflow-x:auto;}
-.em-placeholder{color:#666;font-style:italic;text-align:center;padding:40px;font-size:14px;}
+.em-placeholder{color:#68767E;font-style:italic;text-align:center;padding:40px;font-size:14px;}
 </style>
 
 <div class="l3m-em">
+  <?php if (!$embed): ?>
   <h2>📋 Feuille d'émargement</h2>
   <p class="subtitle">Enregistrement automatique des sessions de connexion — plateforme L3M Formation</p>
+  <?php endif; ?>
 
   <form method="get">
+  <?php if ($embed): ?><input type="hidden" name="embed" value="1"><?php endif; ?>
   <div class="l3m-filters">
-      <select name="userid">
+      <select name="userid" style="background:#F7F6F1!important;color:#24333C!important">
         <option value="0">— Sélectionner un apprenant —</option>
         <?php foreach ($all_students as $s): ?>
           <option value="<?php echo $s->id; ?>"<?php echo $userid == $s->id ? ' selected' : ''; ?>>
@@ -218,7 +233,7 @@ echo $OUTPUT->header();
           </option>
         <?php endforeach; ?>
       </select>
-      <select name="courseid">
+      <select name="courseid" style="background:#F7F6F1!important;color:#24333C!important">
         <option value="0"<?php echo $courseid == 0 ? ' selected' : ''; ?>>— Tous les modules —</option>
         <?php foreach ($all_courses as $c): ?>
           <option value="<?php echo $c->id; ?>"<?php echo $courseid == $c->id ? ' selected' : ''; ?>>
@@ -228,7 +243,7 @@ echo $OUTPUT->header();
       </select>
       <input type="date" name="date_from" value="<?php echo $date_from; ?>" title="Du">
       <input type="date" name="date_to"   value="<?php echo $date_to; ?>"   title="Au">
-      <button type="submit" class="btn-export" style="background:#C9A227;color:#1A1A1A;">🔍 Filtrer</button>
+      <button type="submit" class="btn-export" style="background:#2E9488;color:#fff;">🔍 Filtrer</button>
       <?php if ($student && !empty($sessions)): ?>
         <a class="btn-export btn-excel" href="?userid=<?php echo $userid; ?>&courseid=<?php echo $courseid; ?>&date_from=<?php echo $date_from; ?>&date_to=<?php echo $date_to; ?>&export=excel">📊 Excel</a>
         <a class="btn-export btn-pdf"   href="?userid=<?php echo $userid; ?>&courseid=<?php echo $courseid; ?>&date_from=<?php echo $date_from; ?>&date_to=<?php echo $date_to; ?>&export=pdf">📄 PDF</a>
@@ -276,7 +291,7 @@ echo $OUTPUT->header();
       <tbody>
         <?php foreach ($sessions as $i => $s): ?>
           <tr>
-            <td style="color:#555;font-size:11px;"><?php echo $i + 1; ?></td>
+            <td style="font-size:11px;"><?php echo $i + 1; ?></td>
             <td class="date-cell"><?php echo date('d/m/Y', $s['start']); ?></td>
             <td class="time-cell"><?php echo date('H:i', $s['start']); ?></td>
             <td class="time-cell"><?php echo date('H:i', $s['end']); ?></td>
@@ -299,4 +314,28 @@ echo $OUTPUT->header();
   <?php endif; ?>
 </div>
 
-<?php echo $OUTPUT->footer(); ?>
+<script>
+(function(){
+  function forceSelectStyle(){
+    document.querySelectorAll('.l3m-filters select, .l3m-filters input[type=date]').forEach(function(el){
+      el.style.setProperty('background','#F7F6F1','important');
+      el.style.setProperty('color','#24333C','important');
+      el.style.setProperty('border','1.5px solid #E4E1D6','important');
+      el.style.setProperty('border-radius','8px','important');
+      el.style.setProperty('padding','8px 16px','important');
+      el.style.setProperty('font-size','13px','important');
+    });
+  }
+  forceSelectStyle();
+  document.addEventListener('DOMContentLoaded', forceSelectStyle);
+  setTimeout(forceSelectStyle, 300);
+  setTimeout(forceSelectStyle, 1000);
+
+})();
+</script>
+<?php
+if ($embed) {
+    echo '</body></html>';
+} else {
+    echo $OUTPUT->footer();
+}

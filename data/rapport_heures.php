@@ -7,6 +7,7 @@ require_capability('moodle/course:viewparticipants', context_system::instance())
 
 $courseid  = optional_param('courseid', 0, PARAM_INT);
 $export    = optional_param('export', '', PARAM_ALPHA); // 'excel' or 'pdf'
+$embed     = optional_param('embed', 0, PARAM_INT);
 $target_h  = 100;
 $gap_secs  = 30 * 60;
 
@@ -102,20 +103,24 @@ $PAGE->set_context(context_system::instance());
 $PAGE->set_title('Rapport d\'heures – L3M Formation');
 $PAGE->set_heading('Rapport d\'heures – L3M Formation');
 
-echo $OUTPUT->header();
+if ($embed) {
+    echo '<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Rapport d\'heures</title></head><body>';
+} else {
+    echo $OUTPUT->header();
+}
 ?>
 <style>
-.l3m-rapport{max-width:1100px;margin:0 auto;padding:20px 16px;}
-.l3m-rapport h2{color:#C9A227;margin-bottom:4px;}
-.l3m-rapport .subtitle{color:#111;font-size:13px;margin-bottom:24px;}
+.l3m-rapport{max-width:1100px;margin:0 auto;padding:20px 16px;color:#24333C;font-family:"Segoe UI",system-ui,sans-serif;}
+.l3m-rapport h2{color:#1C5F58;margin-bottom:4px;}
+.l3m-rapport .subtitle{color:#68767E;font-size:13px;margin-bottom:24px;}
 .l3m-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:24px;}
 .l3m-filters select{
-  padding:8px 16px;border-radius:6px;border:1.5px solid #C9A227;
-  background:#fff;color:#111;font-size:13px;cursor:pointer;border:1.5px solid #C9A227;
+  padding:8px 16px;border-radius:8px;border:1.5px solid #E4E1D6;
+  background:#F7F6F1;color:#24333C;font-size:13px;cursor:pointer;
 }
 .btn-export{
   display:inline-flex;align-items:center;gap:6px;
-  padding:8px 18px;border-radius:6px;font-size:13px;font-weight:700;
+  padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;
   text-decoration:none;border:none;cursor:pointer;transition:opacity .15s;
 }
 .btn-export:hover{opacity:.85;}
@@ -123,27 +128,30 @@ echo $OUTPUT->header();
 .btn-pdf{background:#c0392b;color:#fff;}
 .l3m-rapport table{width:100%;border-collapse:collapse;font-size:13px;}
 .l3m-rapport thead th{
-  background:#f0f0f0 !important;color:#111 !important;text-transform:uppercase;font-size:11px;
-  padding:10px 12px;text-align:left;border-bottom:2px solid #ccc;white-space:nowrap;
+  background:#F7F6F1 !important;color:#68767E !important;text-transform:uppercase;font-size:11px;
+  padding:10px 12px;text-align:left;border-bottom:2px solid #E4E1D6;white-space:nowrap;
 }
-.l3m-rapport tbody tr:hover{background:rgba(201,162,39,.06);}
-.l3m-rapport td{padding:10px 12px;border-bottom:1px solid #e5e5e5;vertical-align:middle;}
-.l3m-rapport td.total-cell{font-weight:700;color:#C9A227;}
+.l3m-rapport tbody tr:hover{background:#E3F2EF;}
+.l3m-rapport td{padding:10px 12px;border-bottom:1px solid #E4E1D6;vertical-align:middle;}
+.l3m-rapport td.total-cell{font-weight:700;color:#1C5F58;}
 .badge-ok{background:#27ae60;color:#fff;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700;}
-.badge-no{background:#e0e0e0;color:#333;padding:2px 10px;border-radius:12px;font-size:11px;}
-.progress-wrap{width:100px;background:#ddd;border-radius:10px;height:8px;display:inline-block;vertical-align:middle;margin-right:6px;}
-.progress-bar{height:8px;border-radius:10px;background:#C9A227;}
+.badge-no{background:#E4E1D6;color:#68767E;padding:2px 10px;border-radius:12px;font-size:11px;}
+.progress-wrap{width:100px;background:#E4E1D6;border-radius:10px;height:8px;display:inline-block;vertical-align:middle;margin-right:6px;}
+.progress-bar{height:8px;border-radius:10px;background:#2E9488;}
 .progress-bar.full{background:#27ae60;}
 .course-col{min-width:80px;text-align:center;}
 .overflow-x{overflow-x:auto;}
 </style>
 
 <div class="l3m-rapport">
+  <?php if (!$embed): ?>
   <h2>⏱ Rapport d'heures de formation</h2>
-  <p class="subtitle" style="color:#111 !important;">Seuil de facturation : <strong style="color:#111;"><?php echo $target_h; ?>h</strong> — Méthode : sessions de connexion (gap max 30 min)</p>
+  <p class="subtitle" style="color:#68767E !important;">Seuil de facturation : <strong style="color:#24333C;"><?php echo $target_h; ?>h</strong> — Méthode : sessions de connexion (gap max 30 min)</p>
+  <?php endif; ?>
 
   <div class="l3m-filters">
     <form method="get" style="display:contents">
+      <?php if ($embed): ?><input type="hidden" name="embed" value="1"><?php endif; ?>
       <select name="courseid" onchange="this.form.submit()">
         <option value="0"<?php echo $courseid == 0 ? ' selected' : ''; ?>>— Tous les modules —</option>
         <?php foreach ($all_courses as $c): ?>
@@ -161,37 +169,37 @@ echo $OUTPUT->header();
     </a>
   </div>
 
-  <p style="color:#111;font-size:13px;margin-bottom:16px;"><?php echo count($data); ?> apprenant(s)</p>
+  <p style="color:#68767E;font-size:13px;margin-bottom:16px;"><?php echo count($data); ?> apprenant(s)</p>
 
   <div class="overflow-x">
   <table>
     <thead>
       <tr>
-        <th style="color:#111 !important;">Apprenant</th>
-        <th style="color:#111 !important;">Email</th>
-        <th style="color:#111 !important;">Total heures</th>
-        <th style="color:#111 !important;">Progression</th>
-        <th style="color:#111 !important;">Facturable</th>
+        <th style="color:#68767E !important;">Apprenant</th>
+        <th style="color:#68767E !important;">Email</th>
+        <th style="color:#68767E !important;">Total heures</th>
+        <th style="color:#68767E !important;">Progression</th>
+        <th style="color:#68767E !important;">Facturable</th>
         <?php if ($courseid == 0): foreach ($all_courses as $c): ?>
-          <th class="course-col" style="color:#111 !important;"><?php echo htmlspecialchars($c->shortname); ?></th>
+          <th class="course-col" style="color:#68767E !important;"><?php echo htmlspecialchars($c->shortname); ?></th>
         <?php endforeach; endif; ?>
       </tr>
     </thead>
     <tbody>
       <?php if (empty($data)): ?>
-        <tr><td colspan="10" style="color:#333;font-style:italic;padding:20px;">Aucun apprenant inscrit.</td></tr>
+        <tr><td colspan="10" style="color:#68767E;font-style:italic;padding:20px;">Aucun apprenant inscrit.</td></tr>
       <?php else: ?>
         <?php foreach ($data as $row): ?>
           <?php $total_h = round($row['total_secs'] / 3600, 1); ?>
           <tr>
             <td><strong><?php echo htmlspecialchars($row['user']->firstname . ' ' . $row['user']->lastname); ?></strong></td>
-            <td style="color:#333;"><?php echo htmlspecialchars($row['user']->email); ?></td>
+            <td style="color:#68767E;"><?php echo htmlspecialchars($row['user']->email); ?></td>
             <td class="total-cell"><?php echo l3m_fmt($row['total_secs']); ?></td>
             <td>
               <div class="progress-wrap">
                 <div class="progress-bar<?php echo $row['reached'] ? ' full' : ''; ?>" style="width:<?php echo $row['pct']; ?>%"></div>
               </div>
-              <span style="color:#333;font-size:11px;"><?php echo $row['pct']; ?>%</span>
+              <span style="color:#68767E;font-size:11px;"><?php echo $row['pct']; ?>%</span>
             </td>
             <td>
               <?php if ($row['reached']): ?>
@@ -202,7 +210,7 @@ echo $OUTPUT->header();
             </td>
             <?php if ($courseid == 0): foreach ($all_courses as $c): ?>
               <?php $secs = $row['per_course'][$c->id] ?? 0; ?>
-              <td class="course-col" style="color:<?php echo $secs > 0 ? '#111' : '#999'; ?>">
+              <td class="course-col" style="color:<?php echo $secs > 0 ? '#24333C' : '#B9B29E'; ?>">
                 <?php echo $secs > 0 ? l3m_fmt($secs) : '—'; ?>
               </td>
             <?php endforeach; endif; ?>
@@ -214,4 +222,9 @@ echo $OUTPUT->header();
   </div>
 </div>
 
-<?php echo $OUTPUT->footer(); ?>
+<?php
+if ($embed) {
+    echo '</body></html>';
+} else {
+    echo $OUTPUT->footer();
+}

@@ -186,10 +186,15 @@
             '  transition:background .15s; }' +
             '#l3m-notes-btn:hover { background:#a08900; }' +
             '#l3m-notes-btn.active { background:#fff; color:#000; }' +
-            '#l3m-iframe-close-btn { background:transparent; border:none; color:#fff;' +
-            '  font-size:22px; line-height:1; cursor:pointer; padding:2px 6px; border-radius:4px;' +
-            '  transition:background .15s; }' +
+            '#l3m-iframe-close-btn { display:none!important; }' +
             '#l3m-iframe-close-btn:hover { background:rgba(255,255,255,.15); }' +
+            '#l3m-iframe-closing-overlay { display:none; position:absolute; inset:0; z-index:9999;' +
+            '  background:#111; flex-direction:column; align-items:center; justify-content:center; gap:14px; }' +
+            '#l3m-iframe-closing-overlay.active { display:flex; }' +
+            '#l3m-iframe-closing-overlay span { font-family:Montserrat,sans-serif; font-size:13px; color:#C5A900; letter-spacing:.04em; }' +
+            '.l3m-spinner { width:34px; height:34px; border-radius:50%;' +
+            '  border:3px solid rgba(197,169,0,.25); border-top-color:#C5A900; animation:l3mspin .7s linear infinite; }' +
+            '@keyframes l3mspin { to { transform:rotate(360deg); } }' +
             '#l3m-notes-panel { display:none; position:fixed; bottom:20px; right:20px; z-index:99999;' +
             '  width:340px; max-height:70vh; background:#fff; border-radius:10px;' +
             '  box-shadow:0 8px 32px rgba(0,0,0,.22); overflow:hidden; flex-direction:column; }' +
@@ -364,7 +369,7 @@
             var isAttendance = (iframe.src || '').indexOf('/mod/attendance/') !== -1;
             var style = doc.createElement('style');
             style.textContent = [
-                '.activity-navigation,', '.course-content-navigation,',
+                '.activity-navigation,', '.secondary-navigation,', '.tertiary-navigation,', '.course-content-navigation,',
                 'a[href*="course/view.php"].btn,', 'a[href*="course/view.php"].btn-icon,',
                 '.activity-header .activity-altcontent,',
                 '.editmode-switch-form,', '.courseindex,', '.drawer,', '[data-region="fixed-drawer"],',
@@ -407,13 +412,14 @@
 '#lang-menu, .langmenu, a[href*="lang="], form.langmenu { display:none!important; }' +
 '.path-mod-attendance #attbody .controls, .path-mod-attendance .urlselect, .path-mod-attendance .singleselect { display:none!important; }' +
 '.path-mod-attendance td:first-child, .path-mod-attendance th:first-child { white-space:normal!important; }' +
-'.next-page-button, input[name="submitbutton2"] { display:none!important; }'
+'.next-page-button, input[name="submitbutton2"] { display:none!important; }' +
+'.btn-secondary, .btn.btn-secondary { background:#fff!important; border-color:#2E9488!important; color:#2E9488!important; }'
             ].join('\n');
             doc.head.appendChild(style);
             var links = doc.querySelectorAll('a[href]');
             links.forEach(function(a) {
                 var href = a.getAttribute('href') || '';
-                var isExternal = (href.startsWith('http') || href.startsWith('//')) && !href.includes('151.80.61.51') && !href.includes('virtualclassroom-dev');
+                var isExternal = (href.startsWith('http') || href.startsWith('//')) && !href.includes('151.80.61.51') && !href.includes(location.hostname);
                 if (isExternal) {
                     a.setAttribute('target', '_blank');
                     a.setAttribute('rel', 'noopener noreferrer');
@@ -611,7 +617,8 @@
                 '</div>' +
                 '<button id="l3m-iframe-close-btn" title="Fermer — Raccourci : Échap">&times;</button>' +
                 '</div>' +
-                '<iframe id="l3m-activity-iframe" src="" allowfullscreen></iframe>';
+                '<iframe id="l3m-activity-iframe" src="" allowfullscreen></iframe>' +
+                '<div id="l3m-iframe-closing-overlay"><div class="l3m-spinner"></div><span>Chargement…</span></div>';
             var pageContent = document.getElementById('page-content');
             if (pageContent) {
                 pageContent.insertBefore(container, pageContent.firstChild);
@@ -635,9 +642,14 @@
                 }
             });
             document.getElementById('l3m-iframe-close-btn').addEventListener('click', function() {
-                container.classList.remove('active');
-                iframe.removeAttribute('srcdoc');
-                iframe.src = '';
+                // La page en dessous du conteneur est une capture obsolète (avant l'activité).
+                // On ne la révèle jamais : un écran de chargement recouvre le conteneur avant
+                // de recharger, le temps que la nouvelle page à jour arrive. Le double
+                // requestAnimationFrame garantit que ce spinner est bien peint à l'écran
+                // avant de déclencher la navigation (sinon le navigateur peut sauter la
+                // peinture et on retombe sur le même flash qu'avant).
+                var overlay = document.getElementById('l3m-iframe-closing-overlay');
+                if (overlay) overlay.classList.add('active');
                 clearIframeState();
                 hideNotesPanel();
                 var wasActive = !!_currentActivityId;
@@ -647,7 +659,11 @@
                 if (!isTeacherRole && wasActive && courseId && courseId !== '0') {
                     try { localStorage.setItem('l3m_celeb_' + courseId, '1'); } catch(e) {}
                 }
-                setTimeout(function() { window.location.reload(); }, 300);
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        window.location.reload();
+                    });
+                });
             });
             document.getElementById('l3m-shortcuts-btn').addEventListener('click', function(e) {
                 e.stopPropagation();

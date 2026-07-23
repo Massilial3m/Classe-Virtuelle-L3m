@@ -9,10 +9,10 @@ FONT_DIR  = "/usr/share/fonts/truetype/dejavu/"
 FONT_R    = FONT_DIR + "DejaVuSans.ttf"
 FONT_B    = FONT_DIR + "DejaVuSans-Bold.ttf"
 
-GOLD  = (201, 162, 39)
-BLACK = (26, 26, 26)
-GREY  = (240, 240, 240)
-WHITE = (255, 255, 255)
+TEAL   = (46, 148, 136)    # #2E9488
+TEAL_D = (28, 95, 88)      # #1C5F58
+GREY   = (235, 245, 243)   # teal tint light
+WHITE  = (255, 255, 255)
 
 def make_pdf(filename, title, module, ccp, objectifs, sections):
     pdf = FPDF()
@@ -21,10 +21,10 @@ def make_pdf(filename, title, module, ccp, objectifs, sections):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=22)
 
-    # En-tête noir
-    pdf.set_fill_color(*BLACK)
+    # En-tête teal
+    pdf.set_fill_color(*TEAL_D)
     pdf.rect(0, 0, 210, 28, 'F')
-    pdf.set_fill_color(*GOLD)
+    pdf.set_fill_color(*TEAL)
     pdf.rect(0, 28, 210, 3, 'F')
 
     pdf.set_text_color(*WHITE)
@@ -38,12 +38,12 @@ def make_pdf(filename, title, module, ccp, objectifs, sections):
 
     # Bloc titre
     pdf.set_xy(15, 38)
-    pdf.set_text_color(*GOLD)
+    pdf.set_text_color(*TEAL_D)
     pdf.set_font("DejaVu", "B", 11)
     pdf.cell(0, 7, ccp)
 
     pdf.set_xy(15, 47)
-    pdf.set_text_color(*BLACK)
+    pdf.set_text_color(36, 51, 60)
     pdf.set_font("DejaVu", "B", 15)
     pdf.multi_cell(180, 8, title)
 
@@ -52,22 +52,22 @@ def make_pdf(filename, title, module, ccp, objectifs, sections):
     pdf.set_x(15)
     pdf.cell(0, 6, f"Module : {module}  |  Support de cours – Usage pédagogique interne")
 
-    # Ligne dorée
+    # Ligne teal
     y = pdf.get_y() + 5
-    pdf.set_draw_color(*GOLD)
+    pdf.set_draw_color(*TEAL)
     pdf.set_line_width(0.8)
     pdf.line(15, y, 195, y)
     pdf.ln(10)
 
     # Bloc objectifs
-    pdf.set_fill_color(*GOLD)
+    pdf.set_fill_color(*TEAL)
     pdf.set_text_color(*WHITE)
     pdf.set_font("DejaVu", "B", 10)
     pdf.set_x(15)
     pdf.cell(180, 8, "  Objectifs pédagogiques", fill=True)
     pdf.ln(10)
 
-    pdf.set_text_color(*BLACK)
+    pdf.set_text_color(36, 51, 60)
     pdf.set_font("DejaVu", "", 10)
     for obj in objectifs:
         pdf.set_x(18)
@@ -79,7 +79,7 @@ def make_pdf(filename, title, module, ccp, objectifs, sections):
     # Sections
     for i, (section_title, lines) in enumerate(sections, 1):
         pdf.set_fill_color(*GREY)
-        pdf.set_text_color(*BLACK)
+        pdf.set_text_color(*TEAL_D)
         pdf.set_font("DejaVu", "B", 10)
         pdf.set_x(15)
         pdf.cell(180, 8, f"  {i}. {section_title}", fill=True)
@@ -95,7 +95,7 @@ def make_pdf(filename, title, module, ccp, objectifs, sections):
 
     # Pied de page
     pdf.set_y(-18)
-    pdf.set_fill_color(*BLACK)
+    pdf.set_fill_color(*TEAL_D)
     pdf.rect(0, pdf.get_y(), 210, 18, 'F')
     pdf.set_text_color(*WHITE)
     pdf.set_font("DejaVu", "", 8)

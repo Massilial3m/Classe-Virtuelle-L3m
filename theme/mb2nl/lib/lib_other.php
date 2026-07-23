@@ -359,9 +359,14 @@ function theme_mb2nl_is_login($custom = false) {
         return false;
     }
 
-    if ($custom && theme_mb2nl_theme_setting($PAGE, 'cloginpage') && $PAGE->pagetype === 'login-index') {
+    // L3M/LBA : la carte de connexion personnalisee (header_login/footer_login)
+    // doit aussi s'appliquer aux pages mot de passe oublie et inscription,
+    // pas seulement a login/index.php, pour un rendu coherent.
+    $l3m_login_pagetypes = ['login-index', 'login-forgot_password', 'login-signup'];
+
+    if ($custom && theme_mb2nl_theme_setting($PAGE, 'cloginpage') && in_array($PAGE->pagetype, $l3m_login_pagetypes)) {
         return true;
-    } else if (! $custom && $PAGE->pagetype === 'login-index') {
+    } else if (! $custom && in_array($PAGE->pagetype, $l3m_login_pagetypes)) {
         return true;
     }
 
