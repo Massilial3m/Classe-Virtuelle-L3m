@@ -55,6 +55,46 @@ function l3m_admin_owns_user($userid, $admin_client) {
     return l3m_get_user_client((int)$userid) === $admin_client;
 }
 
+// Liste des "formations" inscriptibles pour le client de l'admin — utilisée
+// par convert_lead_to_student : un lead s'inscrit sur UNE formation entière,
+// jamais sur un seul module. Côté LBA, une formation = une catégorie racine
+// avec ses sous-catégories (ex. "ECSR..." = CCP1 + CCP2 + examens, ~11 cours
+// modules) ; l'inscription porte alors sur tous les cours de l'arborescence.
+// Côté Saran, les cours vivent à plat sous la catégorie Saran sans sous-
+// structure (3 parcours indépendants) : chaque cours est sa propre formation.
+function l3m_get_formations_list($admin_client, $saran_category_id) {
+    global $DB;
+    $formations = [];
+    try {
+        $all_cats = $DB->get_records('course_categories', null, 'id ASC', 'id, name, parent');
+        $children_of = [];
+        foreach ($all_cats as $cat) { $children_of[(int)$cat->parent][] = (int)$cat->id; }
+        $collect_courses = function ($catid) use (&$collect_courses, $children_of) {
+            global $DB;
+            $ids = $DB->get_fieldset_select('course', 'id', 'category = :cid', ['cid' => $catid]);
+            foreach (($children_of[$catid] ?? []) as $childid) {
+                $ids = array_merge($ids, $collect_courses($childid));
+            }
+            return $ids;
+        };
+
+        if ($admin_client === 'saran') {
+            $saran_courses = $DB->get_records('course', ['category' => $saran_category_id], 'fullname ASC', 'id, fullname');
+            foreach ($saran_courses as $c) {
+                $formations[] = ['id' => 'c' . $c->id, 'label' => $c->fullname, 'course_ids' => [(int)$c->id]];
+            }
+        } else {
+            foreach (($children_of[0] ?? []) as $rootcatid) {
+                if ($rootcatid === (int)$saran_category_id) continue;
+                $cids = array_values(array_map('intval', $collect_courses($rootcatid)));
+                if (!$cids) continue;
+                $formations[] = ['id' => 'cat' . $rootcatid, 'label' => $all_cats[$rootcatid]->name, 'course_ids' => $cids];
+            }
+        }
+    } catch (Exception $e) { $formations = []; }
+    return $formations;
+}
+
 // ===== TABLE l3m_docs (auto-create) =====
 try {
     $DB->execute("CREATE TABLE IF NOT EXISTS `{$CFG->prefix}l3m_docs` (
@@ -110,6 +150,64 @@ try {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 } catch (Exception $e) {}
 
+// ===== AJAX GET : contenu détaillé d'un cours (viewer intégré, onglet Cours) =====
+// Même viewer (TOC + iframe) que espace-formateur.php, pour que l'admin
+// puisse vérifier le contenu réellement en ligne sans quitter le tableau de
+// bord. Volontairement sans le suivi de complétion ni la notification
+// "nouveau contenu" de la version formateur : ici l'admin consulte, il ne
+// publie pas — pas d'effet de bord sur l3m_seen_modules.
+if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
+    header('Content-Type: application/json');
+    $cid_cd = (int)($_GET['courseid'] ?? 0);
+    if (!$cid_cd) { echo json_encode(['ok' => false, 'msg' => 'id manquant']); exit; }
+    try {
+        $course_cd = $DB->get_record('course', ['id' => $cid_cd], '*', MUST_EXIST);
+        $is_saran_cat_cd = ((int)$course_cd->category === $saran_category_id);
+        if (($admin_client === 'saran') !== $is_saran_cat_cd) {
+            echo json_encode(['ok' => false, 'msg' => 'Module invalide pour ce client']); exit;
+        }
+        $minfo_cd = get_fast_modinfo($course_cd);
+        $sections_cd = [];
+        foreach ($minfo_cd->get_section_info_all() as $snum_cd => $sinfo_cd) {
+            if ($snum_cd == 0 || !$sinfo_cd->visible) continue;
+            $cmids_cd = $sinfo_cd->sequence ? explode(',', $sinfo_cd->sequence) : [];
+            $mods_cd = [];
+            foreach ($cmids_cd as $cmid_cd) {
+                $cmid_cd = (int)$cmid_cd;
+                if (!isset($minfo_cd->cms[$cmid_cd])) continue;
+                $cm_cd = $minfo_cd->cms[$cmid_cd];
+                if (!$cm_cd->visible) continue;
+                $mods_cd[] = ['cmid' => $cmid_cd, 'name' => $cm_cd->name, 'modtype' => $cm_cd->modname, 'done' => false];
+            }
+            $sections_cd[] = [
+                'num' => $snum_cd, 'name' => $sinfo_cd->name ?: ('Section ' . $snum_cd),
+                'mods' => $mods_cd, 'total' => count($mods_cd), 'done_n' => 0,
+            ];
+        }
+        // Fil d'ariane (catégorie racine → sous-catégories → cours) — masqué
+        // par le CSS qui nettoie l'iframe (on y cache le breadcrumb natif
+        // Moodle), donc reconstruit ici pour être affiché dans le panneau de
+        // gauche du viewer, à côté de "Contenu du cours".
+        $breadcrumb_cd = [];
+        $catid_cd = (int)$course_cd->category;
+        $safety_cd = 0;
+        while ($catid_cd && $safety_cd < 10) {
+            $cat_cd = $DB->get_record('course_categories', ['id' => $catid_cd], 'id,name,parent');
+            if (!$cat_cd) break;
+            array_unshift($breadcrumb_cd, $cat_cd->name);
+            $catid_cd = (int)$cat_cd->parent;
+            $safety_cd++;
+        }
+        $breadcrumb_cd[] = $course_cd->fullname;
+
+        echo json_encode(['ok' => true, 'sections' => $sections_cd, 'coursename' => $course_cd->fullname,
+            'courseid' => $cid_cd, 'contextid' => context_course::instance($cid_cd)->id, 'breadcrumb' => $breadcrumb_cd]);
+    } catch (Exception $e) {
+        echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+    }
+    exit;
+}
+
 // ===== ACTIONS POST (AJAX) =====
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_sesskey();
@@ -125,7 +223,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cohort->description     = '';
         $cohort->descriptionformat = FORMAT_HTML;
         $cohort->contextid       = $ctx_sys->id;
-        $cohort->component       = '';
+        // Tag le client dès la création : une classe neuve sans élève ne peut pas encore
+        // être rattachée à un client par appartenance (voir l3m_admin_client_sql), donc les
+        // requêtes de listing acceptent aussi ce tag en plus du critère de membres.
+        $cohort->component       = 'l3m_client_' . $admin_client;
         $cohort->visible         = 1;
         $id = cohort_add_cohort($cohort);
         echo json_encode(['ok' => true, 'id' => $id, 'name' => $cohort->name]);
@@ -254,6 +355,83 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // Vérifie qu'une lettre de classe ('coh', ex. 'A') correspond bien à une
+    // cohorte du client de l'admin connecté — même dérivation de lettre que
+    // lia_build_cohorts(), même filtre client que $classes plus bas dans le
+    // fichier (ce bloc POST s'exécute avant que $classes soit construit).
+    $l3m_valid_lia_letter = function ($coh) use ($DB, $admin_client, $saran_cohort_id) {
+        $cohorts_check = $DB->get_records_sql(
+            "SELECT c.id, c.name FROM {cohort} c
+             WHERE (c.idnumber IS NULL OR c.idnumber NOT IN (:clba, :csaran))
+               AND (EXISTS (
+                 SELECT 1 FROM {cohort_members} cm2
+                 WHERE cm2.cohortid = c.id AND " . l3m_admin_client_sql('cm2.userid', $admin_client, $saran_cohort_id) . "
+               ) OR c.component = :compclient)",
+            ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN, 'compclient' => 'l3m_client_' . $admin_client]
+        );
+        foreach ($cohorts_check as $c) {
+            $letter = lia_class_letter($c->name) ?: mb_substr($c->name, 0, 1);
+            if ($letter === $coh) return true;
+        }
+        return false;
+    };
+
+    if ($action === 'save_lia_override') {
+        $pid = required_param('pid', PARAM_INT);
+        $w   = required_param('w', PARAM_INT);
+        $coh = required_param('coh', PARAM_ALPHANUM);
+        if (!l3m_admin_owns_user($pid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
+        }
+        if (!$l3m_valid_lia_letter($coh)) {
+            echo json_encode(['ok' => false, 'msg' => 'Classe invalide']); exit;
+        }
+        $type     = optional_param('type', 'visio', PARAM_ALPHA);
+        $label    = trim(optional_param('label', 'Affectation manuelle', PARAM_TEXT));
+        $h        = (float)optional_param('h', 0, PARAM_FLOAT);
+        $courseid = optional_param('courseid', 0, PARAM_INT);
+        if (!in_array($type, ['visio', 'veh', 'salle', 'stage', 'exam'], true)) {
+            echo json_encode(['ok' => false, 'msg' => 'Format invalide']); exit;
+        }
+        $overrides = json_decode(get_config('local_l3madmin', 'lia_overrides') ?: '[]', true) ?: [];
+        $key = $pid . '|' . $w . '|' . $coh;
+        $overrides = array_values(array_filter($overrides, fn($o) => ($o['pid'] . '|' . $o['w'] . '|' . $o['coh']) !== $key));
+        $overrides[] = ['pid' => $pid, 'w' => $w, 'coh' => $coh, 'type' => $type, 'label' => $label, 'h' => $h, 'courseid' => $courseid];
+        set_config('lia_overrides', json_encode($overrides), 'local_l3madmin');
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    if ($action === 'delete_lia_override') {
+        $pid = required_param('pid', PARAM_INT);
+        $w   = required_param('w', PARAM_INT);
+        $coh = required_param('coh', PARAM_ALPHANUM);
+        if (!l3m_admin_owns_user($pid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
+        }
+        $overrides = json_decode(get_config('local_l3madmin', 'lia_overrides') ?: '[]', true) ?: [];
+        $key = $pid . '|' . $w . '|' . $coh;
+        $overrides = array_values(array_filter($overrides, fn($o) => ($o['pid'] . '|' . $o['w'] . '|' . $o['coh']) !== $key));
+        set_config('lia_overrides', json_encode($overrides), 'local_l3madmin');
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    if ($action === 'dismiss_lia_alert') {
+        $kind = required_param('kind', PARAM_ALPHA);
+        $pid  = optional_param('pid', 0, PARAM_INT);
+        $w    = required_param('w', PARAM_INT);
+        if ($pid && !l3m_admin_owns_user($pid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
+        }
+        $dismissed = json_decode(get_config('local_l3madmin', 'lia_dismissed_alerts') ?: '[]', true) ?: [];
+        $key = $kind . '|' . ($pid ?: '') . '|' . $w;
+        if (!in_array($key, $dismissed, true)) $dismissed[] = $key;
+        set_config('lia_dismissed_alerts', json_encode($dismissed), 'local_l3madmin');
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     if ($action === 'set_user_client') {
         if (!is_siteadmin()) {
             echo json_encode(['ok' => false, 'msg' => 'Action réservée aux administrateurs du site']);
@@ -372,6 +550,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'reset_student_password') {
+        require_once($CFG->dirroot . '/user/lib.php');
+        $uid = required_param('userid', PARAM_INT);
+        if (!l3m_admin_owns_user($uid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+        $user_pw = $DB->get_record('user', ['id' => $uid, 'deleted' => 0], '*', IGNORE_MISSING);
+        if (!$user_pw) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+        // Mot de passe temporaire genere a la volee : jamais stocke en clair
+        // nulle part (ni en config, ni en base) — on ne fait que le renvoyer
+        // une fois dans cette reponse, comme au moment de la creation du
+        // compte (convert_lead_to_student).
+        $new_password = 'Eleve@' . random_int(1000, 9999) . 'L3m!';
+        update_internal_user_password($user_pw, $new_password);
+        echo json_encode(['ok' => true, 'username' => $user_pw->username, 'password' => $new_password]);
+        exit;
+    }
+
     if ($action === 'create_session') {
         header('Content-Type: application/json');
         try {
@@ -380,7 +578,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $duration_min = optional_param('duration_min', 120, PARAM_INT);
             $event_name   = required_param('event_name', PARAM_TEXT);
             if (!$DB->record_exists('course', ['id' => $courseid])) {
-                echo json_encode(['ok' => false, 'msg' => 'Cours introuvable']); exit;
+                echo json_encode(['ok' => false, 'msg' => 'Module introuvable']); exit;
             }
             $ev = new stdClass();
             $ev->name          = clean_param(trim($event_name), PARAM_TEXT);
@@ -525,6 +723,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'count_unread_messages') {
+        $count = (int)\core_message\api::count_unread_conversations($USER);
+        echo json_encode(['ok' => true, 'count' => $count]);
+        exit;
+    }
+
     if ($action === 'count_pending_signed_docs') {
         $count = 0;
         try {
@@ -561,6 +765,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'delete_lead') {
+        $leadid = required_param('leadid', PARAM_INT);
+        $lead = $DB->get_record('l3m_leads', ['id' => $leadid]);
+        if (!$lead || l3m_lead_client_of($lead->source) !== $admin_client) {
+            echo json_encode(['ok' => false, 'msg' => 'Lead introuvable']);
+            exit;
+        }
+        $DB->delete_records('l3m_leads', ['id' => $leadid]);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     if ($action === 'count_pending_leads') {
         $count = 0;
         try {
@@ -570,6 +786,133 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ));
         } catch (Exception $e) {}
         echo json_encode(['ok' => true, 'count' => $count]);
+        exit;
+    }
+
+    if ($action === 'convert_lead_to_student') {
+        require_once($CFG->dirroot . '/user/lib.php');
+        $leadid       = required_param('leadid', PARAM_INT);
+        $firstname    = trim(required_param('firstname', PARAM_TEXT));
+        $lastname     = trim(required_param('lastname', PARAM_TEXT));
+        $email        = trim(required_param('email', PARAM_EMAIL));
+        $formation_id = required_param('formation', PARAM_ALPHANUMEXT);
+
+        $lead = $DB->get_record('l3m_leads', ['id' => $leadid]);
+        if (!$lead || l3m_lead_client_of($lead->source) !== $admin_client) {
+            echo json_encode(['ok' => false, 'msg' => 'Lead introuvable']);
+            exit;
+        }
+        if ($firstname === '' || $lastname === '' || $email === '') {
+            echo json_encode(['ok' => false, 'msg' => 'Champs manquants']);
+            exit;
+        }
+        // La formation choisie doit appartenir au client de l'admin — on
+        // recalcule la liste serveur (jamais confiance aux course_ids envoyés
+        // par le client) et on n'accepte qu'un id présent dans cette liste.
+        $formation_cv = null;
+        foreach (l3m_get_formations_list($admin_client, $saran_category_id) as $f) {
+            if ($f['id'] === $formation_id) { $formation_cv = $f; break; }
+        }
+        if (!$formation_cv) {
+            echo json_encode(['ok' => false, 'msg' => 'Formation invalide']);
+            exit;
+        }
+        $formation_course_ids = $formation_cv['course_ids'];
+
+        $student_roleid_cv = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        $existing_cv = $DB->get_record('user', ['email' => $email, 'deleted' => 0]);
+        $temp_password = null;
+        $username_cv = null;
+        if ($existing_cv) {
+            $uid_cv = (int)$existing_cv->id;
+            $username_cv = $existing_cv->username;
+        } else {
+            $base_un = clean_param(strtolower($firstname) . '.' . strtolower($lastname), PARAM_USERNAME);
+            $username_cv = $base_un; $counter_cv = 1;
+            while ($DB->record_exists('user', ['username' => $username_cv])) { $username_cv = $base_un . $counter_cv++; }
+            $temp_password = 'Eleve@' . random_int(1000, 9999) . 'L3m!';
+            $u_cv = new stdClass();
+            $u_cv->username   = $username_cv; $u_cv->firstname = $firstname; $u_cv->lastname = $lastname;
+            $u_cv->email      = $email;       $u_cv->password  = $temp_password;
+            $u_cv->confirmed  = 1; $u_cv->auth = 'manual'; $u_cv->mnethostid = $CFG->mnet_localhost_id;
+            $u_cv->lang = 'fr'; $u_cv->country = 'FR';
+            $uid_cv = user_create_user($u_cv, true, false);
+        }
+
+        // Inscription "en attente" : le compte et l'inscription existent déjà
+        // (utile pour préparer le dossier), mais l'accès aux cours reste
+        // bloqué (ENROL_USER_SUSPENDED) jusqu'à ce qu'un admin clique sur
+        // "Activer l'accès" — une fois les documents obligatoires reçus par
+        // e-mail (hors plateforme, donc pas de validation automatique possible).
+        $enrol_cv = enrol_get_plugin('manual');
+        foreach ($formation_course_ids as $fcid_cv) {
+            $inst_cv = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $fcid_cv]);
+            if ($inst_cv) {
+                try { $enrol_cv->enrol_user($inst_cv, $uid_cv, $student_roleid_cv, 0, 0, ENROL_USER_SUSPENDED); } catch (Exception $e) {}
+            }
+        }
+
+        l3m_set_user_client($uid_cv, $admin_client);
+
+        $DB->update_record('l3m_leads', (object)['id' => $leadid, 'status' => 'inscrit_attente']);
+
+        echo json_encode([
+            'ok' => true, 'userid' => $uid_cv, 'username' => $username_cv,
+            'temp_password' => $temp_password, 'is_new' => !$existing_cv,
+        ]);
+        exit;
+    }
+
+    if ($action === 'get_pending_activations') {
+        // Un élève peut avoir plusieurs cours suspendus (tous les modules
+        // d'une même formation) — regroupé par élève, pas par cours, sinon
+        // la liste afficherait une ligne par module (jusqu'à 11 pour l'ECSR).
+        $student_roleid_pa = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        $rows = $DB->get_records_sql(
+            "SELECT u.id as userid, u.firstname, u.lastname, u.email,
+               MIN(ue.timecreated) as timecreated, COUNT(DISTINCT c.id) as nb_courses
+             FROM {user_enrolments} ue
+             JOIN {enrol} e ON e.id = ue.enrolid AND e.enrol = 'manual'
+             JOIN {course} c ON c.id = e.courseid
+             JOIN {user} u ON u.id = ue.userid AND u.deleted = 0
+             JOIN {role_assignments} ra ON ra.userid = u.id
+             JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid = c.id
+             WHERE ue.status = :suspended AND ra.roleid = :rid
+               AND " . l3m_admin_client_sql('u.id', $admin_client, $saran_cohort_id) . "
+             GROUP BY u.id, u.firstname, u.lastname, u.email
+             ORDER BY MIN(ue.timecreated) DESC",
+            ['suspended' => ENROL_USER_SUSPENDED, 'rid' => $student_roleid_pa]
+        );
+        echo json_encode(['ok' => true, 'items' => array_values($rows)]);
+        exit;
+    }
+
+    if ($action === 'activate_student_access') {
+        $uid_aa = required_param('userid', PARAM_INT);
+        if (!l3m_admin_owns_user($uid_aa, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+        // Active tous les cours suspendus de cet élève (tous les modules de
+        // sa formation), pas un seul — voir convert_lead_to_student qui
+        // enrôle sur la formation entière.
+        $suspended_ues = $DB->get_records_sql(
+            "SELECT ue.id, e.id as enrolid
+             FROM {user_enrolments} ue
+             JOIN {enrol} e ON e.id = ue.enrolid AND e.enrol = 'manual'
+             WHERE ue.userid = :uid AND ue.status = :suspended",
+            ['uid' => $uid_aa, 'suspended' => ENROL_USER_SUSPENDED]
+        );
+        $plugin_aa = enrol_get_plugin('manual');
+        foreach ($suspended_ues as $sue) {
+            $inst_aa = $DB->get_record('enrol', ['id' => $sue->enrolid]);
+            if ($inst_aa) $plugin_aa->update_user_enrol($inst_aa, $uid_aa, ENROL_USER_ACTIVE);
+        }
+        $u_aa = $DB->get_record('user', ['id' => $uid_aa]);
+        if ($u_aa) {
+            $lead_aa = $DB->get_record('l3m_leads', ['email' => $u_aa->email, 'status' => 'inscrit_attente']);
+            if ($lead_aa) $DB->update_record('l3m_leads', (object)['id' => $lead_aa->id, 'status' => 'inscrit']);
+        }
+        echo json_encode(['ok' => true]);
         exit;
     }
 
@@ -597,7 +940,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $off    = optional_param('off', 0, PARAM_INT);
 
         $prev_ecsr = array_merge(
-            ['salarie_h' => 28, 'vacataire_h' => 20, 'regroupements_vehicule' => 'S7 · S13 · S19', 'regroupements_salle' => 'S25 · S31'],
+            ['salarie_h' => 28, 'vacataire_h' => 20, 'decalage_rentrees' => 2, 'regroupements_vehicule' => 'S7 · S13 · S19', 'regroupements_salle' => 'S25 · S31'],
             json_decode(get_config('local_l3madmin', 'ecsr_params') ?: '{}', true) ?: []
         );
         $prev_meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
@@ -638,22 +981,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
              FROM {cohort} c
              LEFT JOIN {cohort_members} cm ON cm.cohortid = c.id
              WHERE (c.idnumber IS NULL OR c.idnumber NOT IN (:clba, :csaran))
-               AND EXISTS (
+               AND (EXISTS (
                  SELECT 1 FROM {cohort_members} cm2
                  WHERE cm2.cohortid = c.id AND " . l3m_admin_client_sql('cm2.userid', $admin_client, $saran_cohort_id) . "
-               )
+               ) OR c.component = :compclient)
              GROUP BY c.id, c.name, c.idnumber",
-            ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN]
+            ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN, 'compclient' => 'l3m_client_' . $admin_client]
         );
         $prev_classes = [];
         foreach ($prev_cohorts_raw as $coh) {
             $prev_classes[] = ['name' => $coh->name, 'startdate' => $coh->startdate ?? '', 'nb_members' => (int)$coh->nb_members];
         }
         if ($letter && !$off) {
-            // Fallback si off non fourni : place la classe simulée 5 semaines après la dernière
+            // Fallback si off non fourni : place la classe simulée à N semaines après la dernière,
+            // N étant le paramètre configurable "Décalage entre rentrées".
             $maxOff = 0;
             foreach (lia_build_cohorts($prev_classes) as $c) { if ($c['off'] > $maxOff) $maxOff = $c['off']; }
-            $off = $maxOff + 5;
+            $off = $maxOff + (int)$prev_ecsr['decalage_rentrees'];
         }
         if ($letter) {
             $prev_classes[] = ['name' => 'Classe ' . $letter, 'startdate' => '', 'nb_members' => 0];
@@ -922,9 +1266,11 @@ $sesskey = sesskey();
 $signed_ids     = array_map('intval', json_decode(get_config('local_l3madmin', 'reglement_signed') ?: '[]', true) ?: []);
 $student_notes  = json_decode(get_config('local_l3madmin', 'student_notes') ?: '{}', true) ?: [];
 $formateur_meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+$lia_overrides  = json_decode(get_config('local_l3madmin', 'lia_overrides') ?: '[]', true) ?: [];
+$lia_dismissed  = json_decode(get_config('local_l3madmin', 'lia_dismissed_alerts') ?: '[]', true) ?: [];
 $ecsr_params    = array_merge([
     'eleves_par_classe'       => 12,
-    'decalage_rentrees'       => 5,
+    'decalage_rentrees'       => 2,
     'sous_groupes_nb'         => 4,
     'sous_groupes_taille'     => 3,
     'duree_totale'            => 35,
@@ -1082,13 +1428,13 @@ $cohorts_raw = $DB->get_records_sql(
      FROM {cohort} c
      LEFT JOIN {cohort_members} cm ON cm.cohortid = c.id
      WHERE (c.idnumber IS NULL OR c.idnumber NOT IN (:clba, :csaran))
-       AND EXISTS (
+       AND (EXISTS (
          SELECT 1 FROM {cohort_members} cm2
          WHERE cm2.cohortid = c.id AND " . l3m_admin_client_sql('cm2.userid', $admin_client, $saran_cohort_id) . "
-       )
+       ) OR c.component = :compclient)
      GROUP BY c.id, c.name, c.idnumber
      ORDER BY c.idnumber ASC, c.name ASC",
-    ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN]
+    ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN, 'compclient' => 'l3m_client_' . $admin_client]
 );
 
 $classes = [];
@@ -1115,6 +1461,7 @@ $kpi_groups = count($classes);
 
 // ===== ALERTES LIA =====
 $lia_alerts = [];
+$inactive_user_ids = [];
 if ($course_ids && $student_roleid) {
     $inactive = $DB->get_records_sql(
         "SELECT DISTINCT u.id, u.firstname, u.lastname
@@ -1129,10 +1476,14 @@ if ($course_ids && $student_roleid) {
              WHERE timecreated > :since AND courseid > 0
            )
            AND " . l3m_admin_client_sql('u.id', $admin_client, $saran_cohort_id) . "
-         ORDER BY u.lastname, u.firstname
-         LIMIT 5",
+         ORDER BY u.lastname, u.firstname",
         ['rid' => $student_roleid, 'since' => $week_ago]
     );
+    // Set exact des ids utilisé plus bas pour marquer 'inactive' sur chaque
+    // élève de la table — doit rester la MÊME définition que celle utilisée
+    // ici pour l'alerte (activité logstore), sinon le nombre annoncé dans
+    // l'alerte et la liste obtenue via "Voir les élèves" divergent.
+    $inactive_user_ids = array_map(fn($u) => (int)$u->id, (array)$inactive);
     if ($inactive) {
         $noms = implode(', ', array_map(fn($u) => $u->firstname . ' ' . $u->lastname, array_slice((array)$inactive, 0, 3)));
         $lia_alerts[] = [
@@ -1140,7 +1491,8 @@ if ($course_ids && $student_roleid) {
             'title' => 'Élèves inactifs depuis 7 jours',
             'body'  => count($inactive) . ' élève(s) sans connexion cette semaine : ' . $noms . (count($inactive) > 3 ? '...' : '') . '.',
             'action'=> 'Voir les élèves',
-            'target'=> 'coh'
+            'target'=> 'coh',
+            'filter'=> 'inactive',
         ];
     }
 }
@@ -1291,7 +1643,7 @@ $students = [];
 if ($course_ids && $student_roleid) {
     list($in_sql_st, $in_params_st) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'stcid');
     $students_raw = $DB->get_records_sql(
-        "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email, u.lastaccess
+        "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email, u.username, u.lastaccess
          FROM {user} u
          JOIN {user_enrolments} ue ON ue.userid = u.id AND ue.status = 0
          JOIN {enrol} e ON e.id = ue.enrolid
@@ -1306,7 +1658,7 @@ if ($course_ids && $student_roleid) {
     $cohort_positions = []; // cohortid => position counter (for sub-group)
     foreach ($students_raw as $s) {
         $pct        = $student_completion[$s->id] ?? 0;
-        $days_since = $s->lastaccess > 0 ? floor((time() - $s->lastaccess) / 86400) : 999;
+        $is_inactive = in_array((int)$s->id, $inactive_user_ids, true);
         $presence   = $lti_per_student[$s->id] ?? 0;
         $reglement  = in_array((int)$s->id, $signed_ids);
 
@@ -1319,15 +1671,16 @@ if ($course_ids && $student_roleid) {
         if ($student_cohort_id) {
             if (!isset($cohort_positions[$student_cohort_id])) $cohort_positions[$student_cohort_id] = 0;
             $cohort_positions[$student_cohort_id]++;
-            $sg_num = (int)ceil($cohort_positions[$student_cohort_id] / 3);
+            $sg_num = (int)ceil($cohort_positions[$student_cohort_id] / max(1, (int)$ecsr_params['sous_groupes_taille']));
         }
 
-        $needs_action = !$reglement || $presence < 70 || $days_since > 7;
+        $needs_action = !$reglement || $presence < 70 || $is_inactive;
 
         $students[] = [
             'id'          => (int)$s->id,
             'nom'         => $s->firstname . ' ' . $s->lastname,
             'email'       => $s->email,
+            'username'    => $s->username,
             'cohort_id'   => $student_cohort_id,
             'cohort_name' => $student_cohort[$s->id] ?? null,
             'client'      => l3m_client_of($client_by_user, $s->id),
@@ -1337,7 +1690,7 @@ if ($course_ids && $student_roleid) {
             'reglement'   => $reglement,
             'note'        => $student_notes[$s->id] ?? '',
             'last_access' => $s->lastaccess > 0 ? userdate($s->lastaccess, '%d/%m') : '—',
-            'inactive'    => $days_since > 7,
+            'inactive'    => $is_inactive,
             'low'         => $pct < 20,
             'needs_action'=> $needs_action,
         ];
@@ -1351,9 +1704,35 @@ if ($course_ids && $student_roleid) {
             'title' => 'Progression faible (<20 %)',
             'body'  => count($low_list) . ' élève(s) ont moins de 20 % de modules complétés : ' . $noms . '.',
             'action'=> 'Voir les élèves',
-            'target'=> 'coh'
+            'target'=> 'coh',
+            'filter'=> 'low',
         ];
     }
+}
+
+// ===== ALERTE ACTIVATIONS EN ATTENTE =====
+// Élèves inscrits (compte + enrolment créés) mais dont l'accès reste
+// bloqué (ENROL_USER_SUSPENDED) jusqu'à réception des documents par e-mail
+// et activation manuelle — voir action 'activate_student_access'.
+$pending_activation_count = (int)$DB->count_records_sql(
+    "SELECT COUNT(DISTINCT u.id)
+     FROM {user_enrolments} ue
+     JOIN {enrol} e ON e.id = ue.enrolid AND e.enrol = 'manual'
+     JOIN {user} u ON u.id = ue.userid AND u.deleted = 0
+     JOIN {role_assignments} ra ON ra.userid = u.id
+     JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid = e.courseid
+     WHERE ue.status = :suspended AND ra.roleid = :rid
+       AND " . l3m_admin_client_sql('u.id', $admin_client, $saran_cohort_id),
+    ['suspended' => ENROL_USER_SUSPENDED, 'rid' => $student_roleid]
+);
+if ($pending_activation_count > 0) {
+    $lia_alerts[] = [
+        'type'  => 'warn',
+        'title' => 'Activations en attente',
+        'body'  => $pending_activation_count . ' élève(s) inscrit(s) mais bloqué(s) tant que le dossier documents n\'est pas confirmé reçu.',
+        'action'=> 'Voir les leads',
+        'target'=> 'leads',
+    ];
 }
 
 // ===== ALERTE CAPACITÉ FORMATEURS =====
@@ -1438,7 +1817,7 @@ try {
     }
 } catch (Exception $cl_e) { $courses_list = []; }
 
-// ===== LISTE COURS + CATÉGORIES pour l'onglet "Cours" (créer/consulter) =====
+// ===== LISTE COURS + CATÉGORIES pour l'onglet "Modules" (créer/consulter) =====
 $course_categories = [];
 try {
     $cats_raw = $DB->get_records('course_categories', null, 'sortorder ASC', 'id, name, parent, depth');
@@ -1455,6 +1834,7 @@ try {
         'id, fullname, shortname, category, visible');
     $cat_names = [];
     foreach ($course_categories as $cc) { $cat_names[$cc['id']] = $cc['name']; }
+
     foreach ($cf_raw as $cf) {
         $courses_full_list[] = [
             'id' => (int)$cf->id, 'fullname' => $cf->fullname, 'shortname' => $cf->shortname,
@@ -1486,8 +1866,11 @@ $validated_rows  = $DB->get_records_sql(
 $lia_unavailable = lia_build_unavailable($validated_rows, $lia_ref_start, $lia_total_w);
 
 $lia_plan = ($lia_cohorts && $lia_people)
-    ? lia_compute_plan($lia_cohorts, $lia_people, $lia_prof2p, $lia_backups, $lia_unavailable)
+    ? lia_compute_plan($lia_cohorts, $lia_people, $lia_prof2p, $lia_backups, $lia_unavailable, $lia_overrides)
     : null;
+if ($lia_plan) {
+    $lia_plan['alerts'] = lia_filter_dismissed_alerts($lia_plan['alerts'], $lia_dismissed);
+}
 
 // Toutes les déclarations (pour le panneau de validation admin)
 $all_dispos_raw = $DB->get_records_sql(
@@ -1503,6 +1886,7 @@ foreach ($all_dispos_raw as $row) {
 }
 
 // ===== JSON pour le JS =====
+$unread_messages = (int)\core_message\api::count_unread_conversations($USER);
 $pending_signed_docs = 0;
 try {
     $pending_signed_docs = (int)$DB->count_records_sql(
@@ -1525,6 +1909,7 @@ $admin_data = json_encode([
     'is_siteadmin'        => is_siteadmin(),
     'admin_client'        => $admin_client,
     'pending_signed_docs' => $pending_signed_docs,
+    'unread_messages'     => $unread_messages,
     'pending_leads'       => $pending_leads,
     'kpi' => [
         'students'   => $kpi_students,
@@ -1541,6 +1926,7 @@ $admin_data = json_encode([
     'date_label'   => userdate(time(), '%A %d %B %Y'),
     'plan_events'  => $plan_events,
     'courses_list' => $courses_list,
+    'formations'   => l3m_get_formations_list($admin_client, $saran_category_id),
     'courses_full' => $courses_full_list,
     'course_categories' => $course_categories,
     'lia_people'   => $lia_people,
@@ -1549,6 +1935,7 @@ $admin_data = json_encode([
     'veh_weeks'    => $veh_weeks,
     'salle_weeks'  => $salle_weeks,
     'dispos'       => $all_dispos,
+    'ecsr_params'  => $ecsr_params,
 ], JSON_UNESCAPED_UNICODE);
 
 $user_initials = mb_substr($USER->firstname, 0, 1) . mb_substr($USER->lastname, 0, 1);
@@ -1568,9 +1955,28 @@ $user_name     = $USER->firstname . ' ' . $USER->lastname;
   --red:#D64545; --red-t:#FBE7E7;
   --amber:#F6C685; --amber-d:#8a5a10;
   --sand:#B9B29E; --sand-t:#EFECE1;
-  --ink:#24333C; --muted:#68767E;
-  --bg:#F7F6F1; --card:#FFFFFF; --line:#E4E1D6; --dark:#33424B;
+  --ink:<?= $brand['ink'] ?>; --muted:<?= $brand['muted'] ?>;
+  --bg:<?= $brand['bg'] ?>; --card:<?= $brand['card'] ?>; --line:<?= $brand['line'] ?>; --dark:#33424B;
 }
+<?php if ($admin_client === 'saran'): ?>
+/* Sur fond sombre, ces titres (pensés à l'origine pour un texte foncé sur
+   fond clair via --teal-d) doivent repasser en clair pour rester lisibles. */
+.panel h3, h2, .students-title, .event .h, .pg-logline .pg-lw, #modal-seance h3 { color:var(--ink) !important; }
+/* Icônes des cartes-outils (Émargement, Rapport d'heures) : --teal-t/--teal-d
+   sont devenus des gris sombres structurels pour Saran, donc l'icône (glyphe
+   sombre sur badge sombre) devient invisible sur la carte déjà sombre. */
+.admin-tool-card .ico { background:rgba(255,255,255,.12) !important; color:#fff !important; }
+/* Chips "Visible"/"présentiel"/"inscrit·e"/"LBA" : meme souci --teal-t/--teal-d
+   (repurposes en gris structurel sombre pour Saran) que ci-dessus. */
+.chip.c-ok, .chip.c-vi { color:var(--ink) !important; }
+/* Menu lateral : --muted (inactif) trop sombre sur le fond deja sombre, et
+   --teal-d (item actif) quasi noir sur le pastille --teal-t elle-meme sombre. */
+aside button, aside button.on { color:var(--ink) !important; }
+/* Bouton "signé" (meme souci --teal-t/--teal-d) et placeholder "Ajouter une
+   note..." (--line devient un gris a peine plus clair que le fond du tableau). */
+.reg-signed { color:var(--ink) !important; }
+.note-input::placeholder { color:var(--muted) !important; }
+<?php endif; ?>
 *, *::before, *::after { box-sizing:border-box; }
 body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--ink); font-size:14.5px; line-height:1.5; }
 .top { position:sticky; top:0; z-index:40; background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; padding:10px 18px; box-shadow:0 1px 3px rgba(36,51,60,.06); }
@@ -1580,7 +1986,7 @@ body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--b
 .today { flex:1; text-align:center; font-size:12.5px; color:var(--muted); }
 .today b { color:var(--ink); }
 .user-wrap { position:relative; }
-.user { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; cursor:pointer; user-select:none; border:none; background:none; font-family:inherit; padding:4px; border-radius:10px; }
+.user { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; cursor:pointer; user-select:none; border:none; background:none; font-family:inherit; padding:4px; border-radius:10px; color:var(--ink); }
 .user:hover { background:var(--bg); }
 .user .av { width:28px; height:28px; border-radius:99px; background:var(--teal); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:12px; flex-shrink:0; }
 .user-menu { position:absolute; top:calc(100% + 8px); right:0; background:var(--card); border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 24px rgba(36,51,60,.14); min-width:190px; padding:6px; z-index:60; display:none; }
@@ -1614,13 +2020,13 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .kpi-num small { font-size:16px; opacity:.55; margin-left:2px; }
 .kpi-pill { background:rgba(255,255,255,.65); border:1px solid rgba(255,255,255,.85); font-size:11px; font-weight:700; padding:4px 9px; border-radius:99px; white-space:nowrap; }
 .kpi-sub { font-size:11px; opacity:.55; font-weight:500; margin-top:8px; }
-.k-orange { background:#F9C57D; border-color:#F5B15F; }
-.k-mint { background:#C7EDE1; border-color:#A7DDCB; }
-.k-violet { background:#DDD9F7; border-color:#C9C3F0; }
+.k-orange { background:#F9C57D; border-color:#F5B15F; color:#24333C; }
+.k-mint { background:#C7EDE1; border-color:#A7DDCB; color:#24333C; }
+.k-violet { background:#DDD9F7; border-color:#C9C3F0; color:#24333C; }
 .k-cream { background:var(--card); border-color:var(--line); }
-.k-danger { background:var(--red-t); border-color:#F5C4C4; }
+.k-danger { background:var(--red-t); border-color:#F5C4C4; color:#24333C; }
 .k-danger .kpi-num { color:var(--red); }
-.panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:14px; }
+.panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:14px; min-width:0; }
 .panel h3 { margin:0 0 12px; font-size:11px; font-weight:700; color:var(--teal-d); text-transform:uppercase; letter-spacing:.07em; }
 .cols2 { display:grid; grid-template-columns:1.1fr .9fr; gap:14px; }
 @media(max-width:900px) { .cols2 { grid-template-columns:1fr; } }
@@ -1639,8 +2045,8 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .lia-item .act { margin-top:8px; display:flex; gap:8px; }
 .btn { display:inline-block; border:none; border-radius:99px; padding:7px 16px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit; text-decoration:none; transition:filter .12s; }
 .btn:hover { filter:brightness(.92); }
-.btn.primary { background:var(--teal); color:#fff; }
-.btn.ghost { background:var(--card); color:var(--teal-d); border:1.5px solid var(--teal); }
+.btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
+.btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
 .btn.mini { padding:5px 12px; font-size:11px; }
 .btn.danger-btn { background:var(--red-t); color:var(--red); border:1.5px solid var(--red); }
 .grid3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(255px,1fr)); gap:12px; }
@@ -1703,6 +2109,11 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .pg-logline { font-size:12px; padding:6px 0; border-bottom:1px solid var(--line); display:flex; gap:8px; }
 .pg-logline:last-child { border:none; }
 .pg-logline .pg-lw { flex:0 0 34px; font-weight:800; color:var(--teal-d); font-variant-numeric:tabular-nums; }
+/* Sans min-width:0, un enfant flex ne se laisse pas retrecir sous la
+   largeur de son contenu texte et deborde silencieusement (pas de retour
+   a la ligne, pas de scroll visible) des que la phrase est un peu longue —
+   d'ou les entrees de journal coupees net sur mobile. */
+.pg-logline .pg-ltxt { flex:1; min-width:0; word-wrap:break-word; overflow-wrap:break-word; }
 .pg-alert { background:var(--red-t); border-left:4px solid var(--red); border-radius:0 8px 8px 0; padding:8px 12px; font-size:12.5px; margin-bottom:8px; }
 .pg-ok { background:var(--teal-t); border-left:4px solid var(--teal); border-radius:0 8px 8px 0; padding:8px 12px; font-size:12.5px; }
 .dv-card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
@@ -1724,6 +2135,34 @@ tr:last-child td { border:none; }
 tr.inactive td { background:rgba(214,69,69,.04); }
 .bar { height:6px; border-radius:3px; background:var(--line); width:90px; display:inline-block; vertical-align:middle; }
 .bar i { display:block; height:100%; border-radius:3px; background:var(--violet); }
+@media(max-width:640px){
+  /* Tableaux a beaucoup de colonnes (Leads, En attente d'activation) :
+     meme principe d'empilement que .mm-table, mais avec un libelle de
+     colonne rappele devant chaque valeur (data-label), car ici le contenu
+     seul (ex. "Situation" en texte libre) ne suffit pas a se comprendre
+     hors du contexte de son en-tete de colonne. */
+  .rtable thead { display:none; }
+  .rtable, .rtable tbody, .rtable tr, .rtable td { display:block; width:100%; white-space:normal; }
+  .rtable tr { padding:12px 14px; border-bottom:1px solid var(--line); }
+  .rtable td { padding:4px 0; border-bottom:none; }
+  .rtable td:empty { display:none; }
+  .rtable td[data-label]:not([data-label=""])::before {
+    content:attr(data-label) " : "; font-weight:700; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.05em; color:var(--muted);
+  }
+}
+@media(max-width:640px){
+  /* "Modules" (catalogue admin) : intitules longs (nowrap) qui sortent de
+     l'ecran sur mobile sans indication de scroll. On empile chaque module
+     en petite fiche verticale a la place. */
+  .mm-table thead { display:none; }
+  .mm-table, .mm-table tbody, .mm-table tr, .mm-table td { display:block; width:100%; white-space:normal; }
+  .mm-table tr { padding:12px 14px; border-bottom:1px solid var(--line); }
+  .mm-table td { padding:0; border-bottom:none; }
+  .mm-table td:not(:first-child) { margin-top:6px; }
+  .mm-table .mm-name { font-weight:700; color:var(--ink); }
+  .mm-table .mm-short, .mm-table .mm-cat { font-size:11.5px; color:var(--muted); }
+}
 /* ---- cartes classes ---- */
 .view-coh-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }
 .view-coh-header h1 { margin:0; }
@@ -1758,8 +2197,6 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .note-input { border:none; background:transparent; font-size:12px; font-family:inherit; color:var(--muted); width:160px; cursor:text; padding:2px 4px; border-radius:4px; }
 .note-input:hover { background:var(--bg); }
 .note-input:focus { outline:none; background:var(--bg); color:var(--ink); }
-.client-select { font-size:12px; font-family:inherit; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:3px 6px; background:#fff; cursor:pointer; }
-.client-select:focus { outline:none; border-color:var(--teal); }
 .note-input::placeholder { color:var(--line); }
 .btn-agir { display:inline-block; border:none; border-radius:99px; padding:6px 14px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit; background:var(--teal); color:#fff; transition:filter .12s; }
 .btn-agir:hover { filter:brightness(.88); }
@@ -1796,10 +2233,10 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .param-row:last-child { border:none; }
 .param-row .lbl { color:var(--muted); }
 .param-row .val { font-weight:700; font-variant-numeric:tabular-nums; }
-.param-row input[type="number"] { border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; font-family:inherit; text-align:right; width:80px; }
+.param-row input[type="number"] { border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; font-family:inherit; text-align:right; width:80px; }
 .param-row input[type="number"].sm { width:56px; text-align:center; padding:5px 4px; }
-.param-row input[type="text"] { border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; font-family:inherit; text-align:right; width:110px; }
-.param-row select { border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:5px 8px; font-size:12px; font-weight:700; font-family:inherit; color:inherit; }
+.param-row input[type="text"] { border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; font-family:inherit; text-align:right; width:110px; }
+.param-row select { border:1px solid var(--line); background:var(--bg); border-radius:8px; padding:5px 8px; font-size:12px; font-weight:700; font-family:inherit; color:var(--ink); }
 .param-row input:focus, .param-row select:focus { outline:none; border-color:var(--teal); }
 .pc-orange .ico { background:var(--orange-t); color:var(--orange-d); }
 .pc-teal .ico { background:var(--teal-t); color:var(--teal-d); }
@@ -1825,6 +2262,67 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .fld input { width:100%; border:1.5px solid var(--line); background:var(--bg); border-radius:10px; padding:9px 13px; font-size:13.5px; font-family:inherit; transition:border-color .12s; }
 .fld input:focus { outline:none; border-color:var(--teal); }
 .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
+/* ─── viewer de cours intégré (TOC + iframe), même composant que espace-formateur.php ─── */
+/* Ce composant, porté tel quel depuis espace-formateur.php, bascule sa
+   visibilité via la classe .on (pas .open comme le reste des modales de ce
+   fichier) — règle dédiée à cet id précis pour ne pas toucher .modal-bg. */
+#course-modal-bg.on { display:flex; }
+.course-modal { width:1200px; max-width:97vw; height:94vh; max-height:960px; display:flex; flex-direction:column; overflow:hidden; padding:0; }
+.course-modal-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); flex-shrink:0; }
+.course-modal-head h2 { margin:0; font-size:15px; }
+.course-modal-head-actions { display:flex; align-items:center; gap:10px; }
+.course-modal-close { border:none; background:none; font-size:16px; color:var(--muted); cursor:pointer; padding:4px; line-height:1; }
+.course-modal-close:hover { color:var(--ink); }
+.course-modal-body { display:flex; flex:1; overflow:hidden; }
+.dv-left{width:300px;flex-shrink:0;background:#fff;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+.dv-left-head{padding:16px 18px 10px;border-bottom:1px solid var(--line);flex-shrink:0}
+.dv-breadcrumb{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px;word-break:break-word}
+.dv-breadcrumb .dv-crumb-sep{margin:0 4px;color:var(--muted)}
+.dv-breadcrumb .dv-crumb-current{color:var(--ink);font-weight:700}
+.dv-left-title-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.dv-left-title{font-size:16px;font-weight:800;color:var(--ink)}
+.dv-unfold{font-size:11px;color:var(--teal);cursor:pointer;text-decoration:none;font-weight:600}
+.dv-search{display:flex;align-items:center;gap:8px;background:var(--bg);border-radius:8px;padding:7px 12px}
+.dv-search input{border:none;background:none;font-size:13px;color:var(--ink);outline:none;width:100%;font-family:inherit}
+.dv-sections{flex:1;overflow-y:auto}
+.det-sec{border-bottom:1px solid var(--line)}
+.det-sec-head{display:flex;align-items:center;gap:12px;padding:12px 18px;cursor:pointer;transition:background .1s}
+.det-sec-head:hover{background:var(--bg)}
+.det-sec-num{width:32px;height:32px;border-radius:50%;border:2px solid var(--teal);color:var(--teal);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;transition:background .15s}
+.det-sec-num.done{background:var(--teal);color:#fff}
+.det-sec-info{flex:1;min-width:0}
+.det-sec-name{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}
+.det-sec-count{font-size:11px;color:var(--muted);margin-top:1px}
+.det-sec-arrow{color:var(--muted);font-size:11px;flex-shrink:0;transition:transform .15s}
+.det-sec-arrow.open{transform:rotate(90deg)}
+.det-mods{display:none;padding:0 18px 8px 62px}
+.det-mods.open{display:block}
+.det-mod{display:flex;align-items:flex-start;gap:8px;padding:7px 0;cursor:pointer;font-size:13px;color:var(--ink);border-left:2px solid transparent;transition:color .12s}
+.det-mod:hover .det-mod-name{color:var(--teal)}
+.det-mod.active .det-mod-name{color:var(--orange);font-weight:700}
+.det-mod-dot{width:10px;height:10px;border-radius:50%;background:var(--sand);flex-shrink:0;margin-top:3px}
+.det-mod-dot.done{background:var(--teal)}
+.det-mod-dot.active-dot{background:var(--orange)}
+.det-mod-name{line-height:1.35;flex:1}
+.dv-left .dv-left-title,.dv-left .det-sec-name,.dv-left .det-mod,.dv-left .dv-crumb-current{color:#24333C}
+.dv-left .det-sec-count,.dv-left .dv-sections p,.dv-left .dv-breadcrumb,.dv-left .dv-crumb-sep{color:#68767E}
+.dv-right{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
+.dv-empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--muted);font-size:13px;font-style:italic}
+.dv-loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:var(--bg); }
+.dv-spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--teal); animation:dvspin .7s linear infinite; }
+@keyframes dvspin { to { transform:rotate(360deg); } }
+#ce-iframe { flex:1; width:100%; border:none; opacity:1; transition:opacity .15s; }
+.dv-mobile-back{display:none}
+@media(max-width:760px){
+  /* Meme correctif que cote formateur/eleve : liste des sections + apercu
+     de l'activite en plein ecran avec bouton retour sur mobile. */
+  .course-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  .dv-left { width:100%; }
+  .dv-right { display:none; }
+  .course-modal-body.mob-content .dv-left { display:none; }
+  .course-modal-body.mob-content .dv-right { display:flex; }
+  .dv-mobile-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fff; font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; }
+}
 /* ---- toast ---- */
 .pg-has-ev { background:var(--teal) !important; color:#fff !important; font-size:10px; }
 .pg-has-ev:hover { opacity:.85; }
@@ -1840,6 +2338,30 @@ tr.inactive td { background:rgba(214,69,69,.04); }
   font-family:inherit; box-sizing:border-box; outline:none; }
 #modal-seance select:focus, #modal-seance input:focus { border-color:var(--teal); }
 .seance-foot { display:flex; gap:10px; margin-top:22px; justify-content:flex-end; }
+/* ─── modal affectation manuelle (Planning & Lia) ─── */
+#modal-lia-bg { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:1000; display:none; align-items:center; justify-content:center; }
+#modal-lia-bg.on { display:flex; }
+#modal-lia { background:#fff; border-radius:16px; padding:28px 32px; width:420px; max-width:95vw; box-shadow:0 8px 40px rgba(0,0,0,.18); }
+#modal-lia h3 { margin:0 0 4px; font-size:16px; color:var(--teal-d); }
+#modal-lia .sub { color:var(--muted); font-size:12.5px; margin:0 0 20px; }
+#modal-lia label { display:block; font-size:12px; font-weight:700; color:var(--ink); margin-bottom:4px; margin-top:14px; }
+#modal-lia select, #modal-lia input[type=number], #modal-lia input[type=text] {
+  width:100%; padding:8px 12px; border:1.5px solid var(--line); border-radius:8px; font-size:14px;
+  font-family:inherit; box-sizing:border-box; outline:none; }
+#modal-lia select:focus, #modal-lia input:focus { border-color:var(--teal); }
+.lia-foot { display:flex; gap:10px; margin-top:22px; justify-content:flex-end; }
+.lia-foot .btn.danger-btn { margin-right:auto; }
+#modal-lia-hours-bg { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:1000; display:none; align-items:center; justify-content:center; }
+#modal-lia-hours-bg.on { display:flex; }
+#modal-lia-hours { background:#fff; border-radius:16px; padding:28px 32px; box-shadow:0 8px 40px rgba(0,0,0,.18); }
+#modal-lia-hours h3 { margin:0 0 14px; font-size:16px; color:var(--teal-d); }
+/* ─── planning : nouveaux formats + affectations manuelles ─── */
+.pg-ch-stage { background:var(--sand); color:#fff; } .pg-ch-exam { background:var(--dark); color:#fff; }
+.pg-manual { font-size:6px; color:var(--teal-d); line-height:1; }
+.pg-lab b.pg-clickable { cursor:pointer; }
+.pg-lab b.pg-clickable:hover { text-decoration:underline; }
+.pg-alert-actions { display:flex; gap:8px; margin-top:8px; }
+.pg-alert .btn.mini { font-size:11px; padding:5px 12px; }
 .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--dark); color:#fff; border-radius:99px; padding:11px 22px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; box-shadow:0 4px 16px rgba(0,0,0,.3); white-space:nowrap; }
 .toast.on { opacity:1; }
 /* ── Admin docs view ── */
@@ -1939,6 +2461,18 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 .msg-thread-input input:focus { outline:none; border-color:var(--teal); }
 .msg-send-btn { width:36px; height:36px; border-radius:50%; background:var(--orange); color:#fff; border:none; font-size:14px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
 .msg-send-btn:hover { background:var(--orange-d); }
+.msg-thread-back { display:none; }
+@media(max-width:760px){
+  /* Meme correctif que la messagerie eleve : liste de contacts (308px
+     fixes) qui ecrase la conversation sur mobile. Plein ecran + retour. */
+  .msg-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  .msg-list-pane { width:100%; flex:1 1 auto; }
+  .msg-thread-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-list-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-thread-pane { display:flex; }
+  .msg-thread-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; background:var(--card); }
+  .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
+}
 </style>
 </head>
 <body>
@@ -1946,8 +2480,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- TOPBAR -->
 <div class="top">
   <a class="brand" href="<?= $CFG->wwwroot ?>">
-    <?php if (!empty($brand['logo'])): ?>
-      <img src="<?= $brand['logo'] ?>" alt="<?= s($brand['name']) ?>" style="height:38px;width:auto">
+    <?php if (!empty($brand['logo_dark'])): ?>
+      <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="height:38px;width:auto">
     <?php else: ?>
       <svg width="26" height="20" viewBox="0 0 34 24" aria-hidden="true">
         <path d="M3 21 A14 14 0 0 1 31 21" fill="none" stroke="<?= $brand['teal'] ?>" stroke-width="4" stroke-linecap="round"/>
@@ -1977,10 +2511,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <button data-v="plan" onclick="nav(this)">▦ <span>Planning &amp; Lia</span></button>
   <button data-v="team" onclick="nav(this)">◉ <span>Intervenants</span></button>
   <button data-v="coh"  onclick="nav(this)">⚑ <span>Classes &amp; élèves</span></button>
-  <button data-v="cours" onclick="nav(this)">🎓 <span>Cours</span></button>
+  <button data-v="cours" onclick="nav(this)">🎓 <span>Modules</span></button>
   <button data-v="docs"  onclick="nav(this)">☰ <span>Documents</span><span class="nav-badge" id="docs-nav-badge" style="display:none">0</span></button>
   <button data-v="admin" onclick="nav(this)">🗂 <span>Administratif</span></button>
   <button data-v="param" onclick="nav(this)">⚙ <span>Paramètres</span></button>
+  <button type="button" onclick="openMessageModal(0,'')">✉ <span>Messages</span><span class="nav-badge" id="msg-nav-badge" style="display:none">0</span></button>
   <div class="sep"></div>
 </aside>
 
@@ -2022,7 +2557,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <div class="pg-proposal" id="plan-prop">
     <b>✦ Proposition de Lia — nouvelle classe <span id="plan-prop-letter">D</span></b>
     <ul>
-      <li>Rentrée optimale : <b id="plan-prop-date"></b> (décalage 5 semaines après la dernière classe)</li>
+      <li>Rentrée optimale : <b id="plan-prop-date"></b> (décalage <span id="plan-prop-decalage"></span> après la dernière classe)</li>
       <li>Stages tuilés ✓ · semaines véhicule vérifiées ✓ · intervenants disponibles ✓</li>
     </ul>
     <button class="btn primary" id="plan-prop-btn">Créer la classe</button>
@@ -2090,7 +2625,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <thead>
         <tr>
           <th>Élève</th>
-          <th>Client</th>
+          <th>Classe</th>
           <th>Sous-groupe</th>
           <th>Règlement int.</th>
           <th>E-learning</th>
@@ -2104,26 +2639,66 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
-<!-- ===== COURS ===== -->
+<!-- ===== MODULES ===== -->
 <div class="view" id="v-cours">
   <div class="view-coh-header">
-    <h1>Cours</h1>
-    <button class="btn primary" onclick="openCourseModal()">+ Créer un cours</button>
+    <h1>Modules</h1>
+    <button class="btn primary" onclick="openCourseModal()">+ Créer un module</button>
   </div>
-  <p class="sub" style="margin-bottom:0">Catalogue des cours Moodle. La création d'un cours crée la coquille (nom, catégorie) — le formateur y ajoute ensuite le contenu.</p>
+  <p class="sub" style="margin-bottom:0">Catalogue des modules Moodle (M1, M2…). La création d'un module crée la coquille (nom, catégorie) — le formateur y ajoute ensuite le contenu (les cours numérotés).</p>
 
   <div class="twrap" style="margin-top:16px">
-    <table>
+    <table class="mm-table">
       <thead>
         <tr>
-          <th>Cours</th>
+          <th>Module</th>
           <th>Nom court</th>
           <th>Catégorie</th>
           <th>Statut</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="cours-admin-tbody"></tbody>
     </table>
+  </div>
+</div>
+
+<div class="modal-bg" id="course-modal-bg" onclick="if(event.target===this)closeCourseIframe()">
+  <div class="modal course-modal">
+    <div class="course-modal-head">
+      <h2 id="course-modal-title">Module</h2>
+      <div class="course-modal-head-actions">
+        <button type="button" id="ce-edit-link" class="btn mini ghost" onclick="ceOpenEditMode()">Activer le mode édition</button>
+        <button type="button" class="course-modal-close" onclick="closeCourseIframe()" aria-label="Fermer">✕</button>
+      </div>
+    </div>
+    <div class="course-modal-body">
+      <div class="dv-left">
+        <div class="dv-left-head">
+          <div class="dv-breadcrumb" id="ce-breadcrumb"></div>
+          <div class="dv-left-title-row">
+            <span class="dv-left-title">Contenu du cours</span>
+            <a class="dv-unfold" onclick="ceUnfoldAll()">Tout déplier</a>
+          </div>
+          <div class="dv-search">
+            <span>&#128269;</span>
+            <input type="text" id="ce-search-inp" placeholder="Rechercher" oninput="ceFilter(this.value)">
+          </div>
+        </div>
+        <div class="dv-sections" id="ce-sections"></div>
+      </div>
+      <div class="dv-right">
+        <div class="dv-mobile-back" onclick="ceMobileBack()">&#8592; Retour aux sections</div>
+        <div class="dv-empty" id="ce-empty">Sélectionnez une activité dans le menu à gauche.</div>
+        <div class="dv-loading" id="ce-loading" style="display:none"><span class="dv-spinner"></span></div>
+        <iframe id="ce-iframe" src="" style="display:none"></iframe>
+        <!-- Iframe cachee : precharge le mode edition en arriere-plan dès
+             l'ouverture du cours, pour un affichage quasi instantane si
+             l'utilisateur clique sur "Activer le mode edition" (voir
+             cePrefetchEditMode / ceOpenEditMode). -->
+        <iframe id="ce-prefetch-iframe" src="" style="display:none" aria-hidden="true" tabindex="-1"></iframe>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2192,12 +2767,12 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="param-row"><span class="lbl">CCP1</span><span class="val"><input type="text" class="sm" id="p-ccp1_semaine" value="<?= htmlspecialchars($ecsr_params['ccp1_semaine']) ?>"></span></div>
       <div class="param-row"><span class="lbl">Session titre</span><span class="val"><input type="text" class="sm" id="p-session_titre_semaine" value="<?= htmlspecialchars($ecsr_params['session_titre_semaine']) ?>"></span></div>
       <div class="param-row"><span class="lbl">Délai CCP1 → CCP2</span><span class="val"><input type="number" class="sm" id="p-delai_ccp1_ccp2" value="<?= (int)$ecsr_params['delai_ccp1_ccp2'] ?>"> mois max</span></div>
-      <div class="param-row"><span class="lbl">Autorisation temporaire</span><span class="val" style="color:var(--teal-d)"><select id="p-autorisation_temporaire"><option value="1" <?= $ecsr_params['autorisation_temporaire'] ? 'selected' : '' ?>>activée</option><option value="0" <?= !$ecsr_params['autorisation_temporaire'] ? 'selected' : '' ?>>désactivée</option></select><br><small style="color:var(--muted);font-size:10px">après CCP1</small></span></div>
+      <div class="param-row"><span class="lbl">Autorisation temporaire</span><span class="val" style="color:var(--ink)"><select id="p-autorisation_temporaire"><option value="1" <?= $ecsr_params['autorisation_temporaire'] ? 'selected' : '' ?>>activée</option><option value="0" <?= !$ecsr_params['autorisation_temporaire'] ? 'selected' : '' ?>>désactivée</option></select><br><small style="color:var(--muted);font-size:10px">après CCP1</small></span></div>
     </div>
     <div class="param-card pc-teal">
       <div class="pc-head"><div class="ico">✦</div><div class="text"><h3>Automatisations Lia</h3><p>Comportement du moteur IA</p></div></div>
-      <div class="param-row"><span class="lbl">Relance auto documents</span><span class="val" style="color:var(--teal-d)"><select id="p-relance_auto_documents"><option value="1" <?= $ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>activée</option><option value="0" <?= !$ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>désactivée</option></select></span></div>
-      <div class="param-row"><span class="lbl">Suivi caméra (Global)</span><span class="val" style="color:var(--teal-d)"><select id="p-suivi_camera_global"><option value="1" <?= $ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>activé</option><option value="0" <?= !$ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>désactivé</option></select></span></div>
+      <div class="param-row"><span class="lbl">Relance auto documents</span><span class="val" style="color:var(--ink)"><select id="p-relance_auto_documents"><option value="1" <?= $ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>activée</option><option value="0" <?= !$ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>désactivée</option></select></span></div>
+      <div class="param-row"><span class="lbl">Suivi caméra (Global)</span><span class="val" style="color:var(--ink)"><select id="p-suivi_camera_global"><option value="1" <?= $ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>activé</option><option value="0" <?= !$ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>désactivé</option></select></span></div>
       <div class="param-row"><span class="lbl">Seuil alerte caméra</span><span class="val"><input type="number" id="p-seuil_alerte_camera" value="<?= (int)$ecsr_params['seuil_alerte_camera'] ?>"> %</span></div>
       <div class="param-row"><span class="lbl">Proposition classe D</span><span class="val"><select id="p-proposition_classe_d"><option value="manuelle" <?= $ecsr_params['proposition_classe_d'] === 'manuelle' ? 'selected' : '' ?>>manuelle</option><option value="automatique" <?= $ecsr_params['proposition_classe_d'] === 'automatique' ? 'selected' : '' ?>>automatique</option></select></span></div>
     </div>
@@ -2213,9 +2788,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ===== LEADS ===== -->
 <div class="view" id="v-leads">
   <h1>Leads</h1>
-  <p class="sub" style="margin-bottom:0">Demandes de contact reçues depuis la landing page LBA Académie.</p>
+  <p class="sub" style="margin-bottom:0">Demandes de contact reçues depuis la landing page <?= s($brand['name']) ?>.</p>
   <div class="twrap" style="margin-top:16px">
-    <table>
+    <table class="rtable">
       <thead>
         <tr>
           <th>Contact</th>
@@ -2224,10 +2799,63 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
           <th>Situation</th>
           <th>Reçu le</th>
           <th>Statut</th>
+          <th></th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="leads-tbody"></tbody>
     </table>
+  </div>
+
+  <h2 style="margin-top:28px">En attente d'activation</h2>
+  <p class="sub" style="margin-bottom:0">Compte créé et inscrit, mais accès aux cours bloqué tant que le dossier (documents reçus par e-mail) n'est pas complet. Cliquer sur « Activer l'accès » une fois les documents en main.</p>
+  <div class="twrap" style="margin-top:16px">
+    <table class="rtable">
+      <thead>
+        <tr>
+          <th>Élève</th>
+          <th>E-mail</th>
+          <th>Formation</th>
+          <th>Inscrit·e le</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="pending-activation-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-lead-bg" onclick="if(event.target===this)closeLeadModal()">
+  <div class="modal" style="width:420px;max-width:94vw">
+    <h2>Inscrire un élève</h2>
+    <p class="modal-sub" id="lead-modal-sub"></p>
+    <div class="fld"><label>Prénom</label><input type="text" id="lead-firstname"></div>
+    <div class="fld"><label>Nom</label><input type="text" id="lead-lastname"></div>
+    <div class="fld"><label>E-mail</label><input type="email" id="lead-email"></div>
+    <div class="fld"><label>Formation</label><select id="lead-formation"></select></div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeLeadModal()">Annuler</button>
+      <button class="btn primary" id="lead-convert-btn" onclick="convertLead()">Inscrire</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-creds-bg" onclick="if(event.target===this)closeCredsModal()">
+  <div class="modal" style="width:380px;max-width:94vw">
+    <h2>Identifiants de connexion</h2>
+    <p class="modal-sub" id="creds-modal-sub"></p>
+    <div class="fld"><label>Identifiant</label><input type="text" id="creds-username" readonly></div>
+    <div class="fld" id="creds-pw-row" style="display:none">
+      <label>Mot de passe (à transmettre maintenant — non récupérable ensuite)</label>
+      <input type="text" id="creds-password" readonly>
+    </div>
+    <p class="sub" style="font-size:11.5px;margin:4px 0 0">
+      Moodle ne stocke jamais le mot de passe en clair : on ne peut pas afficher l'actuel, seulement en définir un nouveau.
+    </p>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeCredsModal()">Fermer</button>
+      <button class="btn primary" id="creds-reset-btn" onclick="resetCredsPassword()">Réinitialiser le mot de passe</button>
+    </div>
   </div>
 </div>
 
@@ -2335,11 +2963,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
-<!-- MODAL Créer un cours -->
+<!-- MODAL Créer un module -->
 <div class="modal-bg" id="modal-course-bg" onclick="if(event.target===this)closeCourseModal()">
   <div class="modal">
-    <h2>Nouveau cours</h2>
-    <p class="modal-sub">Crée la coquille du cours (nom, catégorie). Le formateur y ajoute ensuite le contenu depuis son espace.</p>
+    <h2>Nouveau module</h2>
+    <p class="modal-sub">Crée la coquille du module (nom, catégorie). Le formateur y ajoute ensuite le contenu (les cours) depuis son espace.</p>
     <div class="fld">
       <label>Nom complet</label>
       <input type="text" id="course-fullname" placeholder="ex : M6 – Gestion des situations d'urgence" maxlength="255">
@@ -2434,6 +3062,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
+      <div class="msg-thread-back" onclick="msgMobileBack()">&#8592; Retour aux contacts</div>
       <div class="msg-thread-head" id="msg-thread-head" style="display:none">
         <div class="msg-thread-who">
           <span class="msg-thread-avatar" id="msg-thread-avatar"></span>
@@ -2476,10 +3105,26 @@ function nav(btn) {
   document.getElementById(vid).classList.add('on');
   if (vid === 'v-plan') initPlan();
   if (vid === 'v-cours') renderCoursAdmin();
-  if (vid === 'v-leads') renderLeads();
+  if (vid === 'v-leads') { renderLeads(); renderPendingActivations(); }
   if (vid === 'v-admin' && !document.getElementById('admin-tool-frame').src) {
     adminToolShow(document.querySelector('#v-admin .admin-tool-card.on'));
   }
+}
+
+/* Bouton "Voir les élèves" d'une alerte Lia : applique le même filtre que
+   celui utilisé pour calculer l'alerte (sinon on atterrit sur la liste
+   complète des élèves, incohérente avec le nombre annoncé dans l'alerte). */
+function goToAlert(target, filter) {
+  if (filter) {
+    activeFilter = filter;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('on'));
+    document.getElementById('students-title').textContent = filter === 'inactive'
+      ? 'Élèves inactifs depuis 7 jours'
+      : (filter === 'low' ? 'Élèves — progression < 20 %' : 'Tous les élèves');
+    renderClassCards();
+    renderStudentsTable();
+  }
+  nav(document.querySelector('[data-v=' + target + ']'));
 }
 
 /* ===== ADMINISTRATIF (émargement / rapport d'heures) ===== */
@@ -2542,12 +3187,19 @@ function msgDayLabel(ts) {
 
 function openMessageModal(uid, nom) {
   document.getElementById('msg-modal-bg').classList.add('open');
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread'); // repartir sur la liste des contacts en mobile
   _msg.pendingUserId = uid;
   _msg.pendingName   = nom;
   msgLoadList();
 }
 function closeMessageModal() {
   document.getElementById('msg-modal-bg').classList.remove('open');
+  refreshMsgNavBadge();
+}
+function msgMobileBack() {
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread');
 }
 
 function msgLoadList() {
@@ -2625,6 +3277,11 @@ function msgRenderContacts() {
 function msgSelectContact(convid, userid, nom, cls, isonline) {
   _msg.activeConvId = convid;
   _msg.activeUserId = userid;
+
+  if (window.innerWidth <= 760) {
+    var modal = document.querySelector('.msg-modal');
+    if (modal) modal.classList.add('msg-mob-thread');
+  }
 
   document.querySelectorAll('.msg-contact').forEach(function(el){ el.classList.remove('on'); });
   var row = document.querySelector('.msg-contact[data-uid="' + userid + '"]');
@@ -2719,7 +3376,7 @@ function msgToggleTraite() {
 function doLogout(ev) {
   ev.preventDefault();
   var logoutUrl = WWWROOT + '/login/logout.php?sesskey=' + SESSKEY;
-  var target    = WWWROOT + '/login/index.php?loginredirect=1';
+  var target    = WWWROOT + '/login/index.php?loginredirect=1&client=<?= $admin_client ?>';
   fetch(logoutUrl, { credentials: 'same-origin' }).finally(function() {
     window.location.href = target;
   });
@@ -2858,7 +3515,7 @@ function renderDash() {
     titleEl.style.display = '';
     prochEl.innerHTML = milestones.map(function(m) {
       var typeChip = m.type === 'vehicule'
-        ? '<span class="chip" style="background:var(--teal-t);color:var(--teal-d)">présentiel</span>'
+        ? '<span class="chip c-vi">présentiel</span>'
         : '<span class="chip" style="background:var(--orange-t);color:var(--orange-d)">stage</span>';
       var dateStr = fmtDate(m.date);
       return '<div class="event"><span class="h" style="flex:0 0 56px">' + dateStr + '</span>' +
@@ -2875,7 +3532,7 @@ function renderDash() {
     alertEl.innerHTML = DATA.alerts.map(function(a) {
       return '<div class="lia-item' + (a.type === 'danger' ? ' danger' : '') + '">' +
         '<b>' + esc(a.title) + ' :</b> ' + esc(a.body) +
-        (a.action ? '<div class="act"><button class="btn mini primary" onclick="nav(document.querySelector(\'[data-v=' + a.target + ']\'))">' + esc(a.action) + '</button></div>' : '') +
+        (a.action ? '<div class="act"><button class="btn mini primary" onclick="goToAlert(\'' + a.target + '\',' + (a.filter ? '\'' + a.filter + '\'' : 'null') + ')">' + esc(a.action) + '</button></div>' : '') +
         '</div>';
     }).join('');
   } else {
@@ -2948,7 +3605,7 @@ function openAddFormateur() {
   document.getElementById('fmod-sub').textContent   = "L'utilisateur sera inscrit comme formateur sur tous les cours.";
   document.getElementById('fmod-new-fields').style.display = '';
   document.getElementById('fmod-habs-section').style.display = 'none';
-  document.getElementById('fmod-client-field').style.display = DATA.is_siteadmin ? '' : 'none';
+  document.getElementById('fmod-client-field').style.display = 'none';
   ['fmod-firstname','fmod-lastname','fmod-email','fmod-role'].forEach(id => document.getElementById(id).value = '');
   document.querySelector('input[name="fmod-type"][value="salarie"]').checked = true;
   document.querySelector('input[name="fmod-client"][value="' + (DATA.admin_client || 'lba') + '"]').checked = true;
@@ -3099,12 +3756,19 @@ function liaFmtDate(w) {
 
 function liaHeadRows(totalW) {
   var m = '<div class="pg-row pg-mrow"><div class="pg-lab"></div>';
-  var prev = -1;
+  var prevMo = -1, prevYr = -1;
   for (var w = 1; w <= totalW; w++) {
     var d = LIA_START ? new Date(LIA_START.getTime()+(w-1)*7*86400*1000) : null;
-    var mo = d ? d.getMonth() : -1;
-    m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+(d&&mo!==prev?LIA_MONTHS_FR[mo]:'')+'</div>';
-    prev = mo;
+    var mo = d ? d.getMonth() : -1, yr = d ? d.getFullYear() : -1;
+    var label = '';
+    if (d && mo !== prevMo) {
+      // L'année n'apparaît que quand elle change (janvier, ou tout premier
+      // mois affiché) — sinon "janv." pourrait désigner 2026 ou 2027 sans
+      // distinction sur un planning qui dépasse 12 mois.
+      label = LIA_MONTHS_FR[mo] + (yr !== prevYr ? ' ' + yr : '');
+    }
+    m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+label+'</div>';
+    prevMo = mo; prevYr = yr;
   }
   m += '</div><div class="pg-row pg-wrow"><div class="pg-lab"><span>Semaine</span></div>';
   for (var w = 1; w <= totalW; w++) m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+w+'</div>';
@@ -3126,32 +3790,35 @@ function liaRender() {
           var hasDot = LIA_PLAN_EV_WEEKS[w] ? ' pg-has-ev' : '';
           html += '<div class="pg-cell pg-c-d'+nowC+hasDot+'" title="S'+w+' · visio · cliquer pour planifier" onclick="openSeanceModal(\'' + cohort.L + '\','+w+','+cohort.off+')" style="cursor:pointer">' + (hasDot ? '●' : '') + '</div>';
         }
-        else if (t==='s')  html += '<div class="pg-cell pg-c-s'+nowC+'" title="S'+w+' · stage">St</div>';
-        else if (t==='r')  html += '<div class="pg-cell pg-c-r'+nowC+'" title="S'+w+' · regroupement véhicule">R</div>';
-        else if (t==='rs') html += '<div class="pg-cell pg-c-rs'+nowC+'" title="S'+w+' · regroupement salle">R</div>';
-        else if (t==='e1') html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · examen CCP1">C1</div>';
-        else               html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · session titre">Ex</div>';
+        else if (t==='s')  html += '<div class="pg-cell pg-c-s'+nowC+'" title="S'+w+' · stage · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">St</div>';
+        else if (t==='r')  html += '<div class="pg-cell pg-c-r'+nowC+'" title="S'+w+' · regroupement véhicule · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
+        else if (t==='rs') html += '<div class="pg-cell pg-c-rs'+nowC+'" title="S'+w+' · regroupement salle · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
+        else if (t==='e1') html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · examen CCP1 · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">C1</div>';
+        else               html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · session titre · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">Ex</div>';
       }
       html += '</div>';
     });
   } else {
     LIA_PEOPLE.forEach(function(per) {
-      html += '<div class="pg-row"><div class="pg-lab"><b>'+esc(per.nom)+'</b><span>'+esc(per.role)+'</span></div>';
+      html += '<div class="pg-row"><div class="pg-lab"><b class="pg-clickable" onclick="openLiaHoursDetail('+per.id+')">'+esc(per.nom)+'</b><span>'+esc(per.role)+'</span></div>';
       for (var w = 1; w <= p.totalW; w++) {
         var es = p.grid[per.id]?p.grid[per.id][w]||[]:[], t = liaWeekTotal(p,per.id,w), nowC = w===LIA_TODAY_W?' pg-now':'';
         var lc = t > per.cap+0.5 ? ' pg-hot' : t > 24 ? ' pg-p3' : t > 14 ? ' pg-p2' : t > 0 ? ' pg-p1' : '';
-        if (!es.length) { html += '<div class="pg-cell'+lc+nowC+'"></div>'; continue; }
+        var click = ' onclick="openLiaAffectModal('+per.id+','+w+',null)" style="cursor:pointer"';
+        if (!es.length) { html += '<div class="pg-cell'+lc+nowC+'" title="S'+w+' · '+esc(per.nom)+' — cliquer pour affecter"'+click+'></div>'; continue; }
         var byCoh = {};
         es.forEach(function(e){ (byCoh[e.coh]=byCoh[e.coh]||[]).push(e); });
         var chips = '', tip = 'S'+w+' · '+per.nom+' — '+Math.round(t)+' h&#10;';
         Object.keys(byCoh).sort().forEach(function(c) {
           var arr = byCoh[c];
-          var main = arr.some(function(e){return e.type==='veh';}) ? 'pg-ch-veh' : arr.some(function(e){return e.type==='salle';}) ? 'pg-ch-s' : 'pg-ch-v';
+          var main = arr.some(function(e){return e.type==='veh';}) ? 'pg-ch-veh' : arr.some(function(e){return e.type==='salle';}) ? 'pg-ch-s' : arr.some(function(e){return e.type==='stage';}) ? 'pg-ch-stage' : arr.some(function(e){return e.type==='exam';}) ? 'pg-ch-exam' : 'pg-ch-v';
           var star = arr.some(function(e){return e.lia;});
-          chips += '<span class="pg-pcell '+main+'">'+c+'</span>'+(star?'<span class="pg-star">✦</span>':'');
-          arr.forEach(function(e){ tip += (e.lia?'✦ ':'')+c+' · '+(e.type==='veh'?'véhicule':e.type==='salle'?'salle':'visio')+' « '+e.label+' » · '+Math.round(e.h*2)/2+' h&#10;'; });
+          var manual = arr.some(function(e){return e.manual;});
+          chips += '<span class="pg-pcell '+main+'">'+c+'</span>'+(star?'<span class="pg-star">✦</span>':'')+(manual?'<span class="pg-manual">✎</span>':'');
+          arr.forEach(function(e){ tip += (e.lia?'✦ ':'')+(e.manual?'✎ ':'')+c+' · '+(e.type==='veh'?'véhicule':e.type==='salle'?'salle':e.type==='stage'?'stage':e.type==='exam'?'examen':'visio')+' « '+e.label+' » · '+Math.round(e.h*2)/2+' h&#10;'; });
         });
-        html += '<div class="pg-cell'+lc+nowC+'" title="'+tip+'">'+chips+'</div>';
+        tip += 'cliquer pour affecter';
+        html += '<div class="pg-cell'+lc+nowC+'" title="'+tip+'"'+click+'>'+chips+'</div>';
       }
       html += '</div>';
     });
@@ -3161,11 +3828,15 @@ function liaRender() {
   var logEl = document.getElementById('plan-log');
   var lastLog = p.log.slice(-8);
   logEl.innerHTML = lastLog.length
-    ? lastLog.map(function(l){ return '<div class="pg-logline"><span class="pg-lw">S'+l.w+'</span><span>'+l.txt+'</span></div>'; }).join('')
+    ? lastLog.map(function(l){ return '<div class="pg-logline"><span class="pg-lw">S'+l.w+'</span><span class="pg-ltxt">'+l.txt+'</span></div>'; }).join('')
     : '<div class="pg-logline" style="color:var(--muted)">Aucun ajustement automatique.</div>';
   var alertEl = document.getElementById('plan-alerts');
   alertEl.innerHTML = p.alerts.length
-    ? p.alerts.map(function(a){ return '<div class="pg-alert">'+esc(a.txt)+'</div>'; }).join('')
+    ? p.alerts.map(function(a){
+        var actions = '<button class="btn mini ghost" onclick="dismissLiaAlert(\''+a.kind+'\','+(a.pid||'null')+','+a.w+',this)">Accepter</button>';
+        if (a.pid) actions += '<button class="btn mini primary" onclick="openLiaAffectModal('+a.pid+','+a.w+',null)">Modifier l\'affectation</button>';
+        return '<div class="pg-alert">'+esc(a.txt)+'<div class="pg-alert-actions">'+actions+'</div></div>';
+      }).join('')
     : '<div class="pg-ok"><b>Rien à arbitrer.</b> Le plan tient tel quel.</div>';
   document.getElementById('plan-pkpis').innerHTML =
     '<div class="kpi k-mint" style="min-height:80px"><div class="kpi-head"><span class="kpi-title">Heures lissées par Lia</span></div><div class="kpi-main"><div class="kpi-num">'+p.movedH+'<small>h</small></div></div><div class="kpi-sub">sur '+p.weeks+' semaine(s)</div></div>'+
@@ -3182,21 +3853,32 @@ function setVuePlan(v) {
 
 function simulerClasse() {
   if (!LIA_PLAN || !LIA_START) return;
+  var decalage = parseInt((DATA.ecsr_params || {}).decalage_rentrees, 10) || 2;
   var maxOff = Math.max.apply(null, [0].concat(LIA_COHORTS.map(function(c){ return c.off; })));
-  var nextOff = maxOff + 5;
+  var nextOff = maxOff + decalage;
   var nextL = String.fromCharCode(65 + LIA_COHORTS.length);
   var propDate = new Date(LIA_START.getTime() + nextOff * 7 * 86400 * 1000);
   document.getElementById('plan-prop-letter').textContent = nextL;
   document.getElementById('plan-prop-date').textContent = fmtDateFull(propDate);
+  document.getElementById('plan-prop-decalage').textContent = decalage + (decalage === 1 ? ' semaine' : ' semaines');
   document.getElementById('plan-prop-btn').onclick = function() {
-    apiPost({action: 'preview_lia_plan', letter: nextL, off: nextOff}).then(function(d) {
-      if (!d.ok) { toast('Erreur: ' + (d.msg || '')); return; }
-      LIA_COHORTS = d.cohorts;
-      LIA_PLAN    = d.plan;
-      liaRender();
-      document.getElementById('plan-prop').classList.remove('on');
-      toast('Classe ' + nextL + ' simulée — rentrée le ' + fmtDateFull(propDate));
-    }).catch(function() { toast('Erreur réseau.'); });
+    var btn = document.getElementById('plan-prop-btn');
+    var isoDate = propDate.getFullYear() + '-' + String(propDate.getMonth() + 1).padStart(2, '0') + '-' + String(propDate.getDate()).padStart(2, '0');
+    btn.disabled = true; btn.textContent = 'Création…';
+    apiPost({action: 'create_class', name: 'Classe ' + nextL, startdate: isoDate}).then(function(r) {
+      if (!r.ok) { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur : ' + (r.msg || '?')); return; }
+      DATA.classes.push({ id: r.id, name: r.name, startdate: isoDate, nb_members: 0, avg_prog: 0, member_ids: [] });
+      renderCoh();
+      return apiPost({action: 'preview_lia_plan'}).then(function(d) {
+        btn.disabled = false; btn.textContent = 'Créer la classe';
+        if (!d.ok) { toast('Classe créée, mais actualisation du planning en échec — rechargez la page.'); return; }
+        LIA_COHORTS = d.cohorts;
+        LIA_PLAN    = d.plan;
+        liaRender();
+        document.getElementById('plan-prop').classList.remove('on');
+        toast('Classe ' + nextL + ' créée — rentrée le ' + fmtDateFull(propDate));
+      });
+    }).catch(function() { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur réseau.'); });
   };
   document.getElementById('plan-prop').classList.add('on');
 }
@@ -3226,6 +3908,18 @@ function initPlan() {
     });
   }
   liaRender();
+  // Le planning démarre toujours à la 1ère semaine de la classe la plus
+  // ancienne (peut remonter à plusieurs mois, voire une année précédente) —
+  // sans ça l'admin atterrit sur du passé et doit chercher "aujourd'hui" à
+  // la main. Uniquement au premier chargement (pas après un enregistrement
+  // d'affectation, pour ne pas perdre la position de défilement de l'admin).
+  requestAnimationFrame(liaScrollToToday);
+}
+
+function liaScrollToToday() {
+  var wrap = document.getElementById('plan-grid');
+  var nowCell = wrap && wrap.querySelector('.pg-now');
+  if (nowCell) nowCell.scrollIntoView({ inline: 'center', block: 'nearest' });
 }
 
 /* ===== INDISPONIBILITÉS À VALIDER ===== */
@@ -3426,8 +4120,9 @@ function filterStudents(btn) {
 }
 
 function renderStudentsTable() {
-  var filtered = activeFilter === 'all'
-    ? DATA.students
+  var filtered = activeFilter === 'all' ? DATA.students
+    : activeFilter === 'inactive' ? DATA.students.filter(s => s.inactive)
+    : activeFilter === 'low' ? DATA.students.filter(s => s.low)
     : DATA.students.filter(s => String(s.cohort_id) === activeFilter);
 
   var tbody = document.getElementById('students-tbody');
@@ -3440,19 +4135,16 @@ function renderStudentsTable() {
     var rowCls = s.needs_action ? ' style="background:rgba(214,69,69,.04)"' : '';
     var inactivePill = s.inactive ? ' <span class="chip c-ko">inactif &gt;7j</span>' : '';
 
-    // Client (LBA / Saran) — modifiable seulement par un vrai administrateur
-    // du site ; un manager (admin cantonné à son client) voit juste un badge.
-    var clientSel = DATA.is_siteadmin
-      ? ('<select class="client-select" data-uid="' + s.id + '" onchange="setUserClient(this)">' +
-         '<option value="lba"' + (s.client === 'lba' ? ' selected' : '') + '>LBA</option>' +
-         '<option value="saran"' + (s.client === 'saran' ? ' selected' : '') + '>Saran</option>' +
-         '</select>')
-      : ('<span class="chip" style="' + (s.client === 'saran' ? 'background:var(--orange-t);color:var(--orange-d)' : 'background:var(--teal-t);color:var(--teal-d)') + '">' + (s.client === 'saran' ? 'Saran' : 'LBA') + '</span>');
-
     // Sous-groupe
     var cohObj = DATA.classes.find(c => c.id === s.cohort_id);
     var letter = cohObj ? classLetter(cohObj.name) : '';
     var sgLabel = (letter && s.sg_num) ? '<span class="sgchip">' + letter + s.sg_num + '</span>' : '<span style="color:var(--muted)">—</span>';
+
+    // Classe (affectation)
+    var classSelectHtml = '<select data-uid="' + s.id + '" data-current="' + (s.cohort_id || 0) + '" onchange="assignToClass(this)" style="font-size:12px;padding:4px 6px">' +
+      '<option value="">—</option>' +
+      DATA.classes.map(function(c) { return '<option value="' + c.id + '"' + (s.cohort_id === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') +
+      '</select>';
 
     // Règlement
     var regBtn = s.reglement
@@ -3475,34 +4167,19 @@ function renderStudentsTable() {
     var actionBtn = s.needs_action
       ? '<button class="btn-agir" onclick="openMessageModal(' + s.id + ',\'' + esc(s.nom).replace(/'/g,"\\'") + '\')">Agir</button>'
       : '<a class="btn mini ghost" href="' + WWWROOT + '/user/view.php?id=' + s.id + '&course=1" target="_blank">Ouvrir</a>';
+    var credsBtn = '<button class="btn mini ghost" title="Identifiants de connexion" onclick="openCredsModal(' + s.id + ',\'' + esc(s.nom).replace(/'/g,"\\'") + '\',\'' + esc(s.username || '').replace(/'/g,"\\'") + '\')">🔑</button>';
 
     return '<tr' + rowCls + '>' +
       '<td>' + esc(s.nom) + inactivePill + '</td>' +
-      '<td>' + clientSel + '</td>' +
+      '<td>' + classSelectHtml + '</td>' +
       '<td>' + sgLabel + '</td>' +
       '<td>' + regBtn + '</td>' +
       '<td>' + barHtml + '</td>' +
       '<td>' + presHtml + '</td>' +
       '<td>' + noteHtml + '</td>' +
-      '<td>' + actionBtn + '</td>' +
+      '<td style="display:flex;gap:6px;align-items:center">' + actionBtn + credsBtn + '</td>' +
       '</tr>';
   }).join('');
-}
-
-function setUserClient(sel) {
-  var uid = parseInt(sel.dataset.uid);
-  var client = sel.value;
-  apiPost({ action: 'set_user_client', userid: uid, client: client })
-    .then(r => {
-      if (r.ok) {
-        var s = DATA.students.find(x => x.id === uid) || (DATA.formateurs || []).find(x => x.id === uid);
-        if (s) s.client = client;
-        toast('Client mis à jour : ' + (client === 'saran' ? 'Saran' : 'LBA'));
-      } else {
-        toast('Erreur : ' + (r.msg || '?'));
-      }
-    })
-    .catch(() => toast('Erreur réseau'));
 }
 
 function toggleReglement(uid, btn) {
@@ -3601,6 +4278,140 @@ function saveSeance() {
     });
 }
 
+/* ===== AFFECTATION MANUELLE (Planning & Lia) =====
+   Une case cliquée (vue Intervenants ou Classes) ou un bouton "Modifier
+   l'affectation" sur une alerte ouvrent la même modale : elle écrit/écrase
+   une entrée unique par clé (formateur, semaine, classe) — voir
+   lia_apply_overrides() côté serveur, qui la rend définitive (fix:true,
+   jamais retouchée par le lissage automatique). */
+var _liaAffectW = 0;
+
+function liaFindEntry(pid, w, coh) {
+  if (!pid || !coh || !LIA_PLAN || !LIA_PLAN.grid[pid] || !LIA_PLAN.grid[pid][w]) return null;
+  return LIA_PLAN.grid[pid][w].find(function(e) { return e.coh === coh; }) || null;
+}
+
+function liaAffectOnClassChange() {
+  var pid = parseInt(document.getElementById('lia-pid').value) || 0;
+  var coh = document.getElementById('lia-coh').value;
+  var e = liaFindEntry(pid, _liaAffectW, coh);
+  document.getElementById('lia-type').value  = e ? e.type : 'visio';
+  document.getElementById('lia-h').value     = e ? e.h : 2;
+  document.getElementById('lia-label').value = e ? e.label : '';
+  document.getElementById('lia-course').value = e && e.courseid ? e.courseid : '';
+  document.getElementById('lia-delete-btn').style.display = e ? '' : 'none';
+}
+
+function openLiaAffectModal(pid, w, coh) {
+  if (!LIA_PLAN) return;
+  _liaAffectW = w;
+
+  var defaultCoh = coh;
+  if (!defaultCoh && pid) {
+    var es = (LIA_PLAN.grid[pid] && LIA_PLAN.grid[pid][w]) || [];
+    if (es.length) defaultCoh = es[0].coh;
+  }
+
+  document.getElementById('lia-pid').innerHTML = '<option value="">— Choisir —</option>' +
+    LIA_PEOPLE.map(function(p) { return '<option value="'+p.id+'"'+(pid===p.id?' selected':'')+'>'+esc(p.nom)+'</option>'; }).join('');
+  document.getElementById('lia-coh').innerHTML = '<option value="">— Choisir —</option>' +
+    LIA_COHORTS.map(function(c) { return '<option value="'+c.L+'"'+(defaultCoh===c.L?' selected':'')+'>Classe '+esc(c.L)+'</option>'; }).join('');
+  document.getElementById('lia-course').innerHTML = '<option value="">—</option>' +
+    (DATA.courses_list || []).map(function(c) { return '<option value="'+c.id+'">'+esc(c.shortname)+' – '+esc(c.fullname)+'</option>'; }).join('');
+
+  document.getElementById('lia-title').textContent = 'Affectation manuelle — S' + w;
+  document.getElementById('lia-sub').textContent = 'Semaine du ' + liaFmtDate(w);
+  liaAffectOnClassChange();
+  document.getElementById('modal-lia-bg').classList.add('on');
+}
+
+function closeLiaAffectModal() {
+  document.getElementById('modal-lia-bg').classList.remove('on');
+}
+
+function liaApplyLocalOverride(pid, w, coh, type, label, h) {
+  if (!LIA_PLAN.grid[pid]) LIA_PLAN.grid[pid] = {};
+  if (!LIA_PLAN.grid[pid][w]) LIA_PLAN.grid[pid][w] = [];
+  LIA_PLAN.grid[pid][w] = LIA_PLAN.grid[pid][w].filter(function(e) { return e.coh !== coh; });
+  if (h > 0) LIA_PLAN.grid[pid][w].push({ coh: coh, type: type, label: label, h: h, fix: true, manual: true });
+}
+
+function saveLiaAffect() {
+  var pid      = parseInt(document.getElementById('lia-pid').value);
+  var coh      = document.getElementById('lia-coh').value;
+  var type     = document.getElementById('lia-type').value;
+  var h        = parseFloat(document.getElementById('lia-h').value);
+  var label    = document.getElementById('lia-label').value.trim();
+  var courseid = parseInt(document.getElementById('lia-course').value) || 0;
+  var w        = _liaAffectW;
+
+  if (!pid || !coh || !label || !(h > 0)) { alert('Remplir le formateur, la classe, le module et un nombre d\'heures.'); return; }
+
+  var btn = document.querySelector('#modal-lia .btn.primary');
+  btn.disabled = true; btn.textContent = 'Enregistrement...';
+  apiPost({ action: 'save_lia_override', pid: pid, w: w, coh: coh, type: type, label: label, h: h, courseid: courseid })
+    .then(function(d) {
+      btn.disabled = false; btn.textContent = 'Enregistrer';
+      if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); return; }
+      liaApplyLocalOverride(pid, w, coh, type, label, h);
+      closeLiaAffectModal();
+      liaRender();
+      toast('Affectation enregistrée');
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Enregistrer'; alert('Erreur réseau.'); });
+}
+
+function deleteLiaAffect() {
+  var pid = parseInt(document.getElementById('lia-pid').value);
+  var coh = document.getElementById('lia-coh').value;
+  var w   = _liaAffectW;
+  if (!pid || !coh) return;
+  apiPost({ action: 'delete_lia_override', pid: pid, w: w, coh: coh })
+    .then(function(d) {
+      if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); return; }
+      liaApplyLocalOverride(pid, w, coh, null, null, 0);
+      closeLiaAffectModal();
+      liaRender();
+      toast('Affectation supprimée');
+    })
+    .catch(function() { alert('Erreur réseau.'); });
+}
+
+function dismissLiaAlert(kind, pid, w) {
+  apiPost({ action: 'dismiss_lia_alert', kind: kind, pid: pid || 0, w: w })
+    .then(function(d) {
+      if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); return; }
+      LIA_PLAN.alerts = LIA_PLAN.alerts.filter(function(a) { return !(a.kind === kind && (a.pid || null) === (pid || null) && a.w === w); });
+      liaRender();
+    })
+    .catch(function() { alert('Erreur réseau.'); });
+}
+
+function openLiaHoursDetail(pid) {
+  var per = LIA_PEOPLE.find(function(p) { return p.id === pid; });
+  if (!per || !LIA_PLAN) return;
+  var totals = {};
+  var grid = LIA_PLAN.grid[pid] || {};
+  Object.keys(grid).forEach(function(w) {
+    (grid[w] || []).forEach(function(e) { totals[e.coh] = (totals[e.coh] || 0) + e.h; });
+  });
+  var cohLetters = Object.keys(totals).sort();
+  var rows = cohLetters.map(function(c) {
+    return '<div style="display:flex;justify-content:space-between"><span>Classe '+esc(c)+'</span><b>'+Math.round(totals[c])+' h</b></div>';
+  }).join('');
+  var total = cohLetters.reduce(function(s, c) { return s + totals[c]; }, 0);
+  document.getElementById('lia-hours-title').textContent = 'Heures — ' + per.nom;
+  document.getElementById('lia-hours-body').innerHTML =
+    (rows || '<div style="color:var(--muted)">Aucune heure affectée.</div>') +
+    '<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px;display:flex;justify-content:space-between"><span>Total</span><b>'+Math.round(total)+' h</b></div>' +
+    '<div style="color:var(--muted);font-size:12px">Capacité hebdo : '+per.cap+' h</div>';
+  document.getElementById('modal-lia-hours-bg').classList.add('on');
+}
+
+function closeLiaHoursDetail() {
+  document.getElementById('modal-lia-hours-bg').classList.remove('on');
+}
+
 function saveNote(input) {
   var uid  = parseInt(input.dataset.uid);
   var note = input.value.trim();
@@ -3680,22 +4491,584 @@ function saveClass() {
     .catch(() => { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur réseau'); });
 }
 
-/* ===== COURS ===== */
+/* ===== MODULES ===== */
 function renderCoursAdmin() {
   var tbody = document.getElementById('cours-admin-tbody');
   var list = DATA.courses_full || [];
   if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:20px">Aucun cours.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">Aucun module.</td></tr>';
     return;
   }
   tbody.innerHTML = list.map(function(c) {
     return '<tr>' +
-      '<td>' + esc(c.fullname) + '</td>' +
-      '<td>' + esc(c.shortname) + '</td>' +
-      '<td>' + esc(c.category_name) + '</td>' +
+      '<td class="mm-name">' + esc(c.fullname) + '</td>' +
+      '<td class="mm-short">' + esc(c.shortname) + '</td>' +
+      '<td class="mm-cat">' + esc(c.category_name) + '</td>' +
       '<td>' + (c.visible ? '<span class="chip c-ok">Visible</span>' : '<span class="chip c-ko">Masqué</span>') + '</td>' +
+      '<td><button class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Voir</button></td>' +
     '</tr>';
   }).join('');
+}
+
+/* ===== VIEWER DE COURS INTÉGRÉ (TOC + iframe) — même composant que
+   espace-formateur.php, pour vérifier/éditer le contenu sans quitter le
+   tableau de bord admin ni se faire rediriger vers Moodle nu. ===== */
+var _ce = { id: 0, name: '', sections: [], contextid: 0 };
+var _ceRefreshTimer = null;
+// Moodle retient l'activation du mode edition pour toute la session
+// (preference $USER->editing) : inutile de repasser par editmode.php (un
+// aller-retour serveur en plus) une fois que c'est deja fait une premiere
+// fois dans cette session.
+var _ceEditingActivated = false;
+
+var _ceIframeCSS = [
+  '#page-header,#main-header,.navbar,#page-footer,.main-footer,footer,',
+  '.breadcrumb-nav,.breadcrumb,#nav-drawer,.drawer-toggle,.skiplinks,',
+  '.secondary-navigation,.tertiary-navigation,.activity-navigation,.section-navigation,#fsmod-header { display:none !important; }',
+  // Menu ⋮ d'une activite : ne garder que Parametres / Cacher / Dupliquer /
+  // Supprimer. Classes stables de Moodle (course/lib.php,
+  // course_get_cm_edit_actions + controlmenu.php), pas du texte devine.
+  '.editing_movecm,.editing_moveright,.editing_moveleft,.editing_assign,.editing_groupmode { display:none !important; }',
+  // Bouton "+ Ajouter un bloc" (selecteur stable, template core/add_block_button).
+  '[data-region="add-block-button"] { display:none !important; }',
+  // Fenetre "Ajouter une activite ou ressource" : ne garder que les types
+  // reellement utilises sur cette plateforme (attribut data-internal stable,
+  // voir course/format/templates/local/activitychooser/item.mustache).
+  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="forum"]):not([data-internal="assign"]) { display:none !important; }',
+  // Formulaire "Parametres" d'une activite : ne garder que Apparence /
+  // Reglages courants / Conditions d'achevement + la case notification.
+  // Retire Restriction d'acces / Tags / Competences (noms d'elements de
+  // formulaire stables, voir course/moodleform_mod.php et admin/tool/lp/lib.php).
+  '#id_availabilityconditionsheadercontainer,#id_tagshdrcontainer,#id_competenciessectioncontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_availabilityconditionsheadercontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_tagshdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_competenciessectioncontainer"])',
+  '{ display:none !important; }',
+  // Formulaire "Parametres" d'un Quiz : ne garder que Temps / Note /
+  // Feedback global. Retire Mise en page / Comportement des questions /
+  // Options de relecture / Apparence / Restrictions sur les tentatives /
+  // Safe Exam Browser (noms d'elements stables, voir mod/quiz/mod_form.php
+  // et mod/quiz/accessrule/seb/classes/settings_provider.php).
+  '#id_layouthdrcontainer,#id_interactionhdrcontainer,#id_reviewoptionshdrcontainer,',
+  '#id_displaycontainer,#id_securitycontainer,#id_sebcontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
+  '{ display:none !important; }',
+  // Formulaire "Parametres" d'un Devoir : ne garder que Instructions de
+  // l'activite / Fichiers supplementaires / Types de remise / Note.
+  // Retire Types de feedback / Reglages de la remise des travaux / Reglages
+  // de remises en groupe / Notifications (noms d'elements stables, voir
+  // mod/assign/mod_form.php et mod/assign/locallib.php).
+  '#id_feedbacktypescontainer,#id_submissionsettingscontainer,',
+  '#id_groupsubmissionsettingscontainer,#id_notificationscontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_feedbacktypescontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_submissionsettingscontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_groupsubmissionsettingscontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_notificationscontainer"])',
+  '{ display:none !important; }',
+  'html, body { background:#fff !important; }',
+  '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
+  '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
+  '.btn-primary,.btn.btn-primary { background:#2E9488 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  // Survol des boutons : sans ces regles, l'etat :hover retombe sur l'accent
+  // dore par defaut du theme (memes couleurs de base que ci-dessus, juste
+  // plus foncees, pour garder un retour visuel au survol).
+  // Catch-all large : le theme colore beaucoup de boutons via des
+  // selecteurs varies (.addresourcemodchooser a, data-action="add", etc.)
+  // qui ne portent pas forcement .btn-primary/.btn-secondary. Le simple
+  // !important suffit a gagner face aux regles du theme (non-!important).
+  '.btn:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  '.btn-primary:hover,.btn.btn-primary:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  '.btn-secondary:hover,.btn.btn-secondary:hover { background:#EAF6F4 !important; border-color:#1C5F58 !important; color:#1C5F58 !important; }',
+  // Liens de contenu (ex. fichier joint a un devoir) : couleur d'accent
+  // doree par defaut du theme, remplacee par le teal de la charte (meme
+  // regle deja en place cote lecteur eleve, _dvIframeCSS).
+  'a { color:#2E9488 !important; }',
+  'html { scrollbar-color: #2E9488 #f0f0f0 !important; }',
+  '::-webkit-scrollbar { width: 10px; }',
+  '::-webkit-scrollbar-track { background: #f0f0f0; }',
+  '::-webkit-scrollbar-thumb { background: #2E9488 !important; border-radius: 6px; }',
+  '::-webkit-scrollbar-thumb:hover { background: #1C5F58 !important; }',
+  // Boutons "+" d\'insertion d\'activite entre deux activites existantes —
+  // tres discrets par defaut (icone minuscule dans un dropdown Bootstrap).
+  // Cible specifiquement id="dropdownMenuButton-XXX" (le declencheur du menu
+  // "Ajouter une activite ou une ressource"), pas les autres dropdowns
+  // (menus d\'action par activite, etc.) pour ne pas les denaturer.
+  '[id^="dropdownMenuButton-"] { display:inline-flex !important; align-items:center !important; justify-content:center !important;',
+  'width:30px !important; height:30px !important; min-width:30px !important; background:#2E9488 !important; color:#fff !important;',
+  'border-radius:50% !important; opacity:1 !important; visibility:visible !important; margin:3px !important; box-shadow:0 1px 4px rgba(0,0,0,.25) !important; }',
+  '[id^="dropdownMenuButton-"]:hover { background:#267d73 !important; }',
+  '[id^="dropdownMenuButton-"] i,[id^="dropdownMenuButton-"] .icon { color:#fff !important; font-size:15px !important; }',
+  // Neutralise l\'ancienne UI theme_mb2nl (TOC "a droite", voir
+  // l3m_toc_scroll.js + theme_mb2nl customcss) qui masque .course-content et
+  // affiche un message tant qu\'elle n\'a pas cree son propre
+  // #l3m-activity-iframe-container — ce qui n\'arrive jamais quand
+  // course/view.php est charge dans NOTRE iframe imbriquee. On force donc le
+  // vrai contenu du cours a rester visible ici, sans toucher a cette
+  // fonctionnalite ailleurs (visite directe hors de notre viewer).
+  // Meme liste de selecteurs que la regle a neutraliser (specificite egale,
+  // le nôtre gagne car injecte apres, a source-order egale) + doublement de
+  // l\'ID pour le ::before (specificite superieure a leur selecteur compose
+  // de :not()/:has()), plutot qu\'un simple override qui perdait face a une
+  // regle plus specifique malgre le !important des deux cotes.
+  '.path-course-view #region-main .course-content,',
+  '.course-view-topics #region-main .course-content,',
+  'body[class*="course-view"] #region-main .course-content { display:block !important; }',
+  '#page-content#page-content::before { content:none !important; display:none !important; }',
+  // Lien "Decouvrir plus d'activites sur Place du marche Moodle" (fenetre
+  // "Ajouter une activite ou ressource") — renvoie vers un service externe
+  // (marketplace.moodle.com), pas pertinent pour nos formateurs/admins.
+  'div:has(> a[href*="marketplace.moodle.com"]) { display:none !important; }',
+  // Zone de blocs (ex. "side-pre") : hors edition, elle est deja vide et
+  // invisible, mais en mode edition Moodle affiche un encadre pointille avec
+  // le nom brut de la zone ("SIDE-PRE") pour inviter a y glisser un bloc —
+  // pas pertinent dans notre visualiseur (attribut stable, voir
+  // lib/classes/output/core_renderer.php, methode blocks()).
+  '[data-blockregion] { display:none !important; }',
+  // Vue de correction d'un devoir (mod/assign, action=grader) : le filtre de
+  // liste et "Reinitialiser les preferences" n'ont pas de sens quand on
+  // arrive directement sur UN eleve precis (attributs stables, voir
+  // mod/assign/templates/grading_navigation_user_selector.mustache).
+  '[data-region="user-filters"],[data-region="user-resettable"] { display:none !important; }',
+  // Selecteur de fichiers Moodle : texte des onglets en noir (illisible par
+  // defaut, trop clair) et couleur d'accent orange remplacee par le vert
+  // de la charte (voir repository/filepicker.js, classes .fp-repo/.nav-link
+  // ajoutees/retirees dynamiquement selon l'onglet actif).
+  '.fp-repo .fp-repo-name { color:#1A1714 !important; }',
+  '.fp-repo-area .fp-repo .nav-link.active { background:#2E9488 !important; border-color:#2E9488 !important; }',
+  '.fp-repo-area .fp-repo .nav-link.active .fp-repo-name { color:#fff !important; }',
+  // Panneau "Deposer un fichier" : retire "Enregistrer sous" et "Choisir une
+  // licence" (attributs stables, voir repository/filepicker.js).
+  '.fp-saveas,.fp-setlicense { display:none !important; }',
+  // Gestionnaire de fichiers (zone "Fichiers" d'un devoir/ressource) : menu
+  // contextuel "..." par fichier, ouvre les memes champs superflus
+  // (licence...) — classe stable core Moodle, voir theme/boost/scss/moodle/filemanager.scss.
+  '.fp-contextmenu { display:none !important; }',
+  // Vue de correction d'un devoir : retire le crayon "Modifier les reglages"
+  // (lien vers course/modedit.php, risque de renommage/reglage accidentel
+  // en pleine correction — attribut stable, voir
+  // mod/assign/templates/grading_navigation.mustache) et le bandeau
+  // "remis en avance de X" (classe stable, voir
+  // mod/assign/classes/output/renderer.php::get_time_remaining).
+  '[data-region="assignment-info"] a[href*="modedit.php"] { display:none !important; }',
+  '.earlysubmission { display:none !important; }',
+].join('\n');
+
+function ceInjectCSS(iframe, css) {
+  try {
+    var doc = iframe.contentDocument || iframe.contentWindow.document;
+    if (!doc || !doc.head) return;
+    if (!doc.getElementById('l3m-ce-style')) {
+      var s = doc.createElement('style');
+      s.id = 'l3m-ce-style';
+      s.textContent = css || _ceIframeCSS;
+      doc.head.appendChild(s);
+    }
+    ceHideChooserAllTab(doc);
+    ceHideRepoTabs(doc);
+    ceFixGraderPlaceholder(doc);
+    ceWatchInplaceEdits(doc);
+    // Une suppression d'activite passe par une page de confirmation qui
+    // recharge entierement l'iframe (pas une simple mise a jour AJAX) : ni
+    // les evenements ni l'observateur de ceWatchInplaceEdits ne la voient
+    // dans ce cas, puisqu'ils sont attaches sur le document APRES coup, une
+    // fois la suppression deja faite sur la page precedente. On rafraichit
+    // donc la liste "Contenu du cours" a chaque chargement de l'iframe, ce
+    // qui couvre aussi bien ce cas que les changements de completion en
+    // navigant simplement d'une activite a l'autre.
+    if (_ce.id) ceRefreshSections();
+    // Evite le flash de la page Moodle non stylee quand on navigue via un
+    // lien clique DANS l'iframe (ex. "Parametres" d'une activite) plutot
+    // que via notre propre changement de src (deja masque par l'opacite
+    // ailleurs) : on cache l'iframe dès que cette page commence a se quitter.
+    try {
+      doc.defaultView.addEventListener('pagehide', function() {
+        iframe.style.opacity = '0';
+      });
+    } catch (e2) {}
+  } catch (e) {}
+}
+
+// Champ "Changer d'utilisateur" de la vue de correction d'un devoir : texte
+// du parametre "placeholder" (get_string('changeuser', 'mod_assign')) passe
+// a l'autocomplete Moodle (lib/amd/src/form-autocomplete.js), insere en JS
+// bien apres le chargement de l'iframe — selon l'etat du champ, il apparait
+// soit comme attribut placeholder d'un <input>, soit comme texte affiche
+// directement dans la case de selection (aucune classe propre pour ce cas,
+// on repere donc le texte exact, meme principe que ceHideChooserAllTab).
+// Pas de traduction Moodle a modifier globalement : on ne corrige que
+// l'affichage ici.
+function ceFixGraderPlaceholder(doc) {
+  var fix = function() {
+    doc.querySelectorAll('input[placeholder="Changer d’utilisateur"]').forEach(function(el) {
+      el.placeholder = "Changer d'élève";
+    });
+    // Scan large (tout le document, pas seulement [data-region="user-selector"])
+    // : le composant grading_app peut re-rendre cette zone via une structure
+    // qui echappe a ce scope precis selon le contexte (grading vs grader).
+    // Le filtre "feuille + texte exact" evite tout faux positif ailleurs.
+    doc.querySelectorAll('*').forEach(function(el) {
+      if (el.children.length === 0 && el.textContent.trim() === "Changer d’utilisateur") {
+        el.textContent = "Changer d'élève";
+      }
+    });
+  };
+  // Toujours execute, meme si l'observateur est deja attache : l'app JS de
+  // Moodle (grading_app) peut re-rendre cette zone plusieurs fois de suite
+  // au chargement, et notre correction perdre cette course une fois sur
+  // deux si on ne la retente qu'au prochain changement du DOM.
+  fix();
+  if (doc._l3mGraderObserver) return;
+  try {
+    var obs = new MutationObserver(fix);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mGraderObserver = obs;
+  } catch (e) {}
+}
+
+// L'onglet "Tout" de la fenetre "Ajouter une activite ou ressource" n'a pas
+// de classe propre (meme markup que les autres onglets) — on le masque en
+// comparant le texte, via un observateur car la fenetre est injectee bien
+// apres le chargement de l'iframe (ouverture au clic sur le "+").
+function ceHideChooserAllTab(doc) {
+  if (doc._l3mChooserObserver) return;
+  var hide = function() {
+    var nav = doc.querySelector('.modchoosernav');
+    if (!nav) return;
+    nav.querySelectorAll('.nav-link').forEach(function(el) {
+      if (el.textContent.trim() === 'Tout') el.style.display = 'none';
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(function(muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].addedNodes && muts[i].addedNodes.length) { hide(); break; }
+      }
+    });
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mChooserObserver = obs;
+  } catch (e) {}
+}
+
+// "Selecteur de fichiers" Moodle (repository/filepicker.js) : chaque onglet
+// n'a qu'un id numerique d'instance propre au site (pas de type stable),
+// donc on filtre par le nom affiche (.fp-repo-name) — meme principe que
+// ceHideChooserAllTab. Ne garde que "Deposer un fichier" et "Fichiers
+// recents", les deux seuls cas d'usage reels d'un formateur/admin.
+function ceHideRepoTabs(doc) {
+  if (doc._l3mRepoObserver) return;
+  var HIDE = ['Banque de contenus', 'Fichiers disponibles', 'Téléchargement d’URL', 'Fichiers personnels', 'Wikimedia'];
+  var hide = function() {
+    doc.querySelectorAll('.fp-repo').forEach(function(el) {
+      var nameEl = el.querySelector('.fp-repo-name');
+      if (nameEl && HIDE.indexOf(nameEl.textContent.trim()) !== -1) {
+        el.style.display = 'none';
+      }
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(hide);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mRepoObserver = obs;
+  } catch (e) {}
+}
+
+function ceMobileBack() {
+  var body = document.querySelector('.course-modal-body');
+  if (body) body.classList.remove('mob-content');
+}
+
+function ceSelectMod(cmid, modtype, el) {
+  document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
+  document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
+  if (window.innerWidth <= 760) {
+    var body = document.querySelector('.course-modal-body');
+    if (body) body.classList.add('mob-content');
+  }
+  if (el) {
+    el.classList.add('active');
+    var dot = el.querySelector('.det-mod-dot');
+    if (dot) dot.classList.add('active-dot');
+  }
+  var url = WWWROOT + '/mod/' + modtype + '/view.php?id=' + cmid;
+  var iframe  = document.getElementById('ce-iframe');
+  var empty   = document.getElementById('ce-empty');
+  var loading = document.getElementById('ce-loading');
+  iframe.style.opacity = '0';
+  loading.style.display = 'flex';
+  iframe.onload = function() { ceInjectCSS(iframe); iframe.style.opacity = '1'; loading.style.display = 'none'; };
+  iframe.src = url;
+  iframe.style.display = 'block';
+  empty.style.display  = 'none';
+  // Meme filet de securite qu'en mode edition (ceOpenEditMode) : certaines
+  // pages (notamment le "mode plein ecran" de theme_mb2nl sur une activite
+  // achevee a 100%) ne se stylent pas de facon fiable au seul onload, sans
+  // qu'on ait pu determiner precisement pourquoi — on reinjecte donc le CSS
+  // periodiquement pendant que cette activite reste affichee.
+  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
+  _ceRefreshTimer = setInterval(function() { ceInjectCSS(iframe); }, 1500);
+}
+
+function ceRenderSections(sections) {
+  var box = document.getElementById('ce-sections');
+  if (!sections || !sections.length) {
+    box.innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Aucun contenu.</p>';
+    return;
+  }
+  var html = '';
+  sections.forEach(function(s, si) {
+    var allDone = s.total > 0 && s.done_n === s.total;
+    html += '<div class="det-sec" id="ce-sec-' + si + '">';
+    html += '<div class="det-sec-head" onclick="ceToggleSec(' + si + ')">';
+    html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + s.num + '</div>';
+    html += '<div class="det-sec-info"><div class="det-sec-name">' + esc(s.name) + '</div>';
+    if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
+    html += '</div><div class="det-sec-arrow" id="ce-arr-' + si + '">›</div></div>';
+    html += '<div class="det-mods" id="ce-mods-' + si + '">';
+    s.mods.forEach(function(m) {
+      var dotCls = m.done ? ' done' : '';
+      html += '<div class="det-mod" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
+      html += '<div class="det-mod-dot' + dotCls + '"></div>';
+      html += '<div class="det-mod-name">' + esc(m.name) + '</div></div>';
+    });
+    html += '</div></div>';
+  });
+  box.innerHTML = html;
+}
+
+function ceToggleSec(idx) {
+  var mods = document.getElementById('ce-mods-' + idx);
+  var arr  = document.getElementById('ce-arr-' + idx);
+  if (!mods) return;
+  mods.classList.toggle('open');
+  arr.classList.toggle('open');
+}
+function ceUnfoldAll() {
+  document.querySelectorAll('#ce-sections .det-mods').forEach(function(el){ el.classList.add('open'); });
+  document.querySelectorAll('#ce-sections .det-sec-arrow').forEach(function(el){ el.classList.add('open'); });
+}
+function ceFilter(val) {
+  var q = val.toLowerCase();
+  document.querySelectorAll('#ce-sections .det-sec').forEach(function(sec) {
+    var mods = sec.querySelectorAll('.det-mod');
+    var anyVisible = false;
+    mods.forEach(function(m) {
+      var match = !q || m.querySelector('.det-mod-name').textContent.toLowerCase().indexOf(q) >= 0;
+      m.style.display = match ? '' : 'none';
+      if (match) anyVisible = true;
+    });
+    sec.style.display = (!q || anyVisible) ? '' : 'none';
+    if (q && anyVisible) {
+      sec.querySelector('.det-mods').classList.add('open');
+      sec.querySelector('.det-sec-arrow').classList.add('open');
+    }
+  });
+}
+
+function ceOpenEditMode() {
+  document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
+  document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
+  var iframe   = document.getElementById('ce-iframe');
+  var prefetch = document.getElementById('ce-prefetch-iframe');
+  var empty    = document.getElementById('ce-empty');
+  var loading  = document.getElementById('ce-loading');
+  var courseUrl = WWWROOT + '/course/view.php?id=' + _ce.id;
+
+  // Le prechargement (cePrefetchEditMode) est deja pret pour ce cours : on
+  // echange juste les deux iframes (id + visibilite), sans nouveau
+  // chargement, pour un affichage quasi instantane.
+  var canSwap = prefetch.dataset.prefetchCourseId === String(_ce.id) && prefetch.dataset.prefetchReady === '1';
+  if (canSwap) {
+    prefetch.id = 'ce-iframe';
+    iframe.id = 'ce-prefetch-iframe';
+    delete prefetch.dataset.prefetchCourseId;
+    delete prefetch.dataset.prefetchReady;
+    prefetch.style.display = 'block';
+    prefetch.style.opacity = '1';
+    iframe.style.display = 'none';
+    iframe.style.opacity = '0';
+    empty.style.display = 'none';
+    loading.style.display = 'none';
+    iframe = prefetch;
+  } else {
+    iframe.style.opacity = '0';
+    loading.style.display = 'flex';
+    iframe.onload = function() { ceInjectCSS(iframe); iframe.style.opacity = '1'; loading.style.display = 'none'; };
+    if (_ce.contextid && !_ceEditingActivated) {
+      // Seulement la premiere fois : $USER->editing reste actif pour la
+      // session ensuite, pas besoin de repasser par ce redirect (gagne un
+      // aller-retour serveur).
+      iframe.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
+        '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
+      _ceEditingActivated = true;
+    } else {
+      iframe.src = courseUrl;
+    }
+    iframe.style.display = 'block';
+    empty.style.display  = 'none';
+  }
+  // Rafraichissement automatique de la liste "Contenu du cours" tant que le
+  // mode edition est ouvert : plus simple et plus fiable que d'essayer de
+  // detecter precisement chaque action Moodle (ajout, suppression, masquage,
+  // deplacement...), dont les mecanismes internes varient et ne declenchent
+  // pas toujours les evenements attendus. On reinjecte aussi le CSS a chaque
+  // tick (sans effet si deja present, voir le garde-fou dans ceInjectCSS) :
+  // certaines pages internes (ex. course/section.php, atteinte via une
+  // sous-section) utilisent un autre gabarit Moodle ou l'injection au
+  // premier chargement peut echouer silencieusement — ce filet corrige
+  // l'affichage sans qu'il faille identifier la cause exacte au cas par cas.
+  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
+  _ceRefreshTimer = setInterval(function() {
+    ceInjectCSS(iframe);
+    if (_ce.id) ceRefreshSections();
+  }, 2500);
+}
+
+function ceRenderBreadcrumb(crumbs) {
+  var el = document.getElementById('ce-breadcrumb');
+  if (!crumbs || !crumbs.length) { el.innerHTML = ''; return; }
+  el.innerHTML = crumbs.map(function(c, i) {
+    var isLast = i === crumbs.length - 1;
+    return (i > 0 ? '<span class="dv-crumb-sep">&gt;</span>' : '') +
+      '<span' + (isLast ? ' class="dv-crumb-current"' : '') + '>' + esc(c) + '</span>';
+  }).join('');
+}
+
+function openCourseIframe(courseId, courseName) {
+  _ce.id = courseId; _ce.name = courseName;
+  var ceBody = document.querySelector('.course-modal-body');
+  if (ceBody) ceBody.classList.remove('mob-content'); // repartir sur la liste des sections en mobile
+  document.getElementById('course-modal-title').textContent = courseName;
+  document.getElementById('ce-iframe').style.display = 'none';
+  document.getElementById('ce-iframe').src = '';
+  document.getElementById('ce-empty').style.display = 'flex';
+  document.getElementById('ce-search-inp').value = '';
+  document.getElementById('ce-breadcrumb').innerHTML = '';
+  document.getElementById('ce-sections').innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Chargement…</p>';
+  document.getElementById('course-modal-bg').classList.add('on');
+  ceRefreshSections();
+}
+
+// Recharge la liste des sections/activites du cours ouvert (_ce.id) depuis
+// le serveur, sans reinitialiser le reste de la modale (recherche, iframe
+// ouverte...). Utilise a l'ouverture (openCourseIframe) et pour refleter en
+// direct un renommage fait en mode edition (voir ceWatchInplaceEdits) sans
+// que l'admin ait besoin de recharger toute la page.
+function ceRefreshSections() {
+  var courseId = _ce.id;
+  // Anti-cache (_ts) : par precaution, pour exclure toute reponse mise en
+  // cache par le navigateur sur cette requete appelee tres frequemment.
+  fetch(window.location.pathname + '?action=course_detail&courseid=' + courseId + '&_ts=' + Date.now(), {cache: 'no-store'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || _ce.id !== courseId) return;
+      _ce.sections = d.sections;
+      _ce.contextid = d.contextid;
+      ceRenderBreadcrumb(d.breadcrumb);
+      ceRenderSections(d.sections);
+      // Une seule fois par cours ouvert (pas a chaque rafraichissement
+      // periodique) : _ce.contextid n'est connu qu'a partir d'ici, donc
+      // c'est le premier moment ou le prechargement peut passer par
+      // editmode.php correctement si besoin.
+      if (_ce.prefetchedFor !== courseId) {
+        _ce.prefetchedFor = courseId;
+        cePrefetchEditMode(courseId);
+      }
+    })
+    .catch(function() {
+      document.getElementById('ce-sections').innerHTML =
+        '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Erreur réseau.</p>';
+    });
+}
+
+// Precharge en arriere-plan (iframe cachee) le mode edition de ce cours, des
+// l'ouverture de "Mes modules" : si l'utilisateur clique ensuite sur
+// "Activer le mode edition", ceOpenEditMode peut afficher ce resultat
+// quasi instantanement au lieu de charger from scratch. A noter : ce
+// prechargement passe par editmode.php la premiere fois de la session, ce
+// qui active $USER->editing cote serveur meme si l'utilisateur ne clique
+// jamais sur le bouton — accepte ici car sans consequence pour un
+// formateur/admin deja autorise a editer.
+function cePrefetchEditMode(courseId) {
+  var prefetch = document.getElementById('ce-prefetch-iframe');
+  if (!prefetch) return;
+  prefetch.dataset.prefetchCourseId = String(courseId);
+  prefetch.dataset.prefetchReady = '0';
+  var courseUrl = WWWROOT + '/course/view.php?id=' + courseId;
+  prefetch.onload = function() {
+    try {
+      if (prefetch.contentWindow.location.href.indexOf('/course/view.php') === -1) return;
+    } catch (e) {}
+    if (prefetch.dataset.prefetchCourseId !== String(courseId)) return;
+    ceInjectCSS(prefetch);
+    prefetch.dataset.prefetchReady = '1';
+  };
+  if (_ce.contextid && !_ceEditingActivated) {
+    prefetch.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
+      '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
+    _ceEditingActivated = true;
+  } else {
+    prefetch.src = courseUrl;
+  }
+}
+
+// Un renommage en direct (section, activite...) dans l'iframe "mode edition"
+// utilise le mecanisme "inplace editable" natif de Moodle, qui declenche cet
+// evenement (bouillonnant) une fois la sauvegarde AJAX terminee — voir
+// lib/amd/src/local/inplace_editable/events.js. Un ajout/suppression/
+// deplacement d'activite ou de section passe lui par l'editeur de cours
+// reactif, qui declenche 'core_course:stateChanged' sur le document a
+// chaque changement d'etat — voir course/format/amd/src/courseeditor.js
+// (dispatchStateChangedEvent). Les deux sont ecoutes ici pour rafraichir la
+// liste "Contenu du cours" sans que l'admin ait a recharger la page.
+function ceWatchInplaceEdits(doc) {
+  if (doc._l3mInplaceWatched) return;
+  doc._l3mInplaceWatched = true;
+  var refresh = function() { if (_ce.id) ceRefreshSections(); };
+  doc.addEventListener('core/inplace_editable:updated', refresh);
+  doc.addEventListener('core_course:stateChanged', refresh);
+  // Filet de securite : certaines actions (masquer/afficher, supprimer...)
+  // ne declenchent pas toujours les evenements ci-dessus selon le format de
+  // cours. On observe donc aussi directement les changements de structure du
+  // contenu du cours, avec un debounce pour ne rafraichir qu'une fois
+  // l'action terminee (evite les rafales pendant l'animation Moodle).
+  try {
+    var content = doc.querySelector('.course-content') || doc.body;
+    var timer = null;
+    var obs = new MutationObserver(function() {
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 500);
+    });
+    obs.observe(content, {childList: true, subtree: true});
+  } catch (e) {}
+  // "Supprimer" (.editing_delete) ouvre une boite de dialogue de
+  // confirmation Moodle avant d'agir : on ne peut pas savoir a l'avance
+  // quand l'utilisateur va confirmer, donc on sonde quelques fois sur
+  // quelques secondes des le clic, pour rafraichir des que la suppression
+  // devient effective plutot que d'attendre une fermeture/reouverture de
+  // la fenetre.
+  doc.addEventListener('click', function(ev) {
+    var link = ev.target.closest && ev.target.closest('.editing_delete');
+    if (!link) return;
+    var n = 0;
+    var poll = setInterval(function() {
+      n++;
+      refresh();
+      if (n >= 6) clearInterval(poll);
+    }, 700);
+  }, true);
+}
+function closeCourseIframe() {
+  document.getElementById('course-modal-bg').classList.remove('on');
+  var iframe = document.getElementById('ce-iframe');
+  iframe.src = 'about:blank';
+  if (_ceRefreshTimer) { clearInterval(_ceRefreshTimer); _ceRefreshTimer = null; }
 }
 
 function openCourseModal() {
@@ -3732,7 +5105,7 @@ function saveCourse() {
         });
         closeCourseModal();
         renderCoursAdmin();
-        toast('Cours « ' + r.fullname + ' » créé');
+        toast('Module « ' + r.fullname + ' » créé');
       } else { toast('Erreur : ' + (r.msg || '?')); }
     })
     .catch(function() { btn.disabled = false; btn.textContent = 'Créer le cours'; toast('Erreur réseau'); });
@@ -3808,6 +5181,22 @@ function refreshDocsNavBadge() {
   });
 }
 
+function updateMsgNavBadge() {
+  var badge = document.getElementById('msg-nav-badge');
+  if (!badge) return;
+  var count = DATA.unread_messages || 0;
+  badge.textContent = count;
+  badge.style.display = count > 0 ? 'flex' : 'none';
+}
+
+function refreshMsgNavBadge() {
+  apiPost({action: 'count_unread_messages'}).then(function(d) {
+    if (!d.ok) return;
+    DATA.unread_messages = d.count;
+    updateMsgNavBadge();
+  });
+}
+
 function updateLeadsNavBadge() {
   var badge = document.getElementById('leads-nav-badge');
   if (!badge) return;
@@ -3824,15 +5213,17 @@ function refreshLeadsNavBadge() {
   });
 }
 
-var LEAD_STATUS_LABELS = {nouveau: 'Nouveau', contacte: 'Contacté', qualifie: 'Qualifié', perdu: 'Perdu'};
+var LEAD_STATUS_LABELS = {nouveau: 'Nouveau', contacte: 'Contacté', qualifie: 'Qualifié', inscrit_attente: 'En attente d\'activation', inscrit: 'Inscrit·e', perdu: 'Perdu'};
+var _leadsData = [];
 
 function renderLeads() {
   var tbody = document.getElementById('leads-tbody');
-  tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Chargement…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">Chargement…</td></tr>';
   apiPost({action: 'get_leads'}).then(function(d) {
-    if (!d.ok) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--red)">Erreur de chargement.</td></tr>'; return; }
+    if (!d.ok) { tbody.innerHTML = '<tr><td colspan="8" style="color:var(--red)">Erreur de chargement.</td></tr>'; return; }
+    _leadsData = d.leads;
     if (!d.leads.length) {
-      tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:20px">Aucun lead pour le moment.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">Aucun lead pour le moment.</td></tr>';
       return;
     }
     tbody.innerHTML = d.leads.map(function(l) {
@@ -3841,16 +5232,33 @@ function renderLeads() {
       var options = Object.keys(LEAD_STATUS_LABELS).map(function(k) {
         return '<option value="' + k + '"' + (k === l.status ? ' selected' : '') + '>' + LEAD_STATUS_LABELS[k] + '</option>';
       }).join('');
+      var actionBtn = l.status === 'inscrit'
+        ? '<span class="chip c-vi">✓ inscrit·e</span>'
+        : l.status === 'inscrit_attente'
+        ? '<span class="chip" style="background:var(--orange-t);color:var(--orange-d)">en attente d\'activation</span>'
+        : '<button class="btn mini primary" onclick="openConvertLead(' + l.id + ')">Inscrire</button>';
       return '<tr>' +
-        '<td>' + esc(l.firstname) + ' ' + esc(l.lastname) + '</td>' +
-        '<td>' + esc(l.phone) + '</td>' +
-        '<td>' + esc(l.email) + '</td>' +
-        '<td>' + esc(l.situation || '—') + '</td>' +
-        '<td>' + dateLabel + '</td>' +
-        '<td><select onchange="updateLeadStatus(' + l.id + ',this.value)">' + options + '</select></td>' +
+        '<td data-label="Contact">' + esc(l.firstname) + ' ' + esc(l.lastname) + '</td>' +
+        '<td data-label="Téléphone">' + esc(l.phone) + '</td>' +
+        '<td data-label="E-mail">' + esc(l.email) + '</td>' +
+        '<td data-label="Situation">' + esc(l.situation || '—') + '</td>' +
+        '<td data-label="Reçu le">' + dateLabel + '</td>' +
+        '<td data-label="Statut"><select onchange="updateLeadStatus(' + l.id + ',this.value)">' + options + '</select></td>' +
+        '<td data-label="">' + actionBtn + '</td>' +
+        '<td data-label=""><button class="btn mini ghost" onclick="deleteLead(' + l.id + ')">Supprimer</button></td>' +
       '</tr>';
     }).join('');
   });
+}
+
+function deleteLead(leadid) {
+  if (!confirm('Supprimer définitivement ce lead ?')) return;
+  apiPost({action: 'delete_lead', leadid: leadid}).then(function(d) {
+    if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
+    refreshLeadsNavBadge();
+    renderLeads();
+    toast('Lead supprimé.');
+  }).catch(function() { toast('Erreur réseau.'); });
 }
 
 function updateLeadStatus(leadid, status) {
@@ -3859,6 +5267,131 @@ function updateLeadStatus(leadid, status) {
     refreshLeadsNavBadge();
     toast('Statut mis à jour.');
   });
+}
+
+function renderPendingActivations() {
+  var tbody = document.getElementById('pending-activation-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">Chargement…</td></tr>';
+  apiPost({action: 'get_pending_activations'}).then(function(d) {
+    if (!d.ok) { tbody.innerHTML = '<tr><td colspan="5" style="color:var(--red)">Erreur de chargement.</td></tr>'; return; }
+    if (!d.items.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">Aucune activation en attente.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.items.map(function(it) {
+      var date = new Date(parseInt(it.timecreated) * 1000).toLocaleDateString('fr-FR');
+      return '<tr>' +
+        '<td data-label="Élève">' + esc(it.firstname) + ' ' + esc(it.lastname) + '</td>' +
+        '<td data-label="E-mail">' + esc(it.email) + '</td>' +
+        '<td data-label="Formation">' + it.nb_courses + (it.nb_courses > 1 ? ' modules' : ' module') + '</td>' +
+        '<td data-label="Inscrit·e le">' + date + '</td>' +
+        '<td data-label=""><button class="btn mini primary" onclick="activateStudentAccess(' + it.userid + ',this)">Activer l\'accès</button></td>' +
+      '</tr>';
+    }).join('');
+  });
+}
+
+function activateStudentAccess(userid, btn) {
+  btn.disabled = true; btn.textContent = 'Activation...';
+  apiPost({ action: 'activate_student_access', userid: userid })
+    .then(function(d) {
+      if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); btn.disabled = false; btn.textContent = 'Activer l\'accès'; return; }
+      toast('Accès activé — l\'élève peut se connecter.');
+      renderPendingActivations();
+      renderLeads();
+    })
+    .catch(function() { alert('Erreur réseau.'); btn.disabled = false; btn.textContent = 'Activer l\'accès'; });
+}
+
+var _leadConvertId = null;
+
+function openConvertLead(leadid) {
+  var l = _leadsData.find(function(x) { return x.id == leadid; });
+  if (!l) return;
+  _leadConvertId = leadid;
+  document.getElementById('lead-firstname').value = l.firstname;
+  document.getElementById('lead-lastname').value = l.lastname;
+  document.getElementById('lead-email').value = l.email;
+  document.getElementById('lead-modal-sub').textContent = l.situation ? 'Situation indiquée : ' + l.situation : '';
+
+  var formations = DATA.formations || [];
+  var sel = document.getElementById('lead-formation');
+  sel.innerHTML = formations.map(function(f) {
+    return '<option value="' + f.id + '">' + esc(f.label) + ' (' + f.course_ids.length + ' cours)</option>';
+  }).join('');
+  // Présélection si le libellé de la formation choisie ressemble à une formation existante
+  if (l.situation && formations.length) {
+    var needle = l.situation.toLowerCase();
+    var match = formations.find(function(f) { return needle.indexOf(f.label.toLowerCase()) !== -1 || f.label.toLowerCase().indexOf(needle) !== -1; });
+    if (match) sel.value = match.id;
+  }
+
+  document.getElementById('modal-lead-bg').classList.add('open');
+}
+
+function closeLeadModal() {
+  document.getElementById('modal-lead-bg').classList.remove('open');
+}
+
+var _credsUserId = null;
+function openCredsModal(uid, nom, username) {
+  _credsUserId = uid;
+  document.getElementById('creds-modal-sub').textContent = nom;
+  document.getElementById('creds-username').value = username || '—';
+  document.getElementById('creds-pw-row').style.display = 'none';
+  document.getElementById('creds-password').value = '';
+  var btn = document.getElementById('creds-reset-btn');
+  btn.disabled = false; btn.textContent = 'Réinitialiser le mot de passe';
+  document.getElementById('modal-creds-bg').classList.add('open');
+}
+function closeCredsModal() {
+  document.getElementById('modal-creds-bg').classList.remove('open');
+}
+function resetCredsPassword() {
+  if (!_credsUserId) return;
+  if (!confirm('Définir un nouveau mot de passe pour cet élève ? L\'ancien ne fonctionnera plus.')) return;
+  var btn = document.getElementById('creds-reset-btn');
+  btn.disabled = true; btn.textContent = 'Réinitialisation…';
+  apiPost({ action: 'reset_student_password', userid: _credsUserId })
+    .then(function(d) {
+      btn.disabled = false; btn.textContent = 'Réinitialiser le mot de passe';
+      if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
+      document.getElementById('creds-username').value = d.username;
+      document.getElementById('creds-password').value = d.password;
+      document.getElementById('creds-pw-row').style.display = '';
+      toast('Nouveau mot de passe défini.');
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Réinitialiser le mot de passe'; toast('Erreur réseau'); });
+}
+
+function convertLead() {
+  var fn  = document.getElementById('lead-firstname').value.trim();
+  var ln  = document.getElementById('lead-lastname').value.trim();
+  var em  = document.getElementById('lead-email').value.trim();
+  var formationId = document.getElementById('lead-formation').value;
+  if (!fn || !ln || !em || !formationId) { toast('Tous les champs sont requis'); return; }
+
+  var btn = document.getElementById('lead-convert-btn');
+  btn.disabled = true; btn.textContent = 'Inscription…';
+  apiPost({ action: 'convert_lead_to_student', leadid: _leadConvertId, firstname: fn, lastname: ln, email: em, formation: formationId })
+    .then(function(d) {
+      btn.disabled = false; btn.textContent = 'Inscrire';
+      if (d.ok) {
+        closeLeadModal();
+        renderLeads();
+        renderPendingActivations();
+        refreshLeadsNavBadge();
+        if (d.is_new) {
+          toast('Compte créé (id. ' + d.username + ' · mdp provisoire ' + d.temp_password + ') — accès bloqué jusqu\'à activation ("En attente d\'activation" ci-dessous).', 7000);
+        } else {
+          toast('Compte existant inscrit — accès bloqué jusqu\'à activation ("En attente d\'activation" ci-dessous).', 6000);
+        }
+      } else {
+        toast('Erreur : ' + (d.msg || '?'));
+      }
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Inscrire'; toast('Erreur réseau'); });
 }
 
 function docsRenderRight(docs) {
@@ -4000,6 +5533,7 @@ document.addEventListener('DOMContentLoaded', function() {
   docsInitStudentList();
   updateDocsNavBadge();
   updateLeadsNavBadge();
+  updateMsgNavBadge();
 });
 </script>
 <!-- ===== MODAL SEANCE ===== -->
@@ -4007,7 +5541,7 @@ document.addEventListener('DOMContentLoaded', function() {
   <div id="modal-seance">
     <h3 id="ms-title">Planifier une séance</h3>
     <p class="sub" id="ms-sub"></p>
-    <label>Cours</label>
+    <label>Module</label>
     <select id="ms-course"></select>
     <label>Nom de la séance</label>
     <input type="text" id="ms-name" placeholder="Séance ECSR · Classe A · S12">
@@ -4034,6 +5568,52 @@ document.addEventListener('DOMContentLoaded', function() {
     <div class="seance-foot">
       <button class="btn ghost" onclick="closeSeanceModal()">Annuler</button>
       <button class="btn primary" onclick="saveSeance()">Créer la séance</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-lia-bg" onclick="if(event.target===this)closeLiaAffectModal()">
+  <div id="modal-lia">
+    <h3 id="lia-title">Affectation manuelle</h3>
+    <p class="sub" id="lia-sub"></p>
+    <label>Formateur</label>
+    <select id="lia-pid" onchange="liaAffectOnClassChange()"></select>
+    <label>Classe</label>
+    <select id="lia-coh" onchange="liaAffectOnClassChange()"></select>
+    <div style="display:flex;gap:12px">
+      <div style="flex:1">
+        <label>Format</label>
+        <select id="lia-type">
+          <option value="visio">Visio</option>
+          <option value="veh">Regroupement véhicule</option>
+          <option value="salle">Regroupement salle</option>
+          <option value="stage">Stage</option>
+          <option value="exam">Examen</option>
+        </select>
+      </div>
+      <div style="flex:1">
+        <label>Heures</label>
+        <input type="number" id="lia-h" value="2" min="0" max="40" step="0.5">
+      </div>
+    </div>
+    <label>Module / intitulé</label>
+    <input type="text" id="lia-label" placeholder="Ingénierie et construction de séance">
+    <label>Module (optionnel)</label>
+    <select id="lia-course"><option value="">—</option></select>
+    <div class="lia-foot">
+      <button class="btn danger-btn" id="lia-delete-btn" onclick="deleteLiaAffect()" style="display:none">Supprimer cette affectation</button>
+      <button class="btn ghost" onclick="closeLiaAffectModal()">Annuler</button>
+      <button class="btn primary" onclick="saveLiaAffect()">Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-lia-hours-bg" onclick="if(event.target===this)closeLiaHoursDetail()">
+  <div id="modal-lia-hours" style="width:340px">
+    <h3 id="lia-hours-title">Heures par classe</h3>
+    <div id="lia-hours-body" style="font-size:13.5px;line-height:2"></div>
+    <div class="lia-foot">
+      <button class="btn primary" onclick="closeLiaHoursDetail()">Fermer</button>
     </div>
   </div>
 </div>

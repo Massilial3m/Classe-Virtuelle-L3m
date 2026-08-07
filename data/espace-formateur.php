@@ -7,7 +7,8 @@ require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
 require_login();
-$brand = l3m_get_branding_for_user($USER->id);
+$user_client = l3m_get_user_client($USER->id);
+$brand = l3m_get_brand_by_client($user_client);
 
 // ── Auth : editingteacher uniquement ──
 $teacherroleid = $DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
@@ -95,7 +96,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
                         l3m_send_notification(
                             $USER->id, (int)$stu->userid, 'Nouvelle séance ajoutée',
                             'Votre formateur a ajouté une nouvelle séance cette semaine : ' . $modname . ' (' . $course->fullname . ')',
-                            $CFG->wwwroot . '/espace-eleve.php#cours', 'Voir mes cours'
+                            $CFG->wwwroot . '/espace-eleve.php#cours', 'Voir mes modules'
                         );
                     }
                     $DB->insert_record('l3m_seen_modules', (object)['courseid'=>$cid,'cmid'=>$cmid,'timecreated'=>$now]);
@@ -103,9 +104,24 @@ if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
             }
         }
 
+        // Fil d'ariane (catégorie racine → sous-catégories → cours) — masqué
+        // par le CSS qui nettoie l'iframe (breadcrumb natif Moodle caché),
+        // reconstruit ici pour le panneau de gauche du viewer.
+        $breadcrumb = [];
+        $catid_bc = (int)$course->category;
+        $safety_bc = 0;
+        while ($catid_bc && $safety_bc < 10) {
+            $cat_bc = $DB->get_record('course_categories', ['id' => $catid_bc], 'id,name,parent');
+            if (!$cat_bc) break;
+            array_unshift($breadcrumb, $cat_bc->name);
+            $catid_bc = (int)$cat_bc->parent;
+            $safety_bc++;
+        }
+        $breadcrumb[] = $course->fullname;
+
         echo json_encode(['ok'=>true,'sections'=>$sections,
                           'coursename'=>$course->fullname,'courseid'=>$cid,
-                          'contextid'=>context_course::instance($cid)->id]);
+                          'contextid'=>context_course::instance($cid)->id,'breadcrumb'=>$breadcrumb]);
     } catch (Exception $e) {
         echo json_encode(['ok'=>false,'msg'=>$e->getMessage()]);
     }
@@ -272,6 +288,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['ok' => false, 'msg' => 'Message vide']);
             exit;
         }
+        // Un editingteacher n'a pas la capacité moodle/site:messageanyuser (contrairement
+        // à un manager/site admin) : sans cours partagé avec le destinataire, l'envoi
+        // échoue ("User X cannot send a message to conversation Y") — ex. un formateur
+        // qui contacte l'administrateur. Devenir contacts mutuels (API publique, pas de
+        // flux de demande/acceptation dans cette version de Moodle) contourne ça sans
+        // toucher aux rôles/capacités globales.
+        if (!\core_message\api::is_contact($USER->id, $studentid)) {
+            \core_message\api::add_contact($USER->id, $studentid);
+        }
         $convid = (int)(\core_message\api::get_conversation_between_users([$USER->id, $studentid]) ?: 0);
         if (!$convid) {
             $newconv = \core_message\api::create_conversation(
@@ -293,6 +318,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]], JSON_UNESCAPED_UNICODE);
         exit;
     }
+
 
     if ($action === 'msg_toggle_fav') {
         $convid = required_param('convid', PARAM_INT);
@@ -415,9 +441,18 @@ $lia_total_w     = lia_total_weeks($lia_cohorts);
 $validated_rows  = $DB->get_records('l3m_dispos', ['status' => 'validated']);
 $lia_unavailable = lia_build_unavailable($validated_rows, $lia_ref_start, $lia_total_w);
 
+// Affectations manuelles et alertes masquées par un admin (Planning & Lia,
+// admin-lba.php) — même source de config que côté admin, pour que ce
+// formateur voie des heures/alertes cohérentes avec le plan arbitré.
+$lia_overrides = json_decode(get_config('local_l3madmin', 'lia_overrides') ?: '[]', true) ?: [];
+$lia_dismissed = json_decode(get_config('local_l3madmin', 'lia_dismissed_alerts') ?: '[]', true) ?: [];
+
 $lia_plan = ($lia_cohorts && $lia_people)
-    ? lia_compute_plan($lia_cohorts, $lia_people, $lia_prof2p, $lia_backups, $lia_unavailable)
+    ? lia_compute_plan($lia_cohorts, $lia_people, $lia_prof2p, $lia_backups, $lia_unavailable, $lia_overrides)
     : null;
+if ($lia_plan) {
+    $lia_plan['alerts'] = lia_filter_dismissed_alerts($lia_plan['alerts'], $lia_dismissed);
+}
 
 $my_id         = (int)$USER->id;
 $my_grid       = $lia_plan['grid'][$my_id] ?? [];
@@ -429,6 +464,37 @@ if ($lia_plan) {
 }
 $my_log    = $lia_plan ? array_values(array_filter($lia_plan['log'],    fn($l) => ($l['pid'] ?? null) === $my_id)) : [];
 $my_alerts = $lia_plan ? array_values(array_filter($lia_plan['alerts'], fn($a) => ($a['pid'] ?? null) === $my_id)) : [];
+
+// Administrateur(s) du client de ce formateur, à contacter directement
+// depuis "Mon planning" en cas de semaine en surcharge non résolue — utilisé
+// par le bouton "Contacter l'administrateur" (messagerie Moodle réelle déjà
+// en place, voir openMessageModal). Un admin de admin-lba.php est soit un
+// vrai administrateur du site ($CFG->siteadmins), soit un "manager" — les
+// deux cas doivent être couverts, sinon un formateur LBA ne trouve personne
+// (aucun compte "manager" n'existe forcément, l'admin réel est souvent un
+// site admin).
+$my_admins_ids = [];
+foreach (explode(',', $CFG->siteadmins) as $said) {
+    $said = (int)trim($said);
+    if ($said) $my_admins_ids[$said] = true;
+}
+$mgr_roleid_pl = (int)$DB->get_field('role', 'id', ['shortname' => 'manager']);
+if ($mgr_roleid_pl) {
+    $mgr_rows_pl = $DB->get_records_sql(
+        "SELECT u.id
+         FROM {user} u
+         JOIN {role_assignments} ra ON ra.userid = u.id
+         WHERE ra.roleid = :rid AND ra.contextid = :ctxid AND u.deleted = 0",
+        ['rid' => $mgr_roleid_pl, 'ctxid' => context_system::instance()->id]
+    );
+    foreach ($mgr_rows_pl as $mgr) { $my_admins_ids[(int)$mgr->id] = true; }
+}
+$my_admins = [];
+foreach (array_keys($my_admins_ids) as $aid) {
+    if (l3m_get_user_client($aid) !== $user_client) continue;
+    $u_admin = $DB->get_record('user', ['id' => $aid, 'deleted' => 0]);
+    if ($u_admin) $my_admins[] = ['id' => $aid, 'nom' => $u_admin->firstname . ' ' . $u_admin->lastname];
+}
 
 // ── Mes déclarations d'indisponibilité ──
 $my_dispos = array_values((array)$DB->get_records('l3m_dispos', ['userid' => $my_id], 'timecreated DESC'));
@@ -463,12 +529,18 @@ $corrections = [];
 if ($course_ids) {
     try {
         list($in_sql_corr, $in_params_corr) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'corrcid');
+        // cm.id (course_modules.id) est requis par mod/assign/view.php?id=... ,
+        // pas a.id (l'id de l'instance assign) : ce sont deux ids distincts
+        // dans Moodle, d'ou l'erreur "ID de module de cours non valide" si on
+        // confond les deux.
         $corr_raw = $DB->get_records_sql(
             "SELECT s.id, s.userid, u.firstname, u.lastname, a.name AS assign_name, a.course,
-                    s.timemodified, a.id AS assignid
+                    s.timemodified, a.id AS assignid, cm.id AS cmid
              FROM {assign_submission} s
              JOIN {assign} a ON a.id = s.assignment
              JOIN {user} u ON u.id = s.userid
+             JOIN {modules} md ON md.name = 'assign'
+             JOIN {course_modules} cm ON cm.instance = a.id AND cm.module = md.id
              LEFT JOIN {assign_grades} g ON g.assignment = s.assignment AND g.userid = s.userid AND g.grade >= 0
              WHERE a.course $in_sql_corr AND s.status = 'submitted' AND g.id IS NULL
              ORDER BY s.timemodified ASC LIMIT 20",
@@ -483,6 +555,7 @@ if ($course_ids) {
                 'assign_name'  => $c->assign_name,
                 'course'       => (int)$c->course,
                 'assignid'     => (int)$c->assignid,
+                'cmid'         => (int)$c->cmid,
                 'timemodified' => (int)$c->timemodified,
                 'date_label'   => userdate($c->timemodified, '%d/%m/%Y'),
             ];
@@ -797,6 +870,7 @@ $formateur_data = json_encode([
     'my_grid'       => $my_grid,
     'my_log'        => $my_log,
     'my_alerts'     => $my_alerts,
+    'my_admins'     => $my_admins,
     'my_dispos'         => $my_dispos,
     'presentiels_label' => $presentiels_label,
 ], JSON_UNESCAPED_UNICODE);
@@ -818,9 +892,14 @@ $glowbl_url    = 'https://l3m.glowbl.com/l3m-ecsr';
   --red:#D64545; --red-t:#FBE7E7;
   --amber:#F6C685; --amber-d:#8a5a10;
   --sand:#B9B29E; --sand-t:#EFECE1;
-  --ink:#24333C; --muted:#68767E;
-  --bg:#F7F6F1; --card:#FFFFFF; --line:#E4E1D6; --dark:#33424B;
+  --ink:<?= $brand['ink'] ?>; --muted:<?= $brand['muted'] ?>;
+  --bg:<?= $brand['bg'] ?>; --card:<?= $brand['card'] ?>; --line:<?= $brand['line'] ?>; --dark:#33424B;
 }
+<?php if ($user_client === 'saran'): ?>
+/* Sur fond sombre, ces titres (pensés à l'origine pour un texte foncé sur
+   fond clair via --teal-d) doivent repasser en clair pour rester lisibles. */
+.panel h3 { color:var(--ink) !important; }
+<?php endif; ?>
 *, *::before, *::after { box-sizing:border-box; }
 body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--ink); font-size:14.5px; line-height:1.5; }
 
@@ -859,7 +938,7 @@ aside .nav-av-lbl { font-size:7px; color:rgba(255,255,255,.45); text-align:cente
 main { flex:1; padding:26px 30px 80px; min-width:0; overflow-x:hidden; }
 
 /* ── KPI chip / action ── */
-.kpi-chip { display:inline-flex; align-items:center; background:rgba(255,255,255,.65); border:1px solid rgba(255,255,255,.85); border-radius:99px; padding:2px 9px; font-size:10.5px; font-weight:700; color:var(--ink); white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+.kpi-chip { display:inline-flex; align-items:center; background:rgba(255,255,255,.65); border:1px solid rgba(255,255,255,.85); border-radius:99px; padding:2px 9px; font-size:10.5px; font-weight:700; color:#24333C; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
 .kpi-chip.chip-orange { background:rgba(242,160,61,.18); border-color:rgba(242,160,61,.4); color:#7A4B0E; }
 .kpi-chip.chip-red { background:rgba(214,69,69,.12); border-color:rgba(214,69,69,.25); color:var(--red); }
 .kpi-action { display:inline-flex; align-items:center; gap:4px; background:var(--teal-d); color:#fff; border-radius:99px; padding:4px 13px; font-size:10.5px; font-weight:700; cursor:pointer; border:none; font-family:inherit; margin-top:7px; transition:filter .12s; }
@@ -909,11 +988,11 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .kpi-num { font-size:34px; font-weight:800; line-height:1; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }
 .kpi-num small { font-size:16px; opacity:.55; margin-left:2px; }
 .kpi-sub { font-size:11px; opacity:.55; font-weight:500; margin-top:8px; }
-.k-orange { background:#F9C57D; border-color:#F5B15F; }
-.k-mint   { background:#C7EDE1; border-color:#A7DDCB; }
-.k-violet { background:#DDD9F7; border-color:#C9C3F0; }
+.k-orange { background:#F9C57D; border-color:#F5B15F; color:#24333C; }
+.k-mint   { background:#C7EDE1; border-color:#A7DDCB; color:#24333C; }
+.k-violet { background:#DDD9F7; border-color:#C9C3F0; color:#24333C; }
 .k-cream  { background:var(--card); border-color:var(--line); }
-.k-danger { background:var(--red-t); border-color:#F5C4C4; }
+.k-danger { background:var(--red-t); border-color:#F5C4C4; color:#24333C; }
 .k-danger .kpi-num { color:var(--red); }
 
 /* ── Grid 2 cols ── */
@@ -940,8 +1019,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 /* ── Buttons ── */
 .btn { display:inline-flex; align-items:center; gap:5px; border:none; border-radius:99px; padding:7px 16px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit; text-decoration:none; transition:filter .12s; white-space:nowrap; }
 .btn:hover { filter:brightness(.92); }
-.btn.primary { background:var(--teal); color:#fff; }
-.btn.ghost { background:var(--card); color:var(--teal-d); border:1.5px solid var(--teal); }
+.btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
+.btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
 .btn.mini { padding:5px 12px; font-size:11px; }
 .btn.orange-btn { background:var(--orange); color:#fff; }
 
@@ -1004,6 +1083,18 @@ tr.row-inactive td { background:rgba(214,69,69,.04); }
 tr.row-highlight td { background:var(--teal-t,#E3F2EF) !important; transition:background .3s; }
 .bar { height:6px; border-radius:3px; background:var(--line); width:80px; display:inline-block; vertical-align:middle; }
 .bar i { display:block; height:100%; border-radius:3px; background:var(--violet); }
+@media(max-width:640px){
+  /* "Mes modules" : les intitules longs (nowrap) sortent de l'ecran sur
+     mobile sans indication qu'on peut scroller. On empile chaque module en
+     petite fiche verticale a la place. */
+  .mm-table thead { display:none; }
+  .mm-table, .mm-table tbody, .mm-table tr, .mm-table td { display:block; width:100%; white-space:normal; }
+  .mm-table tr { padding:12px 14px; border-bottom:1px solid var(--line); }
+  .mm-table td { padding:0; border-bottom:none; }
+  .mm-table td:not(:first-child) { margin-top:6px; }
+  .mm-table .mm-name { font-weight:700; color:var(--ink); }
+  .mm-table .mm-short { font-size:11.5px; color:var(--muted); }
+}
 
 /* ── Dispos ── */
 .set-card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px 22px; margin-bottom:14px; }
@@ -1065,6 +1156,9 @@ input:checked + .slider::before { transform:translateX(16px); }
 /* Panneau gauche : arbre du cours (même look que espace-eleve.php) */
 .dv-left{width:300px;flex-shrink:0;background:#fff;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
 .dv-left-head{padding:16px 18px 10px;border-bottom:1px solid var(--line);flex-shrink:0}
+.dv-breadcrumb{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px;word-break:break-word}
+.dv-breadcrumb .dv-crumb-sep{margin:0 4px;color:var(--muted)}
+.dv-breadcrumb .dv-crumb-current{color:var(--ink);font-weight:700}
 .dv-left-title-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .dv-left-title{font-size:16px;font-weight:800;color:var(--ink)}
 .dv-unfold{font-size:11px;color:var(--teal);cursor:pointer;text-decoration:none;font-weight:600}
@@ -1090,6 +1184,12 @@ input:checked + .slider::before { transform:translateX(16px); }
 .det-mod-dot.done{background:var(--teal)}
 .det-mod-dot.active-dot{background:var(--orange)}
 .det-mod-name{line-height:1.35;flex:1}
+/* .dv-left a un fond blanc fixe (pas var(--card)) : ses textes doivent rester
+   sombres meme quand --ink/--muted passent en clair pour Saran. Exception :
+   .dv-search a lui-meme un fond sombre pour Saran (var(--bg)), donc son texte
+   doit rester var(--ink) (clair sur Saran, sombre sur LBA) — pas hardcode. */
+.dv-left .dv-left-title,.dv-left .det-sec-name,.dv-left .det-mod,.dv-left .dv-crumb-current{color:#24333C}
+.dv-left .det-sec-count,.dv-left .dv-sections p,.dv-left .dv-breadcrumb,.dv-left .dv-crumb-sep{color:#68767E}
 
 /* Panneau droite : activité sélectionnée */
 .dv-right{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
@@ -1098,6 +1198,19 @@ input:checked + .slider::before { transform:translateX(16px); }
 .dv-loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:var(--bg); }
 .dv-spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--teal); animation:dvspin .7s linear infinite; }
 @keyframes dvspin { to { transform:rotate(360deg); } }
+.dv-mobile-back{display:none}
+@media(max-width:760px){
+  /* Meme probleme et meme correctif que "Modules" cote eleve : la liste des
+     sections (300px fixes) et l'apercu de l'activite se partagent la
+     largeur de la modale, ce qui ecrase l'apercu sur mobile. On passe en
+     plein ecran avec bouton retour. */
+  .course-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  .dv-left { width:100%; }
+  .dv-right { display:none; }
+  .course-modal-body.mob-content .dv-left { display:none; }
+  .course-modal-body.mob-content .dv-right { display:flex; }
+  .dv-mobile-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fff; font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; }
+}
 .msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:none; background:rgba(255,255,255,.92); width:28px; height:28px; border-radius:50%; font-size:13px; color:var(--muted); cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.14); line-height:1; }
 .msg-modal-close:hover { color:var(--ink); }
 
@@ -1172,8 +1285,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ── TOPBAR ── -->
 <div class="top" id="topbar">
   <a class="brand" href="<?= $CFG->wwwroot ?>">
-    <?php if (!empty($brand['logo'])): ?>
-      <img src="<?= $brand['logo'] ?>" alt="<?= s($brand['name']) ?>" style="height:38px;width:auto">
+    <?php if (!empty($brand['logo_dark'])): ?>
+      <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="height:38px;width:auto">
     <?php else: ?>
       <svg width="26" height="20" viewBox="0 0 34 24" aria-hidden="true">
         <path d="M3 21 A14 14 0 0 1 31 21" fill="none" stroke="<?= $brand['teal'] ?>" stroke-width="4" stroke-linecap="round"/>
@@ -1196,8 +1309,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ── SIDEBAR ── -->
 <aside>
   <div class="nav-brand">
-    <?php if (!empty($brand['logo'])): ?>
-      <img src="<?= $brand['logo'] ?>" alt="<?= s($brand['name']) ?>" style="width:60px;height:auto;display:block;margin:0 auto 3px">
+    <?php if (!empty($brand['logo_dark'])): ?>
+      <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="width:60px;height:auto;display:block;margin:0 auto 3px">
     <?php else: ?>
       <svg width="22" height="16" viewBox="0 0 34 24" aria-hidden="true">
         <path d="M3 21 A14 14 0 0 1 31 21" fill="none" stroke="rgba(255,255,255,.7)" stroke-width="4" stroke-linecap="round"/>
@@ -1213,6 +1326,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <button data-v="corr"   onclick="nav(this)" id="nav-corr-btn"><span class="nav-ico">✓</span>Corrections</button>
   <button data-v="elev"   onclick="nav(this)"><span class="nav-ico">👥</span>Élèves</button>
   <button data-v="dispo"  onclick="nav(this)"><span class="nav-ico">🕒</span>Dispos</button>
+  <button data-v="cours"  onclick="nav(this)"><span class="nav-ico">🎓</span>Mes modules</button>
   <button data-v="params" onclick="nav(this)"><span class="nav-ico">⚙</span>Réglages</button>
   <div class="sep"></div>
   <div class="nav-user-wrap">
@@ -1371,6 +1485,26 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </div>
 
 <!-- ═══════════════════════════════════════
+     VUE MES MODULES
+═══════════════════════════════════════ -->
+<div class="view" id="v-cours">
+  <h1>Mes modules</h1>
+  <p class="sub">Ajoutez le contenu (sections, activités) directement sur Moodle.</p>
+  <div class="twrap">
+    <table class="mm-table">
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Nom court</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="mescours-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════
      VUE RÉGLAGES
 ═══════════════════════════════════════ -->
 <div class="view" id="v-params">
@@ -1398,14 +1532,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="toggle-row"><span class="lbl">Rappel séance du jour</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
     </div>
 
-    <div class="set-card pc-teal">
-      <div class="sc-head"><div class="ico">🎓</div><div class="text"><h3>Mes cours</h3><p>Ajoutez le contenu (sections, activités) directement sur Moodle</p></div></div>
-      <div id="params-mes-cours">—</div>
-    </div>
-
     <div class="set-card pc-sand">
       <div class="sc-head"><div class="ico">◷</div><div class="text"><h3>Préférences</h3><p>Statistiques de session</p></div></div>
-      <div class="param-row"><span class="lbl">Cours enseignés</span><span class="val" id="params-nb-cours">—</span></div>
+      <div class="param-row"><span class="lbl">Modules enseignés</span><span class="val" id="params-nb-cours">—</span></div>
       <div class="param-row"><span class="lbl">Élèves suivis</span><span class="val" id="params-nb-eleves">—</span></div>
       <div class="param-row"><span class="lbl">Heures cette semaine</span><span class="val" id="params-heure">—</span></div>
     </div>
@@ -1460,7 +1589,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <div class="modal-bg" id="course-modal-bg" onclick="if(event.target===this)closeCourseIframe()">
   <div class="modal course-modal">
     <div class="course-modal-head">
-      <h2 id="course-modal-title">Cours</h2>
+      <h2 id="course-modal-title">Module</h2>
       <div class="course-modal-head-actions">
         <button type="button" id="ce-edit-link" class="btn mini ghost" onclick="ceOpenEditMode()">Activer le mode édition</button>
         <button type="button" class="course-modal-close" onclick="closeCourseIframe()" aria-label="Fermer">✕</button>
@@ -1469,6 +1598,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <div class="course-modal-body">
       <div class="dv-left">
         <div class="dv-left-head">
+          <div class="dv-breadcrumb" id="ce-breadcrumb"></div>
           <div class="dv-left-title-row">
             <span class="dv-left-title">Contenu du cours</span>
             <a class="dv-unfold" onclick="ceUnfoldAll()">Tout déplier</a>
@@ -1481,9 +1611,15 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <div class="dv-sections" id="ce-sections"></div>
       </div>
       <div class="dv-right">
+        <div class="dv-mobile-back" onclick="ceMobileBack()">&#8592; Retour aux sections</div>
         <div class="dv-empty" id="ce-empty">Sélectionnez une activité dans le menu à gauche.</div>
         <div class="dv-loading" id="ce-loading" style="display:none"><span class="dv-spinner"></span></div>
         <iframe id="ce-iframe" src="" style="display:none"></iframe>
+        <!-- Iframe cachee : precharge le mode edition en arriere-plan dès
+             l'ouverture du cours, pour un affichage quasi instantane si
+             l'utilisateur clique sur "Activer le mode edition" (voir
+             cePrefetchEditMode / ceOpenEditMode). -->
+        <iframe id="ce-prefetch-iframe" src="" style="display:none" aria-hidden="true" tabindex="-1"></iframe>
       </div>
     </div>
   </div>
@@ -1553,7 +1689,8 @@ var _msg = {
   activeConvId: 0,
   activeUserId: 0,
   pendingUserId: 0,
-  pendingName: ''
+  pendingName: '',
+  prefillText: ''
 };
 var _msgAvColors = ['av-c0', 'av-c1', 'av-c2'];
 
@@ -1577,10 +1714,11 @@ function msgDayLabel(ts) {
   return d.getDate() + ' ' + M[d.getMonth()];
 }
 
-function openMessageModal(uid, nom) {
+function openMessageModal(uid, nom, prefillText) {
   document.getElementById('msg-modal-bg').classList.add('on');
   _msg.pendingUserId = uid;
   _msg.pendingName   = nom;
+  _msg.prefillText   = prefillText || '';
   msgLoadList();
 }
 function closeMessageModal() {
@@ -1687,6 +1825,10 @@ function msgSelectContact(convid, userid, nom, cls, isonline) {
     if (!r.ok) return;
     if (r.convid) _msg.activeConvId = r.convid;
     msgRenderThread(r.messages);
+    if (_msg.prefillText) {
+      document.getElementById('msg-input-text').value = _msg.prefillText;
+      _msg.prefillText = '';
+    }
   });
 }
 
@@ -1760,49 +1902,308 @@ function msgGoFiche() {
 
 /* ===== "AJOUTER DU CONTENU" (modal, même look que espace-eleve.php, reste sur espace-formateur.php) ===== */
 var _ce = { id: 0, name: '', sections: [], contextid: 0 };
+var _ceRefreshTimer = null;
+// Moodle retient l'activation du mode edition pour toute la session
+// (preference $USER->editing) : inutile de repasser par editmode.php (un
+// aller-retour serveur en plus) une fois que c'est deja fait une premiere
+// fois dans cette session.
+var _ceEditingActivated = false;
 
 var _ceIframeCSS = [
   '#page-header,#main-header,.navbar,#page-footer,.main-footer,footer,',
   '.breadcrumb-nav,.breadcrumb,#nav-drawer,.drawer-toggle,.skiplinks,',
-  '.secondary-navigation,.tertiary-navigation,.activity-navigation,#fsmod-header { display:none !important; }',
+  '.secondary-navigation,.tertiary-navigation,.activity-navigation,.section-navigation,#fsmod-header { display:none !important; }',
+  // Menu ⋮ d'une activite : ne garder que Parametres / Cacher / Dupliquer /
+  // Supprimer. Classes stables de Moodle (course/lib.php,
+  // course_get_cm_edit_actions + controlmenu.php), pas du texte devine.
+  '.editing_movecm,.editing_moveright,.editing_moveleft,.editing_assign,.editing_groupmode { display:none !important; }',
+  // Bouton "+ Ajouter un bloc" (selecteur stable, template core/add_block_button).
+  '[data-region="add-block-button"] { display:none !important; }',
+  // Fenetre "Ajouter une activite ou ressource" : ne garder que les types
+  // reellement utilises sur cette plateforme (attribut data-internal stable,
+  // voir course/format/templates/local/activitychooser/item.mustache).
+  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="forum"]):not([data-internal="assign"]) { display:none !important; }',
+  // Formulaire "Parametres" d'une activite : ne garder que Apparence /
+  // Reglages courants / Conditions d'achevement + la case notification.
+  // Retire Restriction d'acces / Tags / Competences (noms d'elements de
+  // formulaire stables, voir course/moodleform_mod.php et admin/tool/lp/lib.php).
+  '#id_availabilityconditionsheadercontainer,#id_tagshdrcontainer,#id_competenciessectioncontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_availabilityconditionsheadercontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_tagshdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_competenciessectioncontainer"])',
+  '{ display:none !important; }',
+  // Formulaire "Parametres" d'un Quiz : ne garder que Temps / Note /
+  // Feedback global. Retire Mise en page / Comportement des questions /
+  // Options de relecture / Apparence / Restrictions sur les tentatives /
+  // Safe Exam Browser (noms d'elements stables, voir mod/quiz/mod_form.php
+  // et mod/quiz/accessrule/seb/classes/settings_provider.php).
+  '#id_layouthdrcontainer,#id_interactionhdrcontainer,#id_reviewoptionshdrcontainer,',
+  '#id_displaycontainer,#id_securitycontainer,#id_sebcontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
+  '{ display:none !important; }',
+  // Formulaire "Parametres" d'un Devoir : ne garder que Instructions de
+  // l'activite / Fichiers supplementaires / Types de remise / Note.
+  // Retire Types de feedback / Reglages de la remise des travaux / Reglages
+  // de remises en groupe / Notifications (noms d'elements stables, voir
+  // mod/assign/mod_form.php et mod/assign/locallib.php).
+  '#id_feedbacktypescontainer,#id_submissionsettingscontainer,',
+  '#id_groupsubmissionsettingscontainer,#id_notificationscontainer,',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_feedbacktypescontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_submissionsettingscontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_groupsubmissionsettingscontainer"]),',
+  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_notificationscontainer"])',
+  '{ display:none !important; }',
   'html, body { background:#fff !important; }',
   '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
   '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
+  '.btn-primary,.btn.btn-primary { background:#2E9488 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  // Survol des boutons : sans ces regles, l'etat :hover retombe sur l'accent
+  // dore par defaut du theme (memes couleurs de base que ci-dessus, juste
+  // plus foncees, pour garder un retour visuel au survol).
+  // Catch-all large : le theme colore beaucoup de boutons via des
+  // selecteurs varies (.addresourcemodchooser a, data-action="add", etc.)
+  // qui ne portent pas forcement .btn-primary/.btn-secondary. Le simple
+  // !important suffit a gagner face aux regles du theme (non-!important).
+  '.btn:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  '.btn-primary:hover,.btn.btn-primary:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
+  '.btn-secondary:hover,.btn.btn-secondary:hover { background:#EAF6F4 !important; border-color:#1C5F58 !important; color:#1C5F58 !important; }',
+  // Liens de contenu (ex. fichier joint a un devoir) : couleur d'accent
+  // doree par defaut du theme, remplacee par le teal de la charte (meme
+  // regle deja en place cote lecteur eleve, _dvIframeCSS).
+  'a { color:#2E9488 !important; }',
+  'html { scrollbar-color: #2E9488 #f0f0f0 !important; }',
+  '::-webkit-scrollbar { width: 10px; }',
+  '::-webkit-scrollbar-track { background: #f0f0f0; }',
+  '::-webkit-scrollbar-thumb { background: #2E9488 !important; border-radius: 6px; }',
+  '::-webkit-scrollbar-thumb:hover { background: #1C5F58 !important; }',
+  // Boutons "+" d\'insertion d\'activite entre deux activites existantes —
+  // tres discrets par defaut (icone minuscule dans un dropdown Bootstrap).
+  // Cible specifiquement id="dropdownMenuButton-XXX" (le declencheur du menu
+  // "Ajouter une activite ou une ressource"), pas les autres dropdowns
+  // (menus d\'action par activite, etc.) pour ne pas les denaturer.
+  '[id^="dropdownMenuButton-"] { display:inline-flex !important; align-items:center !important; justify-content:center !important;',
+  'width:30px !important; height:30px !important; min-width:30px !important; background:#2E9488 !important; color:#fff !important;',
+  'border-radius:50% !important; opacity:1 !important; visibility:visible !important; margin:3px !important; box-shadow:0 1px 4px rgba(0,0,0,.25) !important; }',
+  '[id^="dropdownMenuButton-"]:hover { background:#267d73 !important; }',
+  '[id^="dropdownMenuButton-"] i,[id^="dropdownMenuButton-"] .icon { color:#fff !important; font-size:15px !important; }',
+  // Neutralise l\'ancienne UI theme_mb2nl (TOC "a droite", voir
+  // l3m_toc_scroll.js + theme_mb2nl customcss) qui masque .course-content et
+  // affiche un message tant qu\'elle n\'a pas cree son propre
+  // #l3m-activity-iframe-container — ce qui n\'arrive jamais quand
+  // course/view.php est charge dans NOTRE iframe imbriquee. On force donc le
+  // vrai contenu du cours a rester visible ici, sans toucher a cette
+  // fonctionnalite ailleurs (visite directe hors de notre viewer).
+  // Meme liste de selecteurs que la regle a neutraliser (specificite egale,
+  // le nôtre gagne car injecte apres, a source-order egale) + doublement de
+  // l\'ID pour le ::before (specificite superieure a leur selecteur compose
+  // de :not()/:has()), plutot qu\'un simple override qui perdait face a une
+  // regle plus specifique malgre le !important des deux cotes.
+  '.path-course-view #region-main .course-content,',
+  '.course-view-topics #region-main .course-content,',
+  'body[class*="course-view"] #region-main .course-content { display:block !important; }',
+  '#page-content#page-content::before { content:none !important; display:none !important; }',
+  // Lien "Decouvrir plus d'activites sur Place du marche Moodle" (fenetre
+  // "Ajouter une activite ou ressource") — renvoie vers un service externe
+  // (marketplace.moodle.com), pas pertinent pour nos formateurs/admins.
+  'div:has(> a[href*="marketplace.moodle.com"]) { display:none !important; }',
+  // Zone de blocs (ex. "side-pre") : hors edition, elle est deja vide et
+  // invisible, mais en mode edition Moodle affiche un encadre pointille avec
+  // le nom brut de la zone ("SIDE-PRE") pour inviter a y glisser un bloc —
+  // pas pertinent dans notre visualiseur (attribut stable, voir
+  // lib/classes/output/core_renderer.php, methode blocks()).
+  '[data-blockregion] { display:none !important; }',
+  // Vue de correction d'un devoir (mod/assign, action=grader) : le filtre de
+  // liste et "Reinitialiser les preferences" n'ont pas de sens quand on
+  // arrive directement sur UN eleve precis (attributs stables, voir
+  // mod/assign/templates/grading_navigation_user_selector.mustache).
+  '[data-region="user-filters"],[data-region="user-resettable"] { display:none !important; }',
+  // Selecteur de fichiers Moodle : texte des onglets en noir (illisible par
+  // defaut, trop clair) et couleur d'accent orange remplacee par le vert
+  // de la charte (voir repository/filepicker.js, classes .fp-repo/.nav-link
+  // ajoutees/retirees dynamiquement selon l'onglet actif).
+  '.fp-repo .fp-repo-name { color:#1A1714 !important; }',
+  '.fp-repo-area .fp-repo .nav-link.active { background:#2E9488 !important; border-color:#2E9488 !important; }',
+  '.fp-repo-area .fp-repo .nav-link.active .fp-repo-name { color:#fff !important; }',
+  // Panneau "Deposer un fichier" : retire "Enregistrer sous" et "Choisir une
+  // licence" (attributs stables, voir repository/filepicker.js).
+  '.fp-saveas,.fp-setlicense { display:none !important; }',
+  // Gestionnaire de fichiers (zone "Fichiers" d'un devoir/ressource) : menu
+  // contextuel "..." par fichier, ouvre les memes champs superflus
+  // (licence...) — classe stable core Moodle, voir theme/boost/scss/moodle/filemanager.scss.
+  '.fp-contextmenu { display:none !important; }',
+  // Vue de correction d'un devoir : retire le crayon "Modifier les reglages"
+  // (lien vers course/modedit.php, risque de renommage/reglage accidentel
+  // en pleine correction — attribut stable, voir
+  // mod/assign/templates/grading_navigation.mustache) et le bandeau
+  // "remis en avance de X" (classe stable, voir
+  // mod/assign/classes/output/renderer.php::get_time_remaining).
+  '[data-region="assignment-info"] a[href*="modedit.php"] { display:none !important; }',
+  '.earlysubmission { display:none !important; }',
 ].join('\n');
 
-// Mode édition : on garde #page-header visible (c'est là que vit le vrai bouton
-// natif "Activer le mode édition" — le masquer le rendait injoignable), on ne
-// nettoie que le chrome global du site (nav/footer).
-var _ceCourseCSS = [
-  '#main-header,.navbar,#page-footer,.main-footer,footer,',
-  '#nav-drawer,.drawer-toggle,.skiplinks,',
-  '.secondary-navigation,.tertiary-navigation,.activity-navigation,#fsmod-header { display:none !important; }',
-  'html, body { background:#fff !important; }',
-  '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
-  '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
-].join('\n');
+// Ouvre une correction de devoir dans la meme modale que "Mes modules"
+// (openCourseIframe), mais sans le panneau "Contenu du cours" : il n'apporte
+// rien pour corriger un devoir precis, seule la page de correction compte.
+// Le panneau et le bouton "Activer le mode edition" sont masques ici et
+// remis en place a la fermeture (closeCourseIframe) pour ne pas affecter
+// le fonctionnement normal de "Mes modules".
+function openCorrectionInCourse(cmid, courseId, userid) {
+  var course = DATA.courses.filter(function(c){ return c.id === courseId; })[0];
+  openCourseIframe(courseId, course ? course.fullname : 'Cours');
+  document.getElementById('course-modal-title').textContent = '';
+  var left = document.querySelector('.dv-left');
+  if (left) left.style.display = 'none';
+  document.getElementById('ce-edit-link').style.display = 'none';
+  // action=grader + userid ouvre directement la correction de CET eleve
+  // (mod/assign/grade.php), au lieu de la table de toute la classe ou son
+  // tri/pagination peut le placer hors de la premiere page.
+  ceSelectMod(cmid, 'assign', null, '&action=grader&userid=' + userid);
+}
 
 function ceInjectCSS(iframe, css) {
   try {
     var doc = iframe.contentDocument || iframe.contentWindow.document;
     if (!doc || !doc.head) return;
-    if (doc.getElementById('l3m-ce-style')) return;
-    var s = doc.createElement('style');
-    s.id = 'l3m-ce-style';
-    s.textContent = css || _ceIframeCSS;
-    doc.head.appendChild(s);
+    if (!doc.getElementById('l3m-ce-style')) {
+      var s = doc.createElement('style');
+      s.id = 'l3m-ce-style';
+      s.textContent = css || _ceIframeCSS;
+      doc.head.appendChild(s);
+    }
+    ceHideChooserAllTab(doc);
+    ceHideRepoTabs(doc);
+    ceFixGraderPlaceholder(doc);
+    ceWatchInplaceEdits(doc);
+    // Une suppression d'activite passe par une page de confirmation qui
+    // recharge entierement l'iframe (pas une simple mise a jour AJAX) : ni
+    // les evenements ni l'observateur de ceWatchInplaceEdits ne la voient
+    // dans ce cas, puisqu'ils sont attaches sur le document APRES coup, une
+    // fois la suppression deja faite sur la page precedente. On rafraichit
+    // donc la liste "Contenu du cours" a chaque chargement de l'iframe, ce
+    // qui couvre aussi bien ce cas que les changements de completion en
+    // navigant simplement d'une activite a l'autre.
+    if (_ce.id) ceRefreshSections();
+    // Evite le flash de la page Moodle non stylee quand on navigue via un
+    // lien clique DANS l'iframe (ex. "Parametres" d'une activite) plutot
+    // que via notre propre changement de src (deja masque par l'opacite
+    // ailleurs) : on cache l'iframe dès que cette page commence a se quitter.
+    try {
+      doc.defaultView.addEventListener('pagehide', function() {
+        iframe.style.opacity = '0';
+      });
+    } catch (e2) {}
   } catch (e) {}
 }
 
-function ceSelectMod(cmid, modtype, el) {
+// Champ "Changer d'utilisateur" de la vue de correction d'un devoir : texte
+// du parametre "placeholder" (get_string('changeuser', 'mod_assign')) passe
+// a l'autocomplete Moodle (lib/amd/src/form-autocomplete.js), insere en JS
+// bien apres le chargement de l'iframe — selon l'etat du champ, il apparait
+// soit comme attribut placeholder d'un <input>, soit comme texte affiche
+// directement dans la case de selection (aucune classe propre pour ce cas,
+// on repere donc le texte exact, meme principe que ceHideChooserAllTab).
+// Pas de traduction Moodle a modifier globalement : on ne corrige que
+// l'affichage ici.
+function ceFixGraderPlaceholder(doc) {
+  var fix = function() {
+    doc.querySelectorAll('input[placeholder="Changer d’utilisateur"]').forEach(function(el) {
+      el.placeholder = "Changer d'élève";
+    });
+    // Scan large (tout le document, pas seulement [data-region="user-selector"])
+    // : le composant grading_app peut re-rendre cette zone via une structure
+    // qui echappe a ce scope precis selon le contexte (grading vs grader).
+    // Le filtre "feuille + texte exact" evite tout faux positif ailleurs.
+    doc.querySelectorAll('*').forEach(function(el) {
+      if (el.children.length === 0 && el.textContent.trim() === "Changer d’utilisateur") {
+        el.textContent = "Changer d'élève";
+      }
+    });
+  };
+  // Toujours execute, meme si l'observateur est deja attache : l'app JS de
+  // Moodle (grading_app) peut re-rendre cette zone plusieurs fois de suite
+  // au chargement, et notre correction perdre cette course une fois sur
+  // deux si on ne la retente qu'au prochain changement du DOM.
+  fix();
+  if (doc._l3mGraderObserver) return;
+  try {
+    var obs = new MutationObserver(fix);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mGraderObserver = obs;
+  } catch (e) {}
+}
+
+// L'onglet "Tout" de la fenetre "Ajouter une activite ou ressource" n'a pas
+// de classe propre (meme markup que les autres onglets) — on le masque en
+// comparant le texte, via un observateur car la fenetre est injectee bien
+// apres le chargement de l'iframe (ouverture au clic sur le "+").
+function ceHideChooserAllTab(doc) {
+  if (doc._l3mChooserObserver) return;
+  var hide = function() {
+    var nav = doc.querySelector('.modchoosernav');
+    if (!nav) return;
+    nav.querySelectorAll('.nav-link').forEach(function(el) {
+      if (el.textContent.trim() === 'Tout') el.style.display = 'none';
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(function(muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].addedNodes && muts[i].addedNodes.length) { hide(); break; }
+      }
+    });
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mChooserObserver = obs;
+  } catch (e) {}
+}
+
+// "Selecteur de fichiers" Moodle (repository/filepicker.js) : chaque onglet
+// n'a qu'un id numerique d'instance propre au site (pas de type stable),
+// donc on filtre par le nom affiche (.fp-repo-name) — meme principe que
+// ceHideChooserAllTab. Ne garde que "Deposer un fichier" et "Fichiers
+// recents", les deux seuls cas d'usage reels d'un formateur.
+function ceHideRepoTabs(doc) {
+  if (doc._l3mRepoObserver) return;
+  var HIDE = ['Banque de contenus', 'Fichiers disponibles', 'Téléchargement d’URL', 'Fichiers personnels', 'Wikimedia'];
+  var hide = function() {
+    doc.querySelectorAll('.fp-repo').forEach(function(el) {
+      var nameEl = el.querySelector('.fp-repo-name');
+      if (nameEl && HIDE.indexOf(nameEl.textContent.trim()) !== -1) {
+        el.style.display = 'none';
+      }
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(hide);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mRepoObserver = obs;
+  } catch (e) {}
+}
+
+function ceMobileBack() {
+  var body = document.querySelector('.course-modal-body');
+  if (body) body.classList.remove('mob-content');
+}
+
+function ceSelectMod(cmid, modtype, el, extra) {
   document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
   document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
+  if (window.innerWidth <= 760) {
+    var body = document.querySelector('.course-modal-body');
+    if (body) body.classList.add('mob-content');
+  }
   if (el) {
     el.classList.add('active');
     var dot = el.querySelector('.det-mod-dot');
     if (dot) dot.classList.add('active-dot');
   }
-  var url = WWWROOT + '/mod/' + modtype + '/view.php?id=' + cmid;
+  var url = WWWROOT + '/mod/' + modtype + '/view.php?id=' + cmid + (extra || '');
   var iframe  = document.getElementById('ce-iframe');
   var empty   = document.getElementById('ce-empty');
   var loading = document.getElementById('ce-loading');
@@ -1816,6 +2217,13 @@ function ceSelectMod(cmid, modtype, el) {
   iframe.src = url;
   iframe.style.display = 'block';
   empty.style.display  = 'none';
+  // Meme filet de securite qu'en mode edition (ceOpenEditMode) : certaines
+  // pages (notamment le "mode plein ecran" de theme_mb2nl sur une activite
+  // achevee a 100%) ne se stylent pas de facon fiable au seul onload, sans
+  // qu'on ait pu determiner precisement pourquoi — on reinjecte donc le CSS
+  // periodiquement pendant que cette activite reste affichee.
+  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
+  _ceRefreshTimer = setInterval(function() { ceInjectCSS(iframe); }, 1500);
 }
 
 function ceRenderSections(sections) {
@@ -1836,7 +2244,7 @@ function ceRenderSections(sections) {
     html += '<div class="det-mods" id="ce-mods-' + si + '">';
     s.mods.forEach(function(m) {
       var dotCls = m.done ? ' done' : '';
-      html += '<div class="det-mod" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
+      html += '<div class="det-mod" data-cmid="' + m.cmid + '" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
       html += '<div class="det-mod-dot' + dotCls + '"></div>';
       html += '<div class="det-mod-name">' + esc(m.name) + '</div></div>';
     });
@@ -1877,58 +2285,207 @@ function ceFilter(val) {
 function ceOpenEditMode() {
   document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
   document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
-  var iframe  = document.getElementById('ce-iframe');
-  var empty   = document.getElementById('ce-empty');
-  var loading = document.getElementById('ce-loading');
+  var iframe   = document.getElementById('ce-iframe');
+  var prefetch = document.getElementById('ce-prefetch-iframe');
+  var empty    = document.getElementById('ce-empty');
+  var loading  = document.getElementById('ce-loading');
   var courseUrl = WWWROOT + '/course/view.php?id=' + _ce.id;
-  iframe.style.opacity = '0';
-  loading.style.display = 'flex';
-  iframe.onload = function() { ceInjectCSS(iframe, _ceCourseCSS); iframe.style.opacity = '1'; loading.style.display = 'none'; };
-  if (_ce.contextid) {
-    // Le bouton natif "Activer le mode édition" du thème est display:none par
-    // défaut (remplacé par un mécanisme JS ailleurs) — on active directement le
-    // mode édition via l'URL officielle Moodle plutôt que de dépendre d'un
-    // élément caché dans la page.
-    iframe.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
-      '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
+
+  // Le prechargement (cePrefetchEditMode) est deja pret pour ce cours : on
+  // echange juste les deux iframes (id + visibilite), sans nouveau
+  // chargement, pour un affichage quasi instantane.
+  var canSwap = prefetch.dataset.prefetchCourseId === String(_ce.id) && prefetch.dataset.prefetchReady === '1';
+  if (canSwap) {
+    prefetch.id = 'ce-iframe';
+    iframe.id = 'ce-prefetch-iframe';
+    delete prefetch.dataset.prefetchCourseId;
+    delete prefetch.dataset.prefetchReady;
+    prefetch.style.display = 'block';
+    prefetch.style.opacity = '1';
+    iframe.style.display = 'none';
+    iframe.style.opacity = '0';
+    empty.style.display = 'none';
+    loading.style.display = 'none';
+    iframe = prefetch;
   } else {
-    iframe.src = courseUrl;
+    iframe.style.opacity = '0';
+    loading.style.display = 'flex';
+    iframe.onload = function() { ceInjectCSS(iframe); iframe.style.opacity = '1'; loading.style.display = 'none'; };
+    if (_ce.contextid && !_ceEditingActivated) {
+      // Le mode édition est active directement via l'URL officielle Moodle
+      // (pas besoin du bouton natif "Activer le mode édition", qui reste
+      // masque comme partout ailleurs dans ce visualiseur — meme habillage
+      // que la vue activite normale, _ceIframeCSS par defaut). Seulement la
+      // premiere fois : ensuite $USER->editing reste actif pour la session,
+      // pas besoin de repasser par ce redirect (gagne un aller-retour serveur).
+      iframe.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
+        '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
+      _ceEditingActivated = true;
+    } else {
+      iframe.src = courseUrl;
+    }
+    iframe.style.display = 'block';
+    empty.style.display  = 'none';
   }
-  iframe.style.display = 'block';
-  empty.style.display  = 'none';
+  // Rafraichissement automatique de la liste "Contenu du cours" tant que le
+  // mode edition est ouvert : plus simple et plus fiable que d'essayer de
+  // detecter precisement chaque action Moodle (ajout, suppression, masquage,
+  // deplacement...), dont les mecanismes internes varient et ne declenchent
+  // pas toujours les evenements attendus. On reinjecte aussi le CSS a chaque
+  // tick (sans effet si deja present, voir le garde-fou dans ceInjectCSS) :
+  // certaines pages internes (ex. course/section.php, atteinte via une
+  // sous-section) utilisent un autre gabarit Moodle ou l'injection au
+  // premier chargement peut echouer silencieusement — ce filet corrige
+  // l'affichage sans qu'il faille identifier la cause exacte au cas par cas.
+  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
+  _ceRefreshTimer = setInterval(function() {
+    ceInjectCSS(iframe);
+    if (_ce.id) ceRefreshSections();
+  }, 2500);
+}
+
+function ceRenderBreadcrumb(crumbs) {
+  var el = document.getElementById('ce-breadcrumb');
+  if (!crumbs || !crumbs.length) { el.innerHTML = ''; return; }
+  el.innerHTML = crumbs.map(function(c, i) {
+    var isLast = i === crumbs.length - 1;
+    return (i > 0 ? '<span class="dv-crumb-sep">&gt;</span>' : '') +
+      '<span' + (isLast ? ' class="dv-crumb-current"' : '') + '>' + esc(c) + '</span>';
+  }).join('');
 }
 
 function openCourseIframe(courseId, courseName) {
   _ce.id = courseId; _ce.name = courseName;
+  var ceBody = document.querySelector('.course-modal-body');
+  if (ceBody) ceBody.classList.remove('mob-content'); // repartir sur la liste des sections en mobile
   document.getElementById('course-modal-title').textContent = courseName;
   document.getElementById('ce-iframe').style.display = 'none';
   document.getElementById('ce-iframe').src = '';
   document.getElementById('ce-empty').style.display = 'flex';
   document.getElementById('ce-search-inp').value = '';
+  document.getElementById('ce-breadcrumb').innerHTML = '';
   document.getElementById('ce-sections').innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Chargement…</p>';
   document.getElementById('course-modal-bg').classList.add('on');
+  ceRefreshSections();
+}
 
-  fetch(window.location.pathname + '?action=course_detail&courseid=' + courseId)
+// Precharge en arriere-plan (iframe cachee) le mode edition de ce cours, des
+// l'ouverture de "Mes modules" : si l'utilisateur clique ensuite sur
+// "Activer le mode edition", ceOpenEditMode peut afficher ce resultat
+// quasi instantanement au lieu de charger from scratch. A noter : ce
+// prechargement passe par editmode.php la premiere fois de la session, ce
+// qui active $USER->editing cote serveur meme si l'utilisateur ne clique
+// jamais sur le bouton — accepte ici car sans consequence pour un
+// formateur/admin deja autorise a editer.
+function cePrefetchEditMode(courseId) {
+  var prefetch = document.getElementById('ce-prefetch-iframe');
+  if (!prefetch) return;
+  prefetch.dataset.prefetchCourseId = String(courseId);
+  prefetch.dataset.prefetchReady = '0';
+  var courseUrl = WWWROOT + '/course/view.php?id=' + courseId;
+  prefetch.onload = function() {
+    try {
+      if (prefetch.contentWindow.location.href.indexOf('/course/view.php') === -1) return;
+    } catch (e) {}
+    if (prefetch.dataset.prefetchCourseId !== String(courseId)) return;
+    ceInjectCSS(prefetch);
+    prefetch.dataset.prefetchReady = '1';
+  };
+  if (_ce.contextid && !_ceEditingActivated) {
+    prefetch.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
+      '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
+    _ceEditingActivated = true;
+  } else {
+    prefetch.src = courseUrl;
+  }
+}
+
+// Recharge la liste des sections/activites du cours ouvert (_ce.id) depuis
+// le serveur, sans reinitialiser le reste de la modale (recherche, iframe
+// ouverte...). Utilise a l'ouverture (openCourseIframe) et pour refleter en
+// direct un renommage fait en mode edition (voir ceWatchInplaceEdits) sans
+// que le formateur ait besoin de recharger toute la page.
+function ceRefreshSections() {
+  var courseId = _ce.id;
+  // Anti-cache (_ts) : par precaution, pour exclure toute reponse mise en
+  // cache par le navigateur sur cette requete appelee tres frequemment.
+  fetch(window.location.pathname + '?action=course_detail&courseid=' + courseId + '&_ts=' + Date.now(), {cache: 'no-store'})
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (!d.ok) {
-        document.getElementById('ce-sections').innerHTML =
-          '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Erreur chargement.</p>';
-        return;
-      }
+      if (!d.ok || _ce.id !== courseId) return;
       _ce.sections = d.sections;
       _ce.contextid = d.contextid;
+      ceRenderBreadcrumb(d.breadcrumb);
       ceRenderSections(d.sections);
+      // Une seule fois par cours ouvert (pas a chaque rafraichissement
+      // periodique) : _ce.contextid n'est connu qu'a partir d'ici, donc
+      // c'est le premier moment ou le prechargement peut passer par
+      // editmode.php correctement si besoin.
+      if (_ce.prefetchedFor !== courseId) {
+        _ce.prefetchedFor = courseId;
+        cePrefetchEditMode(courseId);
+      }
     })
     .catch(function() {
       document.getElementById('ce-sections').innerHTML =
         '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Erreur réseau.</p>';
     });
 }
+
+// Un renommage en direct (section, activite...) dans l'iframe "mode edition"
+// utilise le mecanisme "inplace editable" natif de Moodle, qui declenche cet
+// evenement (bouillonnant) une fois la sauvegarde AJAX terminee — voir
+// lib/amd/src/local/inplace_editable/events.js. Un ajout/suppression/
+// deplacement d'activite ou de section passe lui par l'editeur de cours
+// reactif, qui declenche 'core_course:stateChanged' sur le document a
+// chaque changement d'etat — voir course/format/amd/src/courseeditor.js
+// (dispatchStateChangedEvent). Les deux sont ecoutes ici pour rafraichir la
+// liste "Contenu du cours" sans que le formateur ait a recharger la page.
+function ceWatchInplaceEdits(doc) {
+  if (doc._l3mInplaceWatched) return;
+  doc._l3mInplaceWatched = true;
+  var refresh = function() { if (_ce.id) ceRefreshSections(); };
+  doc.addEventListener('core/inplace_editable:updated', refresh);
+  doc.addEventListener('core_course:stateChanged', refresh);
+  // Filet de securite : certaines actions (masquer/afficher, supprimer...)
+  // ne declenchent pas toujours les evenements ci-dessus selon le format de
+  // cours. On observe donc aussi directement les changements de structure du
+  // contenu du cours, avec un debounce pour ne rafraichir qu'une fois
+  // l'action terminee (evite les rafales pendant l'animation Moodle).
+  try {
+    var content = doc.querySelector('.course-content') || doc.body;
+    var timer = null;
+    var obs = new MutationObserver(function() {
+      clearTimeout(timer);
+      timer = setTimeout(refresh, 500);
+    });
+    obs.observe(content, {childList: true, subtree: true});
+  } catch (e) {}
+  // "Supprimer" (.editing_delete) ouvre une boite de dialogue de
+  // confirmation Moodle avant d'agir : on ne peut pas savoir a l'avance
+  // quand l'utilisateur va confirmer, donc on sonde quelques fois sur
+  // quelques secondes des le clic, pour rafraichir des que la suppression
+  // devient effective plutot que d'attendre une fermeture/reouverture de
+  // la fenetre.
+  doc.addEventListener('click', function(ev) {
+    var link = ev.target.closest && ev.target.closest('.editing_delete');
+    if (!link) return;
+    var n = 0;
+    var poll = setInterval(function() {
+      n++;
+      refresh();
+      if (n >= 6) clearInterval(poll);
+    }, 700);
+  }, true);
+}
 function closeCourseIframe() {
   document.getElementById('course-modal-bg').classList.remove('on');
+  var left = document.querySelector('.dv-left');
+  if (left) left.style.display = '';
+  document.getElementById('ce-edit-link').style.display = '';
   var iframe = document.getElementById('ce-iframe');
   iframe.src = 'about:blank';
+  if (_ceRefreshTimer) { clearInterval(_ceRefreshTimer); _ceRefreshTimer = null; }
 }
 
 /* ─────────────────────────────────────────
@@ -1937,7 +2494,7 @@ function closeCourseIframe() {
 function doLogout(ev) {
   ev.preventDefault();
   var logoutUrl = WWWROOT + '/login/logout.php?sesskey=' + SESSKEY;
-  var target    = WWWROOT + '/login/index.php?loginredirect=1';
+  var target    = WWWROOT + '/login/index.php?loginredirect=1&client=<?= $user_client ?>';
   fetch(logoutUrl, { credentials: 'same-origin' }).finally(function() {
     window.location.href = target;
   });
@@ -1971,6 +2528,7 @@ function go(v) {
   else if (v === 'corr')   renderCorr();
   else if (v === 'elev')   renderElev();
   else if (v === 'dispo')  renderDispo();
+  else if (v === 'cours')  renderMesCours();
   else if (v === 'params') renderParams();
 }
 
@@ -2297,6 +2855,18 @@ function renderJour() {
 /* ─────────────────────────────────────────
    VUE PLANNING
 ───────────────────────────────────────── */
+var _planOverloadedWeeks = [];
+
+function contactAdminAboutOverload() {
+  var admins = DATA.my_admins || [];
+  if (!admins.length) { toast('Aucun administrateur trouvé pour votre compte.'); return; }
+  var admin    = admins[0];
+  var weeksTxt = _planOverloadedWeeks.map(function(w){ return 'S' + w; }).join(', ');
+  var msg = 'Bonjour, je constate une surcharge sur ' + (weeksTxt ? 'les semaines ' + weeksTxt : 'mon planning') +
+    ' alors que mes disponibilités sont à jour. Pouvez-vous vérifier ma répartition de charge ? Merci.';
+  openMessageModal(admin.id, admin.nom, msg);
+}
+
 function renderPlan() {
   var cohorts  = DATA.cohorts || [];
   var cap      = DATA.meta.capacity || 28;
@@ -2358,21 +2928,27 @@ function renderPlan() {
   var alertEl     = document.getElementById('plan-alert');
   var overloadedI = weekHours.map(function(h, i){ return h > cap ? (i + 1) : null; }).filter(function(w){ return w !== null; });
   var overloaded  = overloadedI.map(function(w){ return 'S' + w; });
+  _planOverloadedWeeks = overloadedI;
   if (overloaded.length) {
     var hasVeh   = overloadedI.some(function(w){ return vehWeeks.indexOf(w) !== -1; });
     var realTxts = hasPlan
       ? (DATA.my_log || []).concat(DATA.my_alerts || []).filter(function(l){ return overloadedI.indexOf(l.w) !== -1; }).map(function(l){ return l.txt; })
       : [];
-    alertEl.style.display = '';
+    var alertHtml;
     if (realTxts.length) {
-      alertEl.innerHTML = realTxts.slice(0, 3).map(function(t){ return '<div>' + esc(t) + '</div>'; }).join('');
+      alertHtml = realTxts.slice(0, 3).map(function(t){ return '<div>' + esc(t) + '</div>'; }).join('');
     } else {
-      alertEl.innerHTML = '<b>' + overloaded.length + ' semaine' + (overloaded.length > 1 ? 's' : '') +
+      alertHtml = '<b>' + overloaded.length + ' semaine' + (overloaded.length > 1 ? 's' : '') +
         ' au-dessus de ' + cap + ' h</b> (' + overloaded.join(', ') + ')' +
         (hasVeh ? ' — semaines véhicule. Lia a soumis une re-répartition ' +
           '<span style="background:var(--amber,#F6C685);color:var(--amber-d,#8a5a10);' +
           'font-weight:800;font-size:10.5px;padding:2px 8px;border-radius:99px;margin-left:4px">en arbitrage</span>' : '');
     }
+    if ((DATA.my_admins || []).length) {
+      alertHtml += '<div style="margin-top:8px"><button type="button" class="btn mini ghost" onclick="contactAdminAboutOverload()">Contacter l\'administrateur</button></div>';
+    }
+    alertEl.innerHTML = alertHtml;
+    alertEl.style.display = '';
   } else {
     alertEl.style.display = 'none';
   }
@@ -2447,14 +3023,13 @@ function renderCorr() {
     return;
   }
   el.innerHTML = DATA.corrections.map(function(c, i){
-    var nom  = esc(c.firstname + ' ' + c.lastname);
-    var link = WWWROOT + '/mod/assign/view.php?id=' + c.assignid + '&action=grading';
+    var nom = esc(c.firstname + ' ' + c.lastname);
     return '<div class="cor" id="cor-' + i + '">' +
       '<div class="cor-name">' + nom + '</div>' +
       '<div class="cor-assign">Devoir : ' + esc(c.assign_name) + '</div>' +
       '<div class="cor-date">Déposé le ' + esc(c.date_label) + '</div>' +
       '<div class="cor-acts">' +
-        '<a class="btn mini primary" href="' + esc(link) + '" target="_blank" rel="noopener">Ouvrir</a>' +
+        '<button type="button" class="btn mini primary" onclick="openCorrectionInCourse(' + c.cmid + ',' + c.course + ',' + c.userid + ')">Ouvrir</button>' +
         '<button class="btn mini ghost" onclick="markCorrected(' + i + ')">Marquer comme corrigé</button>' +
       '</div>' +
     '</div>';
@@ -2620,16 +3195,24 @@ function renderParams() {
     ? meta.habs.map(function(h){ return '<span class="hab-tag" style="' + habStyle(h.color) + '">' + esc(h.text) + '</span>'; }).join('')
     : '<span style="color:var(--muted);font-style:italic;font-size:13px">Aucune habilitation renseignée</span>';
   document.getElementById('params-habs').innerHTML = habsHtml;
+}
 
-  var coursesHtml = DATA.courses.length
-    ? DATA.courses.map(function(c) {
-        return '<div class="param-row">' +
-          '<span class="lbl">' + esc(c.fullname) + '</span>' +
-          '<button type="button" class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Ajouter du contenu</button>' +
-        '</div>';
-      }).join('')
-    : '<span style="color:var(--muted);font-style:italic;font-size:13px">Aucun cours assigné</span>';
-  document.getElementById('params-mes-cours').innerHTML = coursesHtml;
+/* ─────────────────────────────────────────
+   VUE MES COURS
+───────────────────────────────────────── */
+function renderMesCours() {
+  var tbody = document.getElementById('mescours-tbody');
+  if (!DATA.courses.length) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun cours assigné.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = DATA.courses.map(function(c) {
+    return '<tr>' +
+      '<td class="mm-name">' + esc(c.fullname) + '</td>' +
+      '<td class="mm-short">' + esc(c.shortname) + '</td>' +
+      '<td><button type="button" class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Ajouter du contenu</button></td>' +
+    '</tr>';
+  }).join('');
 }
 
 /* ─────────────────────────────────────────

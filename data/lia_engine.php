@@ -98,23 +98,51 @@ function lia_build_people(array $formateurs): array {
     return $people;
 }
 
-// Attribution des rôles B(référent péda)/P(psychologue)/E(expression orale)/J(juriste)/T(véhicule)
+// Attribution des rôles B(référent péda)/P(psychologue)/E(expression orale)/J(juriste)/T(véhicule).
+//
+// B/P/E/J sont mutuellement exclusifs (un même formateur ne peut porter deux
+// de ces rôles à la fois, sinon il cumule leurs blocs de curriculum sur
+// toutes les classes — cause d'une charge simulée irréaliste). Le rôle
+// déclaré (role_label, saisi explicitement par l'admin) est toujours
+// prioritaire sur une habilitation : une habilitation comme "BAFM" est une
+// certification quasi universelle chez les moniteurs, elle ne suffit pas à
+// identifier spécifiquement le référent pédagogique.
+//
+// Le pool véhicule (T) reste indépendant de B/P/E/J : dans une petite équipe,
+// il est normal qu'un référent pédagogique ou un juriste soit *aussi*
+// superviseur véhicule (la répartition hebdomadaire/le lissage de charge se
+// chargent ensuite d'équilibrer si ça devient trop pour une seule personne).
 function lia_build_prof2p(array $formateurs): array {
-    $find = function (array $keywords) use ($formateurs) {
-        foreach ($formateurs as $f) {
-            if (lia_hab_match($f['habs'] ?? [], $keywords)) return $f;
-            $roleLabel = mb_strtolower($f['role_label'] ?? '');
-            foreach ($keywords as $k) {
-                if ($roleLabel !== '' && mb_strpos($roleLabel, mb_strtolower($k)) !== false) return $f;
-            }
-        }
-        return null;
-    };
+    $roles = [
+        'B' => ['BAFM', 'référent pédagogique'],
+        'P' => ['psychologue'],
+        'E' => ['expression orale'],
+        'J' => ['juriste'],
+    ];
+    $claimed = [];
     $p2p = [];
-    $bF = $find(['BAFM', 'référent pédagogique']); if ($bF) $p2p['B'] = (int)$bF['id'];
-    $pF = $find(['psychologue']);                  if ($pF) $p2p['P'] = (int)$pF['id'];
-    $eF = $find(['expression orale']);             if ($eF) $p2p['E'] = (int)$eF['id'];
-    $jF = $find(['juriste']);                      if ($jF) $p2p['J'] = (int)$jF['id'];
+
+    // Passe 1 : rôle explicitement déclaré (role_label).
+    foreach ($roles as $key => $keywords) {
+        foreach ($formateurs as $f) {
+            if (isset($claimed[$f['id']])) continue;
+            $roleLabel = mb_strtolower($f['role_label'] ?? '');
+            $matched = false;
+            foreach ($keywords as $k) {
+                if ($roleLabel !== '' && mb_strpos($roleLabel, mb_strtolower($k)) !== false) { $matched = true; break; }
+            }
+            if ($matched) { $p2p[$key] = (int)$f['id']; $claimed[$f['id']] = true; break; }
+        }
+    }
+    // Passe 2 : rôles encore vacants → habilitation correspondante, chez un
+    // formateur pas déjà affecté à un autre rôle spécial.
+    foreach ($roles as $key => $keywords) {
+        if (isset($p2p[$key])) continue;
+        foreach ($formateurs as $f) {
+            if (isset($claimed[$f['id']])) continue;
+            if (lia_hab_match($f['habs'] ?? [], $keywords)) { $p2p[$key] = (int)$f['id']; $claimed[$f['id']] = true; break; }
+        }
+    }
 
     $tFs = array_values(array_filter($formateurs, function ($f) {
         return lia_hab_match($f['habs'] ?? [], ['superviseur véhicule', 'moniteur', 'monitrice', 'titre pro ecsr']);
@@ -205,6 +233,53 @@ function lia_build_unavailable(array $dispoRows, ?int $refStart, int $totalW): a
 }
 
 /**
+ * Applique des affectations manuelles (admin, "Planning & Lia") sur la grille :
+ * pour chaque override, retire les entrées auto-générées de ce formateur pour
+ * cette classe à cette semaine, puis (si h > 0) les remplace par l'entrée
+ * manuelle. Marquée fix:true — donc protégée du lissage automatique au même
+ * titre que les séances véhicule/salle, ce qui la rend définitive tant
+ * qu'elle n'est pas explicitement supprimée ou resaisie.
+ *
+ * $overrides : liste de ['pid','w','coh','type','label','h'] (issue de
+ * lia_overrides en config, voir save_lia_override/delete_lia_override).
+ */
+function lia_apply_overrides(array &$grid, array $overrides): void {
+    foreach ($overrides as $ov) {
+        $pid = (int)($ov['pid'] ?? 0);
+        $w   = (int)($ov['w'] ?? 0);
+        $coh = (string)($ov['coh'] ?? '');
+        if (!$pid || !$w || $coh === '' || !isset($grid[$pid][$w])) continue;
+        $grid[$pid][$w] = array_values(array_filter($grid[$pid][$w], fn($e) => $e->coh !== $coh));
+        $h = (float)($ov['h'] ?? 0);
+        if ($h > 0) {
+            $e = new stdClass();
+            $e->coh    = $coh;
+            $e->type   = (string)($ov['type'] ?? 'visio');
+            $e->label  = (string)($ov['label'] ?? 'Affectation manuelle');
+            $e->h      = $h;
+            $e->fix    = true;
+            $e->manual = true;
+            $grid[$pid][$w][] = $e;
+        }
+    }
+}
+
+/**
+ * Retire de $alerts celles dont la clé "kind|pid|w" figure dans $dismissed
+ * (voir dismiss_lia_alert). Fonction pure — ne lit/écrit aucune config, à
+ * appeler par chaque consommateur (admin-lba.php, espace-formateur.php)
+ * après lia_compute_plan().
+ */
+function lia_filter_dismissed_alerts(array $alerts, array $dismissed): array {
+    if (!$dismissed) return $alerts;
+    $dismissed = array_flip($dismissed);
+    return array_values(array_filter($alerts, function ($a) use ($dismissed) {
+        $key = ($a['kind'] ?? '') . '|' . ($a['pid'] ?? '') . '|' . ($a['w'] ?? '');
+        return !isset($dismissed[$key]);
+    }));
+}
+
+/**
  * Calcule la grille personne × semaine, affecte les blocs de curriculum par rôle,
  * puis rééquilibre automatiquement les semaines en surcharge (délégation à un
  * backup, puis décalage ±1..4 semaines). Retourne grid/log/alerts/etc.
@@ -213,8 +288,12 @@ function lia_build_unavailable(array $dispoRows, ?int $refStart, int $totalW): a
  * capacité effective de cette personne est forcée à 0 (indisponibilité
  * validée). Voir lia_build_unavailable(). Les séances fixes (véhicule/salle,
  * fix:true) ne sont pas réaffectées par ce mécanisme — voir alerte dédiée.
+ *
+ * $overrides (optionnel) : affectations manuelles admin, voir lia_apply_overrides().
+ * Appliquées avant le tutorat hebdo / lissage, pour que ces derniers
+ * raisonnent sur l'état déjà corrigé.
  */
-function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $backups, array $unavailable = []): array {
+function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $backups, array $unavailable = [], array $overrides = []): array {
     $totalW = lia_total_weeks($cohorts);
 
     $grid = [];
@@ -295,6 +374,10 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
         }
     }
 
+    // Affectations manuelles admin : appliquées avant tutorat/lissage pour
+    // que ceux-ci raisonnent sur l'état déjà corrigé (voir lia_apply_overrides).
+    if ($overrides) lia_apply_overrides($grid, $overrides);
+
     // ── Tutorat hebdo (attribué à qui est le moins chargé cette semaine-là) ──
     foreach ($cohorts as $cohort) {
         $L = $cohort['L']; $off = $cohort['off'];
@@ -342,6 +425,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
             }
             if (count($vehCohs) > 1) {
                 $alerts[] = [
+                    'kind'=> 'veh_conflict',
                     'pid' => null,
                     'w'   => $w,
                     'txt' => 'S' . $w . ' : classes ' . implode(' et ', $vehCohs) . ' en semaine véhicule simultanée — moniteurs insuffisants. Lia recommande de décaler une rentrée.',
@@ -372,6 +456,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
                 foreach (($grid[$pid][$w] ?? []) as $e) {
                     if (!empty($e->fix)) {
                         $alerts[] = [
+                            'kind'=> 'fixed_unavailable',
                             'pid' => $pid, 'w' => $w,
                             'txt' => 'S' . $w . ' : ' . $p['nom'] . ' indisponible — « ' . $e->label . ' » (classe ' . $e->coh . ') est une séance fixe, réaffectation manuelle nécessaire.',
                         ];
@@ -449,6 +534,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
 
             if ($excess > 0.5) {
                 $alerts[] = [
+                    'kind'=> $isUnavailable ? 'unavailable_excess' : 'overload',
                     'pid' => $pid,
                     'w'   => $w,
                     'txt' => $isUnavailable

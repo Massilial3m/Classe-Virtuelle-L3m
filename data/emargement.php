@@ -1,9 +1,13 @@
 <?php
 require('/var/data/www/config.php');
 require_once($CFG->libdir . '/adminlib.php');
+require_once(__DIR__ . '/l3m_branding.php');
 
 require_login();
 require_capability('moodle/course:viewparticipants', context_system::instance());
+
+$brand = l3m_get_branding_for_user($USER->id);
+$accent_color = $brand[$brand['button_accent']];
 
 $userid    = optional_param('userid', 0, PARAM_INT);
 $courseid  = optional_param('courseid', 0, PARAM_INT);
@@ -27,13 +31,44 @@ $sql_students = "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email
     ORDER BY u.lastname, u.firstname";
 $all_students = $DB->get_records_sql($sql_students, ['roleid' => $student_roleid]);
 
+// Localisation approximative d'une IP au niveau region/departement (pas la
+// ville : la base GeoIP gratuite localise le point de rattachement reseau
+// du fournisseur d'acces, pas l'adresse reelle de l'abonne — la ville
+// peut donc etre fausse de plusieurs dizaines de km, alors que la region
+// est fiable). Utilise directement le lecteur GeoIp2 (comme le fait
+// iplookup_find_location() en interne) pour recuperer la subdivision
+// administrative plutot que la ville.
+function l3m_geoip_region($ip) {
+    global $CFG;
+    if (empty($CFG->geoip2file) || !file_exists($CFG->geoip2file)) {
+        return '';
+    }
+    $reader = new GeoIp2\Database\Reader($CFG->geoip2file);
+    try {
+        $record = $reader->city($ip);
+    } catch (Exception $e) {
+        return '';
+    }
+    if (empty($record)) {
+        return '';
+    }
+    $region = '';
+    if (!empty($record->mostSpecificSubdivision) && !empty($record->mostSpecificSubdivision->name)) {
+        $region = $record->mostSpecificSubdivision->name;
+    }
+    $countrycode = $record->country->isoCode ?? null;
+    $countries = get_string_manager()->get_list_of_countries(true);
+    $country = ($countrycode && isset($countries[$countrycode])) ? $countries[$countrycode] : ($record->country->names['en'] ?? '');
+    return trim($region . ($region && $country ? ', ' : '') . $country);
+}
+
 // Reconstruction des sessions depuis les logs
 function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
     $where_course = count($course_ids) > 0
         ? 'AND courseid IN (' . implode(',', $course_ids) . ')'
         : '';
 
-    $sql_logs = "SELECT id, timecreated, courseid
+    $sql_logs = "SELECT id, timecreated, courseid, ip
         FROM {logstore_standard_log}
         WHERE userid = :uid AND courseid > 0 $where_course
         ORDER BY timecreated ASC";
@@ -46,6 +81,7 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
     $sess_end     = $logs[0]->timecreated;
     $sess_secs    = 0;
     $sess_courses = [$logs[0]->courseid => true];
+    $sess_ip      = $logs[0]->ip;
 
     for ($i = 1; $i < count($logs); $i++) {
         $diff = $logs[$i]->timecreated - $logs[$i-1]->timecreated;
@@ -56,15 +92,24 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
                 'end'     => $sess_end,
                 'secs'    => $sess_secs,
                 'courses' => $sess_courses,
+                'ip'      => $sess_ip,
             ];
             $sess_start   = $logs[$i]->timecreated;
             $sess_secs    = 0;
             $sess_courses = [];
+            $sess_ip      = $logs[$i]->ip;
         } else {
             $sess_secs += $diff;
         }
         $sess_end = $logs[$i]->timecreated;
         $sess_courses[$logs[$i]->courseid] = true;
+        // Toujours garder la DERNIERE IP connue de la session (pas seulement
+        // celle du premier log) : une session en cours peut voir son IP
+        // changer (ex. bascule de reseau, ou correction infra en cours de
+        // session) ; on affiche l'info la plus recente et la plus fiable.
+        if (!empty($logs[$i]->ip)) {
+            $sess_ip = $logs[$i]->ip;
+        }
     }
     // Derniere session
     $sessions[] = [
@@ -72,9 +117,17 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
         'end'     => $sess_end,
         'secs'    => $sess_secs,
         'courses' => $sess_courses,
+        'ip'      => $sess_ip,
     ];
 
-    // Enrichir avec noms de cours
+    // Enrichir avec noms de cours + identifiants/localisation pour l'audit
+    // (Qualiopi / financeurs) : IP et heure exacte proviennent des logs
+    // Moodle (colonne "ip" de logstore_standard_log — Moodle ne conserve pas
+    // d'historique des sessions PHP passees, donc pas de vrai "id de
+    // session" ; on genere une reference stable et deterministe a la place).
+    // La localisation utilise la base MaxMind si configuree
+    // (Site admin > Serveur > Emplacement IP), sinon reste vide.
+    require_once($GLOBALS['CFG']->dirroot . '/iplookup/lib.php');
     foreach ($sessions as &$s) {
         $names = [];
         foreach (array_keys($s['courses']) as $cid) {
@@ -84,6 +137,15 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
         $h = floor($s['secs'] / 3600);
         $m = floor(($s['secs'] % 3600) / 60);
         $s['duration_fmt'] = $h > 0 ? $h . 'h ' . $m . 'min' : ($m > 0 ? $m . ' min' : '< 1 min');
+        $s['session_ref']  = 'SESS-' . strtoupper(substr(md5($userid . '_' . $s['start']), 0, 8));
+        $s['location']     = '';
+        if (!empty($s['ip'])) {
+            try {
+                $s['location'] = l3m_geoip_region($s['ip']);
+            } catch (Exception $e) {
+                // Base GeoIP absente ou illisible : on laisse la localisation vide.
+            }
+        }
     }
     return $sessions;
 }
@@ -109,20 +171,30 @@ $total_fmt     = $total_h . 'h ' . $total_m . 'min';
 // Export PDF
 if ($export === 'pdf' && $student) {
     $columns = [
-        'date'     => 'Date',
-        'debut'    => 'Heure début',
-        'fin'      => 'Heure fin',
-        'duree'    => 'Durée',
-        'modules'  => 'Module(s)',
+        'date'      => 'Date',
+        'debut'     => 'Heure début',
+        'fin'       => 'Heure fin',
+        'duree'     => 'Durée',
+        'modules'   => 'Module(s)',
+        'ip'        => 'Adresse IP',
+        'timestamp' => 'Timestamp',
+        'heure_exacte' => 'Heure exacte',
+        'session_ref'  => 'ID de session',
+        'location'     => 'Localisation',
     ];
     $rows = [];
     foreach ($sessions as $s) {
         $rows[] = [
-            'date'    => date('d/m/Y', $s['start']),
-            'debut'   => date('H:i', $s['start']),
-            'fin'     => date('H:i', $s['end']),
-            'duree'   => $s['duration_fmt'],
-            'modules' => $s['course_names'],
+            'date'         => date('d/m/Y', $s['start']),
+            'debut'        => date('H:i', $s['start']),
+            'fin'          => date('H:i', $s['end']),
+            'duree'        => $s['duration_fmt'],
+            'modules'      => $s['course_names'],
+            'ip'           => $s['ip'] ?: '—',
+            'timestamp'    => $s['start'],
+            'heure_exacte' => date('d/m/Y H:i:s', $s['start']),
+            'session_ref'  => $s['session_ref'],
+            'location'     => $s['location'] ?: '—',
         ];
     }
     $filename = 'emargement_' . $student->lastname . '_' . date('Y-m-d');
@@ -133,20 +205,30 @@ if ($export === 'pdf' && $student) {
 // Export Excel
 if ($export === 'excel' && $student) {
     $columns = [
-        'date'     => 'Date',
-        'debut'    => 'Heure début',
-        'fin'      => 'Heure fin',
-        'duree'    => 'Durée',
-        'modules'  => 'Module(s)',
+        'date'      => 'Date',
+        'debut'     => 'Heure début',
+        'fin'       => 'Heure fin',
+        'duree'     => 'Durée',
+        'modules'   => 'Module(s)',
+        'ip'        => 'Adresse IP',
+        'timestamp' => 'Timestamp',
+        'heure_exacte' => 'Heure exacte',
+        'session_ref'  => 'ID de session',
+        'location'     => 'Localisation',
     ];
     $rows = [];
     foreach ($sessions as $s) {
         $rows[] = [
-            'date'    => date('d/m/Y', $s['start']),
-            'debut'   => date('H:i', $s['start']),
-            'fin'     => date('H:i', $s['end']),
-            'duree'   => $s['duration_fmt'],
-            'modules' => $s['course_names'],
+            'date'         => date('d/m/Y', $s['start']),
+            'debut'        => date('H:i', $s['start']),
+            'fin'          => date('H:i', $s['end']),
+            'duree'        => $s['duration_fmt'],
+            'modules'      => $s['course_names'],
+            'ip'           => $s['ip'] ?: '—',
+            'timestamp'    => $s['start'],
+            'heure_exacte' => date('d/m/Y H:i:s', $s['start']),
+            'session_ref'  => $s['session_ref'],
+            'location'     => $s['location'] ?: '—',
         ];
     }
     $filename = 'emargement_' . $student->lastname . '_' . date('Y-m-d');
@@ -243,7 +325,7 @@ a{color:#2E9488;}
       </select>
       <input type="date" name="date_from" value="<?php echo $date_from; ?>" title="Du">
       <input type="date" name="date_to"   value="<?php echo $date_to; ?>"   title="Au">
-      <button type="submit" class="btn-export" style="background:#2E9488;color:#fff;">🔍 Filtrer</button>
+      <button type="submit" class="btn-export" style="background:<?= $accent_color ?>;color:#fff;">🔍 Filtrer</button>
       <?php if ($student && !empty($sessions)): ?>
         <a class="btn-export btn-excel" href="?userid=<?php echo $userid; ?>&courseid=<?php echo $courseid; ?>&date_from=<?php echo $date_from; ?>&date_to=<?php echo $date_to; ?>&export=excel">📊 Excel</a>
         <a class="btn-export btn-pdf"   href="?userid=<?php echo $userid; ?>&courseid=<?php echo $courseid; ?>&date_from=<?php echo $date_from; ?>&date_to=<?php echo $date_to; ?>&export=pdf">📄 PDF</a>
@@ -286,6 +368,11 @@ a{color:#2E9488;}
           <th>Fin</th>
           <th>Durée</th>
           <th>Module(s)</th>
+          <th>Heure exacte</th>
+          <th>Timestamp</th>
+          <th>Adresse IP</th>
+          <th>Localisation</th>
+          <th>ID de session</th>
         </tr>
       </thead>
       <tbody>
@@ -297,16 +384,29 @@ a{color:#2E9488;}
             <td class="time-cell"><?php echo date('H:i', $s['end']); ?></td>
             <td class="dur-cell"><?php echo $s['duration_fmt']; ?></td>
             <td class="mod-cell"><?php echo htmlspecialchars($s['course_names']); ?></td>
+            <td class="time-cell" style="font-size:11px;"><?php echo date('d/m/Y H:i:s', $s['start']); ?></td>
+            <td class="mod-cell" style="font-size:11px;"><?php echo $s['start']; ?></td>
+            <td class="mod-cell" style="font-size:11px;"><?php echo htmlspecialchars($s['ip'] ?: '—'); ?></td>
+            <td class="mod-cell" style="font-size:11px;"><?php echo htmlspecialchars($s['location'] ?: '—'); ?></td>
+            <td class="mod-cell" style="font-size:10.5px;"><?php echo htmlspecialchars($s['session_ref']); ?></td>
           </tr>
         <?php endforeach; ?>
         <tr class="em-total-row">
           <td colspan="4">TOTAL</td>
           <td><?php echo $total_fmt; ?></td>
-          <td></td>
+          <td colspan="6"></td>
         </tr>
       </tbody>
     </table>
     </div>
+    <p class="em-generated" style="margin-top:6px">
+      <?php if (empty($CFG->geoip2file) || !file_exists($CFG->geoip2file)): ?>
+        ⚠️ Localisation non disponible : base de géolocalisation IP non configurée (Site administration → Serveur → Emplacement IP).
+      <?php else: ?>
+        La « Localisation » indique la région/le pays de rattachement de l'adresse IP (niveau fiable) — pas la ville, qui n'est pas garantie par la géolocalisation IP.
+      <?php endif; ?>
+      L'« ID de session » est une référence générée par la plateforme (pas un identifiant de session Moodle — Moodle ne conserve pas d'historique des sessions passées).
+    </p>
     <p class="em-generated">
       Généré automatiquement le <?php echo date('d/m/Y à H:i'); ?> depuis les logs de connexion de la plateforme <?php echo $CFG->wwwroot; ?>
     </p>

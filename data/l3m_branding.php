@@ -30,18 +30,53 @@ function l3m_get_brand_by_client($client) {
         'name'      => 'La Bonne Allure',
         'name_html' => 'La Bonne <em>Allure</em>',
         'logo'      => '/logo-la-bonne-allure.png',
+        // Tableaux de bord LBA restent clairs : même logo que partout ailleurs.
+        'logo_dark' => '/logo-la-bonne-allure.png',
         'teal'      => '#2E9488', 'teal_d' => '#1C5F58', 'teal_t' => '#E3F2EF',
         'orange'    => '#F2A03D', 'orange_d' => '#9A5E13', 'orange_t' => '#FBEDDA',
+        // Surfaces des tableaux de bord (fond de page, cartes, texte) —
+        // valeurs actuelles inchangées pour LBA.
+        'bg' => '#F7F6F1', 'card' => '#FFFFFF', 'ink' => '#24333C',
+        'muted' => '#68767E', 'line' => '#E4E1D6',
+        // 'saran' si un jour LBA a aussi 2 accents distincts ; ici teal reste
+        // l'accent principal, pas besoin de bouton-override.
+        'button_accent' => 'teal',
     ];
     $saran = [
         'name'      => 'Saran Conduite',
         'name_html' => 'Saran <em>Conduite</em>',
         'logo'      => '/logo-saran-conduite.png',
-        'teal'      => '#1F1F1F', 'teal_d' => '#0D0D0D', 'teal_t' => '#EAEAE9',
-        'orange'    => '#E9521A', 'orange_d' => '#C7431A', 'orange_t' => '#FDEAE1',
+        // Variante texte clair (icône orange inchangée) pour les tableaux de
+        // bord, dont le fond est sombre — le logo normal (texte gris foncé)
+        // n'est lisible que sur fond clair (landing page, carte de connexion).
+        'logo_dark' => '/logo-saran-conduite-dark.png',
+        'teal'      => '#313339', 'teal_d' => '#26282D', 'teal_t' => '#46484E',
+        'orange'    => '#E8632A', 'orange_d' => '#C25320', 'orange_t' => '#E8632A1A',
+        // Palette bleu-gris foncé + orange (une seule teinte d'accent),
+        // reprise telle quelle de la maquette fournie.
+        'bg' => '#2B2D33', 'card' => '#35373D', 'ink' => '#F3F4F1',
+        'muted' => '#A6A6A2', 'line' => '#46484E',
+        // Les boutons/actions doivent utiliser l'orange (pas le noir "teal").
+        'button_accent' => 'orange',
     ];
     $brands = ['lba' => $lba, 'saran' => $saran];
-    return $brands[$client] ?? $lba;
+    $brand  = $brands[$client] ?? $lba;
+
+    // Anti-cache : ajoute un ?v=<mtime du fichier> sur le logo, pour que
+    // toute mise à jour de l'image soit vue immédiatement par les
+    // navigateurs qui l'ont déjà en cache, sans dépendre d'un rechargement
+    // forcé côté utilisateur.
+    global $CFG;
+    foreach (['logo', 'logo_dark'] as $logo_key) {
+        if (empty($brand[$logo_key])) continue;
+        $logo_path = ($CFG->dirroot ?? '') . $brand[$logo_key];
+        $mtime = @filemtime($logo_path);
+        if ($mtime) {
+            $brand[$logo_key] .= '?v=' . $mtime;
+        }
+    }
+
+    return $brand;
 }
 
 function l3m_host_client_map() {
@@ -55,6 +90,16 @@ function l3m_host_client_map() {
 }
 
 function l3m_get_branding() {
+    // Signal explicite prioritaire : le lien "Se connecter" de chaque landing
+    // page pointe directement vers ?client=... (la connexion converge de
+    // toute façon sur le même wwwroot Moodle — voir commentaire en tête de
+    // fichier — donc le domaine seul ne suffit plus à distinguer l'origine
+    // une fois sur la page de connexion).
+    $client_param = strtolower($_GET['client'] ?? '');
+    if ($client_param === 'lba' || $client_param === 'saran') {
+        return l3m_get_brand_by_client($client_param);
+    }
+
     $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
     $map  = l3m_host_client_map();
     return l3m_get_brand_by_client($map[$host] ?? 'lba');

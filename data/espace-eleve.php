@@ -6,7 +6,44 @@ require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
 require_login();
-$brand = l3m_get_branding_for_user($USER->id);
+$user_client = l3m_get_user_client($USER->id);
+$brand = l3m_get_brand_by_client($user_client);
+
+// ===== BLOCAGE ACCÈS : dossier documents pas encore confirmé reçu =====
+// admin-lba.php (action convert_lead_to_student) inscrit l'élève en
+// ENROL_USER_SUSPENDED tant qu'un admin n'a pas cliqué "Activer l'accès"
+// (action activate_student_access) après réception du dossier par e-mail.
+// Cette page liste "mes cours" via les rôles attribués (role_assignments),
+// qui restent présents même inscription suspendue — sans ce contrôle
+// explicite, la suspension ne bloquerait donc rien ici. Un site admin garde
+// toujours l'accès (support/débogage).
+$l3m_has_active_enrol = is_siteadmin() || $DB->record_exists_sql(
+    "SELECT 1 FROM {user_enrolments} ue JOIN {enrol} e ON e.id = ue.enrolid
+     WHERE ue.userid = :uid AND ue.status = :active",
+    ['uid' => $USER->id, 'active' => ENROL_USER_ACTIVE]
+);
+if (!$l3m_has_active_enrol) {
+    if (isset($_GET['action'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['ok' => false, 'msg' => "Accès en attente d'activation"]);
+        exit;
+    }
+    header('Content-Type: text/html; charset=UTF-8');
+    ?><!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Accès en attente</title>
+<style>
+body{font-family:"Segoe UI",system-ui,sans-serif;background:#F7F6F1;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#fff;border-radius:16px;padding:36px 40px;max-width:440px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+h1{font-size:18px;color:#24333C;margin:0 0 10px}
+p{color:#68767E;font-size:14px;line-height:1.6}
+</style></head>
+<body><div class="card">
+  <h1>Votre accès est en attente d'activation</h1>
+  <p>Votre inscription a bien été enregistrée. L'accès aux cours sera activé par notre équipe dès réception de votre dossier (documents transmis par e-mail).</p>
+</div></body></html>
+    <?php
+    exit;
+}
 
 // AJAX : documents administratifs de l'eleve
 if (isset($_GET['action']) && $_GET['action'] === 'my_docs') {
@@ -57,8 +94,23 @@ if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
             $sections[] = ['num'=>$snum,'name'=>$sinfo->name ?: ('Section '.$snum),
                            'mods'=>$mods,'total'=>$total,'done_n'=>$done_n];
         }
+        // Fil d'ariane (catégorie racine → sous-catégories → cours) — masqué
+        // par le CSS qui nettoie l'iframe (breadcrumb natif Moodle caché),
+        // reconstruit ici pour le panneau de gauche du viewer.
+        $breadcrumb = [];
+        $catid_bc = (int)$course->category;
+        $safety_bc = 0;
+        while ($catid_bc && $safety_bc < 10) {
+            $cat_bc = $DB->get_record('course_categories', ['id' => $catid_bc], 'id,name,parent');
+            if (!$cat_bc) break;
+            array_unshift($breadcrumb, $cat_bc->name);
+            $catid_bc = (int)$cat_bc->parent;
+            $safety_bc++;
+        }
+        $breadcrumb[] = $course->fullname;
+
         echo json_encode(['ok'=>true,'sections'=>$sections,
-                          'coursename'=>$course->fullname,'courseid'=>$cid]);
+                          'coursename'=>$course->fullname,'courseid'=>$cid,'breadcrumb'=>$breadcrumb]);
     } catch (Exception $e) {
         echo json_encode(['ok'=>false,'msg'=>$e->getMessage()]);
     }
@@ -333,7 +385,10 @@ try {
          JOIN {context} cx ON cx.instanceid = c.id AND cx.contextlevel = 50
          JOIN {role_assignments} ra ON ra.contextid = cx.id
          WHERE ra.userid = :uid AND ra.roleid = :rid AND c.id > 1
-         ORDER BY c.shortname",
+         ORDER BY
+           CASE WHEN c.shortname LIKE '%CCP1%' THEN 1 WHEN c.shortname LIKE '%CCP2%' THEN 2 ELSE 3 END,
+           CASE WHEN c.shortname LIKE '%EXAM%' THEN 1 ELSE 0 END,
+           c.shortname",
         ['uid' => $USER->id, 'rid' => $student_roleid]
     );
     $course_ids = array_keys((array)$courses_raw);
@@ -379,16 +434,46 @@ try {
     }
 } catch (Exception $e) { $my_courses = []; }
 
+// Formation suivie (LBA = toujours 'ecsr' ; Saran a 3 formations distinctes,
+// reperees par le prefixe du shortname du cours ou l'eleve est inscrit).
+// Determine la duree totale (semaines) et le contenu affiches sur les vues
+// Accueil/Agenda/Calendrier/Parcours cote JS (voir FORMATIONS dans le JS).
+$formation = 'ecsr';
+foreach ($my_courses as $mc) {
+    if (strpos($mc['shortname'], 'SARAN-GESTIONNAIRE') === 0) { $formation = 'gestionnaire'; break; }
+    if (strpos($mc['shortname'], 'SARAN-SUPPORT') === 0)      { $formation = 'support'; break; }
+}
+$formation_weeks = ['ecsr' => 35, 'gestionnaire' => 17, 'support' => 13];
+$formation_total_weeks = $formation_weeks[$formation];
+$formation_labels = [
+    'ecsr'         => 'Formation ECSR',
+    'gestionnaire' => "Formation Gestionnaire d'auto-école",
+    'support'      => 'Formation Support commercial & pédagogique',
+];
+$formation_label = $formation_labels[$formation];
+$formation_titles = [
+    'ecsr'         => 'VOTRE PARCOURS VERS LE TITRE PRO ECSR',
+    'gestionnaire' => "VOTRE PARCOURS VERS LE CERTIFICAT GESTIONNAIRE",
+    'support'      => 'VOTRE PARCOURS SUPPORT COMMERCIAL & PÉDAGOGIQUE',
+];
+$formation_title = $formation_titles[$formation];
+
 // Devoirs en attente
 $pending_assigns = [];
 if ($course_ids) {
     try {
         list($in_a, $par_a) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'acid');
+        // cm.id (course_modules.id) est requis par mod/assign/view.php?id=...,
+        // pas a.id (l'id de l'instance assign) : ce sont deux ids distincts
+        // dans Moodle (meme bug/fix que "Corrections en attente" cote
+        // espace-formateur.php).
         $assigns_raw = $DB->get_records_sql(
-            "SELECT a.id, a.name, a.course, c.shortname AS course_short,
-                    a.duedate, COALESCE(s.status,'') AS status
+            "SELECT cm.id AS id, a.name, a.course, c.shortname AS course_short,
+                    c.fullname AS course_full, a.duedate, COALESCE(s.status,'') AS status
              FROM {assign} a
              JOIN {course} c ON c.id = a.course
+             JOIN {modules} md ON md.name = 'assign'
+             JOIN {course_modules} cm ON cm.instance = a.id AND cm.module = md.id
              LEFT JOIN {assign_submission} s ON s.assignment = a.id AND s.userid = :uid
              WHERE a.course $in_a AND a.duedate >= :cutoff
                AND (s.status IS NULL OR s.status != 'submitted')
@@ -400,6 +485,7 @@ if ($course_ids) {
                 'id'           => (int)$a->id,
                 'name'         => $a->name,
                 'course_short' => $a->course_short,
+                'course_full'  => $a->course_full,
                 'course'       => (int)$a->course,
                 'duedate'      => (int)$a->duedate,
                 'duedate_label'=> $a->duedate > 0 ? userdate($a->duedate, '%d/%m/%Y') : '',
@@ -466,7 +552,7 @@ $current_week_rel = 1;
 if ($my_cohort_data) {
     $sd = $my_cohort_data['startdate'];
     $ts = strtotime(strlen($sd) === 7 ? $sd . '-01' : $sd);
-    if ($ts) $current_week_rel = max(1, min(35, (int)floor(($now - $ts) / (7 * 86400)) + 1));
+    if ($ts) $current_week_rel = max(1, min($formation_total_weeks, (int)floor(($now - $ts) / (7 * 86400)) + 1));
 }
 
 $eleve_data = json_encode([
@@ -478,6 +564,7 @@ $eleve_data = json_encode([
     'pending_assigns' => $pending_assigns,
     'events'          => $my_events,
     'glowbl_lti_map'  => $glowbl_lti_map,
+    'formation'       => $formation,
     'current_week'    => $current_week_rel,
     'week_label'      => userdate($now, '%d %B %Y'),
     'date_label'      => userdate($now, '%A %d %B %Y'),
@@ -499,9 +586,14 @@ $glowbl_url    = 'https://l3m.glowbl.com/l3m-ecsr';
   --violet:#7C6FDD; --violet-d:#4A3FA3; --violet-t:#ECEAFA;
   --red:#D64545; --red-t:#FBE7E7;
   --sand:#B9B29E; --sand-t:#EFECE1;
-  --ink:#24333C; --muted:#68767E;
-  --bg:#F7F6F1; --card:#FFFFFF; --line:#E4E1D6; --dark:#33424B;
+  --ink:<?= $brand['ink'] ?>; --muted:<?= $brand['muted'] ?>;
+  --bg:<?= $brand['bg'] ?>; --card:<?= $brand['card'] ?>; --line:<?= $brand['line'] ?>; --dark:#33424B;
 }
+<?php if ($user_client === 'saran'): ?>
+/* Sur fond sombre, ces titres (pensés à l'origine pour un texte foncé sur
+   fond clair via --teal-d) doivent repasser en clair pour rester lisibles. */
+.parc-phase-head, .okbox { color:var(--ink) !important; }
+<?php endif; ?>
 *, *::before, *::after { box-sizing: border-box; }
 body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--ink); font-size:14.5px; line-height:1.5; }
 
@@ -512,7 +604,7 @@ aside .nav-brand { padding:10px 4px 8px; text-align:center; border-bottom:1px so
 aside .nb-label { display:block; font-size:7px; font-weight:800; color:rgba(255,255,255,.5); letter-spacing:.14em; text-transform:uppercase; margin-top:3px; }
 aside .cls-chip { display:block; margin:4px auto 0; background:rgba(255,255,255,.18); color:rgba(255,255,255,.9); font-size:8px; font-weight:800; border-radius:6px; padding:2px 5px; letter-spacing:.04em; max-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; }
 aside button { appearance:none; border:none; background:none; padding:8px 3px 6px; border-radius:10px; font-size:8px; font-weight:700; color:rgba(255,255,255,.55); cursor:pointer; font-family:inherit; display:flex; flex-direction:column; align-items:center; gap:3px; width:100%; transition:background .12s,color .12s; text-transform:uppercase; letter-spacing:.03em; }
-aside button .nav-ico { font-size:15px; line-height:1.2; }
+aside button .nav-ico { font-size:15px; line-height:1.2; position:relative; }
 aside button.on { background:rgba(255,255,255,.18); color:#fff; }
 aside button:hover:not(.on) { background:rgba(255,255,255,.1); color:rgba(255,255,255,.85); }
 aside .sep { flex:1; }
@@ -530,19 +622,10 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 .view { display:none; }
 .view.on { display:block; }
 
-.eleve-icon-bar { position:fixed; top:18px; right:24px; display:flex; gap:8px; z-index:60; }
-.eleve-icon-btn {
-  position:relative;
-  width:38px; height:38px; border-radius:99px; border:none; cursor:pointer;
-  background:var(--dark); color:#fff; font-size:16px;
-  display:flex; align-items:center; justify-content:center;
-  box-shadow:0 4px 14px rgba(0,0,0,.18); transition:background .12s, transform .12s;
-}
-.eleve-icon-btn:hover { background:var(--ink); transform:translateY(-1px); }
 .eleve-icon-badge {
-  position:absolute; top:-3px; right:-3px; min-width:17px; height:17px; padding:0 4px;
-  background:var(--red,#D64545); color:#fff; border:2px solid var(--card,#fff);
-  border-radius:99px; font-size:10px; font-weight:800; line-height:1;
+  position:absolute; top:-5px; right:-9px; min-width:14px; height:14px; padding:0 3px;
+  background:var(--red,#D64545); color:#fff; border:1.5px solid var(--teal-d,#1C5F58);
+  border-radius:99px; font-size:8.5px; font-weight:800; line-height:1;
   display:flex; align-items:center; justify-content:center;
 }
 
@@ -618,6 +701,19 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 .msg-thread-input input:focus { outline:none; border-color:var(--teal); }
 .msg-send-btn { width:36px; height:36px; border-radius:50%; background:var(--orange); color:#fff; border:none; font-size:14px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
 .msg-send-btn:hover { background:var(--orange-d); }
+.msg-thread-back { display:none; }
+@media(max-width:760px){
+  /* Meme probleme que "Modules" : la liste de contacts (308px fixes) et la
+     conversation se partagent la largeur de la modale, ce qui ecrase la
+     conversation sur mobile. On passe en plein ecran avec bouton retour. */
+  .msg-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  .msg-list-pane { width:100%; flex:1 1 auto; }
+  .msg-thread-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-list-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-thread-pane { display:flex; }
+  .msg-thread-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; background:var(--card); }
+  .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
+}
 
 /* Typography */
 h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
@@ -631,8 +727,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 /* Buttons */
 .btn { display:inline-flex; align-items:center; gap:5px; border:none; border-radius:99px; padding:7px 16px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit; text-decoration:none; transition:filter .12s; white-space:nowrap; }
 .btn:hover { filter:brightness(.92); }
-.btn.primary { background:var(--teal); color:#fff; }
-.btn.ghost { background:var(--card); color:var(--teal-d); border:1.5px solid var(--teal); }
+.btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
+.btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
 .btn.mini { padding:5px 12px; font-size:11px; }
 .btn.orange-btn { background:var(--orange); color:#fff; }
 .btn.violet-btn { background:var(--violet); color:#fff; }
@@ -658,11 +754,11 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .kpi-num { font-size:30px; font-weight:800; line-height:1; letter-spacing:-.03em; font-variant-numeric:tabular-nums; margin-top:8px; }
 .kpi-num small { font-size:14px; opacity:.55; margin-left:1px; }
 .kpi-sub { font-size:11px; opacity:.55; font-weight:500; margin-top:6px; }
-.k-orange { background:#F9C57D; border-color:#F5B15F; }
-.k-mint   { background:#C7EDE1; border-color:#A7DDCB; }
-.k-violet { background:#DDD9F7; border-color:#C9C3F0; }
+.k-orange { background:#F9C57D; border-color:#F5B15F; color:#24333C; }
+.k-mint   { background:#C7EDE1; border-color:#A7DDCB; color:#24333C; }
+.k-violet { background:#DDD9F7; border-color:#C9C3F0; color:#24333C; }
 .k-cream  { background:var(--card); border-color:var(--line); }
-.k-danger { background:var(--red-t); border-color:#F5C4C4; }
+.k-danger { background:var(--red-t); border-color:#F5C4C4; color:#24333C; }
 .k-danger .kpi-num { color:var(--red); }
 
 /* Grid 2 cols */
@@ -689,7 +785,7 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .strip-wrap { overflow-x:auto; margin-bottom:6px; }
 .strip-youarehere { position:absolute; top:-24px; left:50%; transform:translateX(-50%); background:var(--violet); color:#fff; font-size:9px; font-weight:800; padding:2px 7px; border-radius:99px; white-space:nowrap; pointer-events:none; }
 /* ─── parcours phases ─── */
-.parc-phase { background:#fff; border-radius:14px; border:1px solid var(--line); margin-bottom:14px; overflow:hidden; }
+.parc-phase { background:var(--card); border-radius:14px; border:1px solid var(--line); margin-bottom:14px; overflow:hidden; }
 .parc-phase-head { padding:12px 18px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; color:var(--teal-d); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; }
 .parc-wrange { font-weight:500; color:var(--muted); letter-spacing:0; text-transform:none; font-size:11px; }
 .parc-row { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); }
@@ -701,7 +797,7 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .parc-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .pi-done { width:22px; height:22px; border-radius:50%; background:var(--teal); display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
 .pi-cur  { width:22px; height:22px; border-radius:50%; background:var(--violet); flex-shrink:0; }
-.pi-ns   { width:22px; height:22px; border-radius:50%; border:2px solid var(--line); background:#fff; flex-shrink:0; }
+.pi-ns   { width:22px; height:22px; border-radius:50%; border:2px solid var(--line); background:var(--card); flex-shrink:0; }
 .parc-exam { background:#24333C; color:#fff; padding:14px 18px; }
 .badge { display:inline-block; padding:2px 9px; border-radius:99px; font-size:10.5px; font-weight:700; }
 .b-el    { background:rgba(124,111,221,.12); color:#5a50b8; }
@@ -722,8 +818,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 
 .cours-card { background:var(--card); border:1px solid var(--line); border-radius:13px; padding:16px; display:flex; flex-direction:column; gap:8px; transition:box-shadow .15s; }
 /* ─── vue detail (contenu cours dynamique) ─── */
-#v-detail.on{display:flex!important;flex-direction:column;margin:-24px -28px -80px;height:100vh;overflow:hidden;background:#F4F3EE}
-.dv-topbar{padding:18px 24px 0;background:#F4F3EE;flex-shrink:0}
+#v-detail.on{display:flex!important;flex-direction:column;margin:-24px -28px -80px;height:100vh;overflow:hidden;background:var(--bg)}
+.dv-topbar{padding:18px 24px 0;background:var(--bg);flex-shrink:0}
 .dv-topbar .eyebrow{margin-bottom:2px}
 .dv-topbar h1{font-size:20px;margin:0 0 3px}
 .dv-topbar .sub{margin:0 0 12px}
@@ -731,16 +827,19 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 /* Panneau gauche : arbre du cours */
 .dv-left{width:300px;flex-shrink:0;background:#fff;border-right:1px solid #E4E1D6;display:flex;flex-direction:column;overflow:hidden}
 .dv-left-head{padding:16px 18px 10px;border-bottom:1px solid #E4E1D6;flex-shrink:0}
+.dv-breadcrumb{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px;word-break:break-word}
+.dv-breadcrumb .dv-crumb-sep{margin:0 4px;color:var(--muted)}
+.dv-breadcrumb .dv-crumb-current{color:var(--ink);font-weight:700}
 .dv-left-title-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .dv-left-title{font-size:16px;font-weight:800;color:var(--ink)}
 .dv-unfold{font-size:11px;color:var(--teal);cursor:pointer;text-decoration:none;font-weight:600}
-.dv-search{display:flex;align-items:center;gap:8px;background:#F7F6F1;border-radius:8px;padding:7px 12px}
+.dv-search{display:flex;align-items:center;gap:8px;background:var(--bg);border-radius:8px;padding:7px 12px}
 .dv-search input{border:none;background:none;font-size:13px;color:var(--ink);outline:none;width:100%;font-family:inherit}
 .dv-sections{flex:1;overflow-y:auto}
 /* Section item */
 .det-sec{border-bottom:1px solid #F0EDE4}
 .det-sec-head{display:flex;align-items:center;gap:12px;padding:12px 18px;cursor:pointer;transition:background .1s}
-.det-sec-head:hover{background:#F7F6F1}
+.det-sec-head:hover{background:var(--bg)}
 .det-sec-num{width:32px;height:32px;border-radius:50%;border:2px solid var(--teal);color:var(--teal);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;transition:background .15s}
 .det-sec-num.done{background:var(--teal);color:#fff}
 .det-sec-info{flex:1;min-width:0}
@@ -765,6 +864,19 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .dv-spinner{width:28px;height:28px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--teal);animation:dvspin2 .7s linear infinite}
 @keyframes dvspin2{to{transform:rotate(360deg)}}
 .dv-empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--muted);font-size:13px;font-style:italic}
+.dv-mobile-back{display:none}
+@media(max-width:760px){
+  /* "Modules" en deux colonnes fixes (liste 300px + contenu) ecrase le
+     contenu sur mobile. On passe en navigation plein ecran : la liste des
+     sections occupe tout l'ecran par defaut, et des qu'une activite est
+     choisie (classe .dv-mob-content posee par dvSelectMod), c'est le
+     contenu qui prend tout l'ecran a son tour, avec un bouton retour. */
+  .dv-left{width:100%}
+  .dv-right{display:none}
+  .dv-mobile-back{display:flex;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid #E4E1D6;background:#fff;font-weight:700;font-size:13px;color:var(--ink);cursor:pointer;flex-shrink:0}
+  .dv-body.dv-mob-content .dv-left{display:none}
+  .dv-body.dv-mob-content .dv-right{display:flex}
+}
 /* Apercu instantane (objectifs + WhatsApp) affiche a la fermeture d'une activite,
    sans recharger toute la page de cours Moodle dans l'iframe (beaucoup plus lent). */
 .dv-overview{flex:1;overflow-y:auto;padding:28px 32px;background:var(--bg)}
@@ -780,14 +892,15 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 @media (max-width:640px){.dv-overview .l3m-obj-grid{grid-template-columns:1fr}}
 .cours-card:hover { box-shadow:0 4px 16px rgba(36,51,60,.08); }
 .cours-shortname { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
-.cours-fullname { font-size:13.5px; font-weight:700; color:var(--ink); line-height:1.35; }
+.cours-fullname { font-size:13.5px; font-weight:700; color:var(--ink); line-height:1.35; min-height:calc(13.5px * 1.35 * 2); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .cours-pct { font-size:12px; color:var(--muted); }
 .pbar { height:6px; border-radius:3px; background:var(--line); }
 .pbar i { display:block; height:100%; border-radius:3px; background:var(--teal); }
+.cours-card .btn.mini.primary { margin-top:auto !important; align-self:flex-start; }
 
 /* Agenda */
-.cal-wrap{display:flex;flex-direction:column;height:calc(100vh - 40px);margin:-24px -28px -80px;overflow:hidden;background:#F7F6F1}
-.cal-topbar{padding:16px 110px 10px 22px;background:#F7F6F1;flex-shrink:0;border-bottom:1px solid var(--line)}
+.cal-wrap{display:flex;flex-direction:column;height:calc(100vh - 40px);margin:-24px -28px -80px;overflow:hidden;background:var(--bg)}
+.cal-topbar{padding:16px 110px 10px 22px;background:var(--bg);flex-shrink:0;border-bottom:1px solid var(--line)}
 .cal-head-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
 .cal-head-row h1{margin:0;font-size:20px;font-weight:800;color:var(--ink);flex:0 0 auto}
 .cal-nav{display:flex;align-items:center;gap:6px}
@@ -812,6 +925,28 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .cal-cell.today .cal-dn{background:var(--violet);color:#fff;border-radius:50%}
 .cal-dn{font-size:11px;font-weight:700;color:var(--ink);width:22px;height:22px;display:flex;align-items:center;justify-content:center;margin-bottom:2px}
 .cal-ev{font-size:10px;font-weight:600;padding:2px 5px;border-radius:3px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
+@media(max-width:760px){
+  /* Vue Mois : on retire la largeur minimale et on resserre tout pour que
+     les 7 colonnes tiennent entièrement dans l'écran, sans scroll horizontal. */
+  .cal-grid{min-width:0}
+  .cal-dow{font-size:8px;padding:5px 0 3px}
+  .cal-cell{padding:3px 2px;min-height:64px}
+  .cal-dn{font-size:10px;width:17px;height:17px;margin-bottom:1px}
+  .cal-ev{font-size:7px;padding:1px 3px;border-radius:2px;margin-bottom:1px;line-height:1.3}
+}
+@media(max-width:400px){
+  .cal-cell{min-height:54px}
+  .cal-dn{font-size:9px;width:15px;height:15px}
+  .cal-ev{font-size:6.5px}
+}
+@media(max-width:760px){
+  /* Barre du haut : les 110px de marge droite (pensés pour le desktop) et
+     la largeur fixe du libellé du mois font sortir "Aujourd'hui" de l'écran
+     sur mobile. On resserre tout et on autorise le retour à la ligne. */
+  .cal-topbar{padding:14px 16px 8px}
+  .cal-nav{flex-wrap:wrap;row-gap:6px}
+  .cal-month-lbl{min-width:0;font-size:13px}
+}
 .cal-ev.ev-elearning{background:#ECEAFA;color:#5B4DC0}
 .cal-ev.ev-visio{background:#E3F2EF;color:#1C5F58}
 .cal-ev.ev-presentiel{background:#FEF3E7;color:#B86A10}
@@ -850,6 +985,18 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .doc-row-name{font-weight:700;color:var(--ink)}
 .doc-row-sub{font-size:11.5px;color:var(--muted);margin-top:3px}
 .doc-status-badge{display:inline-flex;align-items:center;padding:4px 10px;margin-left:-10px;border-radius:99px;font-size:11px;font-weight:700;white-space:nowrap}
+@media(max-width:640px){
+  /* Le tableau 4 colonnes (document / statut / action / envoi) deborde sur
+     mobile et le bouton d'action se retrouve coupe hors ecran. On empile
+     chaque ligne verticalement comme une petite fiche a la place. */
+  .docs-table thead{display:none}
+  .docs-table, .docs-table tbody, .docs-table tr, .docs-table td{display:block;width:100%}
+  .docs-table tr{padding:14px 16px;border-bottom:1px solid var(--line)}
+  .docs-table td{padding:0;border-bottom:none}
+  .docs-table td:empty{display:none}
+  .docs-table td:not(:first-child){margin-top:8px}
+  .docs-table .doc-status-badge{margin-left:0}
+}
 .dsb-signed,.dsb-validated{background:#E3F5EE;color:#2E9488}
 .dsb-pending{background:var(--red-t);color:var(--red)}
 .dsb-future{background:var(--sand-t);color:var(--sand)}
@@ -876,7 +1023,7 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 
 
 /* Alert banner */
-.alert-banner { display:flex; align-items:center; gap:12px; background:#FDE8E8; border:1px solid #FBBABA; border-radius:12px; padding:14px 18px; margin-bottom:16px; }
+.alert-banner { display:flex; align-items:center; gap:12px; background:#FDE8E8; border:1px solid #FBBABA; border-radius:12px; padding:14px 18px; margin-bottom:16px; color:#24333C; }
 .ab-icon { font-size:20px; flex-shrink:0; }
 .ab-content { flex:1; font-size:13px; }
 .ab-content b { color:#B91C1C; display:block; }
@@ -959,8 +1106,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 <aside>
   <div class="nav-brand">
-    <?php if (!empty($brand['logo'])): ?>
-      <img src="<?= $brand['logo'] ?>" alt="<?= s($brand['name']) ?>" style="width:60px;height:auto;display:block;margin:0 auto">
+    <?php if (!empty($brand['logo_dark'])): ?>
+      <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="width:60px;height:auto;display:block;margin:0 auto">
     <?php else: ?>
       <svg width="20" height="15" viewBox="0 0 34 24" aria-hidden="true">
         <path d="M3 21 A14 14 0 0 1 31 21" fill="none" stroke="rgba(255,255,255,.7)" stroke-width="4" stroke-linecap="round"/>
@@ -973,11 +1120,13 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
   <button class="on" data-v="accueil"  onclick="nav(this)"><span class="nav-ico">🏠</span>Accueil</button>
   <button data-v="parcours" onclick="nav(this)"><span class="nav-ico">📚</span>Parcours</button>
-  <button data-v="cours"    onclick="nav(this)"><span class="nav-ico">▶</span>Cours</button>
+  <button data-v="cours"    onclick="nav(this)"><span class="nav-ico">▶</span>Modules</button>
   <button data-v="agenda"   onclick="nav(this)"><span class="nav-ico">📅</span>Agenda</button>
   <button data-v="docs"     onclick="nav(this)" id="nav-docs-btn"><span class="nav-ico">📄</span>Docs</button>
   <button data-v="params"   onclick="nav(this)"><span class="nav-ico">⚙</span>Réglages</button>
   <div class="sep"></div>
+  <button type="button" onclick="openUtilModal('notif')" title="Notifications" aria-label="Notifications"><span class="nav-ico">&#128276;<span class="eleve-icon-badge" id="notif-badge" style="display:none">0</span></span>Notifs</button>
+  <button type="button" onclick="openMessageModal()" title="Messages" aria-label="Messages"><span class="nav-ico">&#128172;<span class="eleve-icon-badge" id="msg-badge" style="display:none">0</span></span>Messages</button>
   <div class="nav-user-wrap">
     <button type="button" class="nav-av-btn" onclick="toggleNavUserMenu(event)">
       <span class="nav-av"><?= htmlspecialchars($user_initials) ?></span>
@@ -990,11 +1139,6 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </aside>
 
 <main>
-
-<div class="eleve-icon-bar">
-  <button type="button" class="eleve-icon-btn" onclick="openUtilModal('notif')" title="Notifications" aria-label="Notifications">&#128276;<span class="eleve-icon-badge" id="notif-badge" style="display:none">0</span></button>
-  <button type="button" class="eleve-icon-btn" onclick="openMessageModal()" title="Messages" aria-label="Messages">&#128172;<span class="eleve-icon-badge" id="msg-badge" style="display:none">0</span></button>
-</div>
 
 <!-- VUE ACCUEIL -->
 <div class="view on" id="v-accueil">
@@ -1009,7 +1153,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <!-- Hero -->
   <div class="hero-card" id="acc-hero">
     <div class="hero-left">
-      <div class="hero-badge" id="hero-badge">SEMAINE 1/35 &middot; EN COURS</div>
+      <div class="hero-badge" id="hero-badge">SEMAINE 1/<?= $formation_total_weeks ?> &middot; EN COURS</div>
       <h2 class="hero-greeting" id="acc-greeting">Bonjour !</h2>
       <p class="hero-desc" id="hero-desc">Chargement&hellip;</p>
       <div class="hero-ctas">
@@ -1027,10 +1171,10 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         </svg>
         <div class="ring-inner">
           <div class="ring-pct-big" id="ring-pct">0%</div>
-          <div class="ring-lbl" id="ring-lbl">du parcours</div>
+          <div class="ring-lbl" id="ring-lbl">e-learning</div>
         </div>
       </div>
-      <div class="ring-sub" id="ring-sub">29&nbsp;% du parcours</div>
+      <div class="ring-sub" id="ring-sub">29&nbsp;% de l'e-learning complété</div>
     </div>
   </div>
 
@@ -1055,7 +1199,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <!-- Timeline parcours -->
   <div class="panel" id="acc-tl" style="display:none">
     <div class="tl-hd">
-      <p class="panel-title" style="margin:0">VOTRE PARCOURS VERS LE TITRE PRO ECSR</p>
+      <p class="panel-title" style="margin:0"><?= $formation_title ?></p>
       <span id="tl-summary" style="font-size:12px;color:var(--muted)"></span>
     </div>
     <div class="tl-wrap">
@@ -1071,11 +1215,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 <!-- VUE PARCOURS -->
 <div class="view" id="v-parcours">
-  <p class="eyebrow">Formation ECSR</p>
+  <p class="eyebrow"><?= $formation_label ?></p>
   <h1>Mon parcours</h1>
-  <p class="sub" id="parc-sub">35 semaines · Titre professionnel ECSR RNCP 35329</p>
+  <p class="sub" id="parc-sub"><?= $formation_total_weeks ?> semaines</p>
   <div class="panel" style="margin-bottom:14px;padding:16px 14px 12px">
-    <p class="panel-title">LA FRISE DES 35 SEMAINES</p>
+    <p class="panel-title">LA FRISE DES <?= $formation_total_weeks ?> SEMAINES</p>
     <div class="strip-wrap">
       <div class="strip-inner" id="parc-bars"></div>
       <div class="strip-lbl"   id="parc-labels"></div>
@@ -1091,10 +1235,10 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <div id="parc-phases"></div>
 </div>
 
-<!-- VUE COURS -->
+<!-- VUE MODULES -->
 <div class="view" id="v-cours">
   <p class="eyebrow">Mes formations</p>
-  <h1>Mes cours</h1>
+  <h1>Mes modules</h1>
   <p class="sub" id="cours-sub">Chargement…</p>
   <div class="cours-grid" id="cours-grid"></div>
 </div>
@@ -1114,8 +1258,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <!-- Panneau gauche : arbre du cours -->
     <div class="dv-left">
       <div class="dv-left-head">
+        <div class="dv-breadcrumb" id="dv-breadcrumb"></div>
         <div class="dv-left-title-row">
-          <span class="dv-left-title">Contenu du cours</span>
+          <span class="dv-left-title">Contenu du module</span>
           <a class="dv-unfold" onclick="dvUnfoldAll()">Tout d&#233;plier</a>
         </div>
         <div class="dv-search">
@@ -1127,16 +1272,17 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       </div>
       <div class="dv-sections" id="dv-sections">
         <p style="padding:20px 18px;color:var(--muted);font-size:13px">
-          Cliquez sur un cours pour voir son contenu.
+          Cliquez sur un module pour voir son contenu.
         </p>
       </div>
     </div>
 
     <!-- Panneau droite : iframe contenu -->
     <div class="dv-right">
+      <div class="dv-mobile-back" onclick="dvMobileBack()">&#8592; Retour aux sections</div>
       <div class="dv-empty" id="dv-empty">S&#233;lectionnez une activit&#233; dans le menu &#224; gauche.</div>
       <div class="dv-loading" id="dv-loading" style="display:none"><span class="dv-spinner"></span></div>
-      <iframe id="dv-iframe" src="" title="Contenu du cours" allowfullscreen style="display:none"></iframe>
+      <iframe id="dv-iframe" src="" title="Contenu du module" allowfullscreen style="display:none"></iframe>
       <div class="dv-overview" id="dv-overview" style="display:none"></div>
     </div>
 
@@ -1227,6 +1373,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <div class="util-modal-bg" id="util-modal-bg" onclick="if(event.target===this)closeUtilModal()">
   <div class="util-modal">
     <div class="util-modal-head">
+      <button type="button" id="util-modal-back" onclick="utilModalGoBack()" aria-label="Retour" title="Retour" style="display:none;background:none;border:none;font-size:14px;font-weight:700;color:var(--teal-d);cursor:pointer;padding:4px 8px 4px 0;margin-right:4px">&#8592; Retour</button>
       <h2 id="util-modal-title">Messages</h2>
       <button type="button" class="util-modal-close" onclick="closeUtilModal()" aria-label="Fermer">&#10005;</button>
     </div>
@@ -1252,6 +1399,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
+      <div class="msg-thread-back" onclick="msgMobileBack()">&#8592; Retour aux contacts</div>
       <div class="msg-thread-head" id="msg-thread-head" style="display:none">
         <div class="msg-thread-who">
           <span class="msg-thread-avatar" id="msg-thread-avatar"></span>
@@ -1313,6 +1461,8 @@ function loadHeaderCounts() {
 
 /* ===== NOTIFICATIONS (modal iframe, reste sur espace-eleve.php) ===== */
 var _utilPollT = null;
+var _utilModalNavCount = 0;
+var _utilModalGoingBack = false;
 var UTIL_MODAL_URLS = {
   notif: { url: WWWROOT + '/message/output/popup/notifications.php', title: 'Notifications', match: '/message/output/popup/notifications.php' },
 };
@@ -1325,16 +1475,31 @@ function utilModalInject() {
     if (doc.getElementById('l3m-util-style')) return true;
     var style = doc.createElement('style');
     style.id = 'l3m-util-style';
+    <?php
+      // Cette popup (notifications natives Moodle) reste sur fond blanc quel
+      // que soit le client (meme convention que .dv-left), mais son accent
+      // (bordure non-lue, liens, hover) doit suivre teal (LBA) / orange (Saran).
+      $accent   = $brand[$brand['button_accent']];
+      $accent_d = $brand[$brand['button_accent'] . '_d'];
+      $accent_t = $brand[$brand['button_accent'] . '_t'];
+    ?>
     style.textContent = [
       '#page-header, #main-header, .navbar, #page-footer, .main-footer, footer,',
-      '.breadcrumb-nav, .breadcrumb, #nav-drawer, .drawer-toggle, .skiplinks { display:none !important; }',
+      '.breadcrumb-nav, .breadcrumb, #nav-drawer, .drawer-toggle, .skiplinks,',
+      // Bandeau du "mode plein ecran" de theme_mb2nl (utilise par les devoirs
+      // notamment, avec son anneau de progression) : cette modale de
+      // notifications n'a pas vocation a naviguer jusque-la, mais un lien de
+      // notification peut y mener (ex. "votre travail") — meme selecteur
+      // deja verifie et utilise cote lecteur "Mes modules" (_dvIframeCSS).
+      '#fsmod-header, .secondary-navigation, .tertiary-navigation, .activity-navigation { display:none !important; }',
       'html, body { background:#fff !important; }',
       '#page, #page.container-fluid, #region-main, #region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
-      '.btn-primary, .bg-primary { background-color:#2E9488 !important; border-color:#2E9488 !important; }',
-      '.btn-primary:hover { background-color:#1C5F58 !important; border-color:#1C5F58 !important; }',
-      '.text-primary { color:#2E9488 !important; }',
-      '.badge-primary, .badge.bg-primary { background-color:#F2A03D !important; }',
-      '.list-group-item.active, .list-group-item:focus, .list-group-item:hover { background-color:#E3F2EF !important; color:#2E9488 !important; }',
+      '.btn-primary, .bg-primary { background-color:<?= $accent ?> !important; border-color:<?= $accent ?> !important; }',
+      '.btn-primary:hover { background-color:<?= $accent_d ?> !important; border-color:<?= $accent_d ?> !important; }',
+      '.btn-secondary, .btn.btn-secondary { background:#fff !important; border-color:<?= $accent ?> !important; color:<?= $accent ?> !important; }',
+      '.text-primary { color:<?= $accent ?> !important; }',
+      '.badge-primary, .badge.bg-primary { background-color:<?= $brand['orange'] ?> !important; }',
+      '.list-group-item.active, .list-group-item:focus, .list-group-item:hover { background-color:<?= $accent_t ?> !important; color:<?= $accent ?> !important; }',
       /* Habillage visuel de la liste de notifications, dans le style de la messagerie custom
          (aucune règle de display/position/overflow touchée — la logique liste/détail de Moodle reste intacte) */
       '#region-main h2 { display:none !important; }',
@@ -1343,10 +1508,10 @@ function utilModalInject() {
       '.notification-area .content-item-container.notification { position:relative; display:block !important; padding:12px 16px !important; border-bottom:1px solid #E4E1D6 !important; transition:background .12s; }',
       '.notification-area .content-item-container.notification:hover { background:#F7F6F1 !important; }',
       '.notification-area .content-item-container.notification, .notification-area .content-item-container.notification .context-link, .notification-area .content-item-container.notification a { -webkit-tap-highlight-color:transparent !important; }',
-      '.notification-area .content-item-container.notification:focus, .notification-area .content-item-container.notification:active, .notification-area .content-item-container.notification .context-link:focus, .notification-area .content-item-container.notification .context-link:active, .notification-area .content-item-container.notification a:focus, .notification-area .content-item-container.notification a:active { background:#E3F2EF !important; outline:none !important; box-shadow:none !important; color:inherit !important; }',
+      '.notification-area .content-item-container.notification:focus, .notification-area .content-item-container.notification:active, .notification-area .content-item-container.notification .context-link:focus, .notification-area .content-item-container.notification .context-link:active, .notification-area .content-item-container.notification a:focus, .notification-area .content-item-container.notification a:active { background:<?= $accent_t ?> !important; outline:none !important; box-shadow:none !important; color:inherit !important; }',
       '.notification-area .content-item-container.notification a, .notification-area .content-item-container.notification a:link, .notification-area .content-item-container.notification a:visited, .notification-area .content-item-container.notification .context-link { color:inherit !important; text-decoration:none !important; display:block !important; }',
-      '.notification-area .content-item-container.notification.unread { background:#E3F2EF !important; }',
-      '.notification-area .content-item-container.notification.unread::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:#2E9488; }',
+      '.notification-area .content-item-container.notification.unread { background:<?= $accent_t ?> !important; }',
+      '.notification-area .content-item-container.notification.unread::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:<?= $accent ?>; }',
       '.notification-area .notification-message { font-size:13px !important; color:#24333C !important; line-height:1.4 !important; }',
       '.notification-area .content-item-container.notification.unread .notification-message { font-weight:700 !important; }',
       '.notification-area .content-item-container .timestamp { font-size:10.5px !important; color:#24333C !important; margin-top:4px !important; }',
@@ -1355,13 +1520,106 @@ function utilModalInject() {
       '.notification-area .content-area .header { background:#fff !important; border-bottom:1px solid #E4E1D6 !important; }',
       '.notification-area .content-area .header .subject-container { font-size:14.5px !important; font-weight:800 !important; color:#24333C !important; }',
       '.notification-area .content-area .header .timestamp { font-size:11.5px !important; color:#68767E !important; }',
-      '.notification-area .content-area .toggle-mode .btn-link { color:#2E9488 !important; font-weight:600 !important; background:transparent !important; -webkit-tap-highlight-color:transparent !important; }',
-      '.notification-area .content-area .toggle-mode .btn-link:hover, .notification-area .content-area .toggle-mode .btn-link:focus, .notification-area .content-area .toggle-mode .btn-link:active { color:#1C5F58 !important; background:transparent !important; outline:none !important; box-shadow:none !important; text-decoration:none !important; }',
-      '.notification-area .content-area .footer a { color:#2E9488 !important; font-weight:700 !important; text-decoration:none !important; }',
+      '.notification-area .content-area .toggle-mode .btn-link { color:<?= $accent ?> !important; font-weight:600 !important; background:transparent !important; -webkit-tap-highlight-color:transparent !important; }',
+      '.notification-area .content-area .toggle-mode .btn-link:hover, .notification-area .content-area .toggle-mode .btn-link:focus, .notification-area .content-area .toggle-mode .btn-link:active { color:<?= $accent_d ?> !important; background:transparent !important; outline:none !important; box-shadow:none !important; text-decoration:none !important; }',
+      '.notification-area .content-area .footer a { color:<?= $accent ?> !important; font-weight:700 !important; text-decoration:none !important; }',
+      // Liens dans le corps du message d'une notification ouverte (fil
+      // d'ariane cours/devoir + "votre travail") : couleur d'accent doree
+      // par defaut de Moodle, remplacee par teal/orange selon le client
+      // (attribut stable, voir message/output/popup/templates/notification_area.mustache).
+      '.notification-area .content-area [data-region="content"] a { color:<?= $accent ?> !important; }',
+      '.notification-area .content-area [data-region="content"] a:hover { color:<?= $accent_d ?> !important; }',
+      /* Scrollbar de la fenetre aux couleurs de la marque (teal LBA / orange Saran) plutot que l'accent dore par defaut. */
+      'html { scrollbar-color: <?= $accent ?> #f0f0f0 !important; }',
+      '::-webkit-scrollbar { width: 10px; }',
+      '::-webkit-scrollbar-track { background: #f0f0f0; }',
+      '::-webkit-scrollbar-thumb { background: <?= $accent ?> !important; border-radius: 6px; }',
+      '::-webkit-scrollbar-thumb:hover { background: <?= $accent_d ?> !important; }',
     ].join('\n');
     doc.head.appendChild(style);
+    // Evite le flash de la page Moodle non stylee quand on navigue via un
+    // lien clique DANS l'iframe (ex. "votre travail" depuis une
+    // notification) : on la masque dès que cette page commence a se
+    // quitter, jusqu'a ce que la nouvelle soit stylee (meme principe que
+    // ceInjectCSS cote "Mes modules").
+    try {
+      doc.defaultView.addEventListener('pagehide', function() {
+        iframe.classList.remove('ready');
+      });
+    } catch (e2) {}
+    utilHideAssignExtras(doc);
+    utilFixNotifBreadcrumb(doc);
     return true;
   } catch (e) { return false; }
+}
+
+// Vue d'un devoir ouverte depuis une notification ("votre travail") : retire
+// la boite de description/intro (attribut stable, voir
+// mod/assign/classes/output/renderer.php::render_assign_header, qui
+// enveloppe l'intro dans box_start('generalbox boxaligncenter')), les
+// boutons d'action (pas de classe propre, on matche le texte) et la ligne
+// "Texte en ligne" du tableau de statut de remise — hors sujet dans ce
+// contexte, le contenu de la notification suffit.
+function utilHideAssignExtras(doc) {
+  if (doc._l3mAssignExtrasObserver) return;
+  var HIDE_BTN_TEXT = ['Modifier le travail', 'Supprimer travail remis'];
+  var HIDE_ROW_LABELS = ['Texte en ligne'];
+  var hide = function() {
+    doc.querySelectorAll('.box.generalbox.boxaligncenter').forEach(function(el) {
+      el.style.display = 'none';
+    });
+    doc.querySelectorAll('a.btn, button.btn').forEach(function(el) {
+      if (HIDE_BTN_TEXT.indexOf(el.textContent.trim()) !== -1) el.style.display = 'none';
+    });
+    doc.querySelectorAll('table tr').forEach(function(tr) {
+      var cell = tr.querySelector('th, td');
+      if (cell && HIDE_ROW_LABELS.indexOf(cell.textContent.trim()) !== -1) {
+        tr.style.display = 'none';
+      }
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(hide);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mAssignExtrasObserver = obs;
+  } catch (e) {}
+}
+
+// Fil d'ariane d'une notification (ex. "ECSR-CCP1-M1 -> Devoir -> test 1") :
+// ne garder cliquable que le dernier element (l'activite elle-meme), les
+// precedents (cours, categorie) sont convertis en texte simple. Le contenu
+// venant de fullmessagehtml (voir message/output/popup/templates/
+// notification_area_content_area_content.mustache), il change a chaque clic
+// sur une notification differente — on retraite donc chaque nouveau bloc,
+// marque une fois fait pour ne pas le refaire en boucle via l'observateur.
+function utilFixNotifBreadcrumb(doc) {
+  if (doc._l3mNotifBcObserver) return;
+  var fix = function() {
+    // Uniquement <p> : le fil d'ariane est un <p> distinct du <div> du
+    // message (voir le fullmessagehtml stocke en base). Scanner aussi les
+    // <div> attraperait le conteneur englobant les DEUX blocs (fil d'ariane
+    // + message, ex. "votre travail"), qui a alors 4 liens au total et
+    // casse "test 1" en croyant qu'il fait partie du fil a raccourcir.
+    doc.querySelectorAll('p').forEach(function(container) {
+      if (container.dataset.l3mBcDone) return;
+      var links = container.querySelectorAll('a');
+      if (links.length < 2 || container.textContent.indexOf('->') === -1) return;
+      for (var i = 0; i < links.length - 1; i++) {
+        var a = links[i];
+        var span = doc.createElement('span');
+        span.textContent = a.textContent;
+        a.replaceWith(span);
+      }
+      container.dataset.l3mBcDone = '1';
+    });
+  };
+  fix();
+  try {
+    var obs = new MutationObserver(fix);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mNotifBcObserver = obs;
+  } catch (e) {}
 }
 
 function openUtilModal(kind) {
@@ -1373,28 +1631,64 @@ function openUtilModal(kind) {
   iframe.classList.remove('ready');
   loading.style.display = 'flex';
   clearInterval(_utilPollT);
+  // Compteur de navigations dans cette iframe : le tout premier chargement
+  // (la page de notifications elle-meme) ne doit pas afficher "Retour" —
+  // seulement les navigations suivantes (ex. clic sur "votre travail"),
+  // pour lesquelles il n'existe sinon aucun moyen de revenir sans fermer
+  // toute la fenetre.
+  _utilModalNavCount = 0;
+  document.getElementById('util-modal-back').style.display = 'none';
 
   var attempts = 0;
   _utilPollT = setInterval(function() {
     attempts++;
     var onRealPage = false;
     try { onRealPage = iframe.contentWindow.location.href.indexOf(cfg.match) !== -1; } catch (e) {}
-    var injected = onRealPage && utilModalInject();
-    if (injected || attempts > 250) {
+    // L'injection est toujours tentee (utilModalInject est sans effet si deja
+    // fait sur ce document) : sinon, un lien de notification menant hors de
+    // cfg.match (ex. "votre travail" -> mod/assign/view.php) reste stylé avec
+    // le theme Moodle par defaut, faute de reinjection. Seul le repli du
+    // spinner de chargement reste conditionne a onRealPage.
+    var injected = utilModalInject();
+    if ((onRealPage && injected) || attempts > 250) {
       clearInterval(_utilPollT);
       iframe.classList.add('ready');
       loading.style.display = 'none';
     }
   }, 20);
   iframe.onload = function() {
-    try { if (iframe.contentWindow.location.href.indexOf(cfg.match) === -1) return; } catch (e) {}
+    // Pas de retour anticipe hors de cfg.match ici : contrairement au
+    // sondage ci-dessus (qui doit ignorer les redirections intermediaires),
+    // onload ne se declenche que pour une page entierement chargee — donc
+    // toujours reafficher une fois stylee, meme sur une navigation interne
+    // ulterieure (ex. "votre travail" -> mod/assign/view.php), sinon
+    // l'iframe reste invisible indefiniment (masquee par le pagehide de la
+    // page precedente, voir utilModalInject).
     utilModalInject();
     iframe.classList.add('ready');
     loading.style.display = 'none';
+    // Compte la profondeur reelle de navigation : un onload declenche par
+    // utilModalGoBack() (via history.back()) doit decrementer, pas
+    // incrementer comme une navigation en avant — sinon le bouton reste
+    // affiche indefiniment et un clic supplementaire viderait l'iframe
+    // (retour au-dela de la premiere page, vers about:blank).
+    if (_utilModalGoingBack) {
+      _utilModalGoingBack = false;
+      _utilModalNavCount--;
+    } else {
+      _utilModalNavCount++;
+    }
+    document.getElementById('util-modal-back').style.display = _utilModalNavCount > 1 ? '' : 'none';
   };
 
   iframe.src = cfg.url;
   document.getElementById('util-modal-bg').classList.add('on');
+}
+function utilModalGoBack() {
+  if (_utilModalNavCount <= 1) return; // deja a la racine (notifications) : rien a faire
+  var iframe = document.getElementById('util-modal-iframe');
+  _utilModalGoingBack = true;
+  try { iframe.contentWindow.history.back(); } catch (e) { _utilModalGoingBack = false; }
 }
 function closeUtilModal() {
   clearInterval(_utilPollT);
@@ -1403,6 +1697,7 @@ function closeUtilModal() {
   iframe.classList.remove('ready');
   iframe.src = 'about:blank';
   document.getElementById('util-modal-loading').style.display = 'none';
+  document.getElementById('util-modal-back').style.display = 'none';
   loadHeaderCounts();
 }
 
@@ -1432,11 +1727,17 @@ function msgDayLabel(ts) {
 
 function openMessageModal() {
   document.getElementById('msg-modal-bg').classList.add('on');
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread'); // repartir sur la liste des contacts en mobile
   msgLoadList();
 }
 function closeMessageModal() {
   document.getElementById('msg-modal-bg').classList.remove('on');
   loadHeaderCounts();
+}
+function msgMobileBack() {
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread');
 }
 
 function msgLoadList() {
@@ -1509,6 +1810,11 @@ function msgRenderContacts() {
 function msgSelectContact(convid, userid, nom, isonline) {
   _msg.activeConvId = convid;
   _msg.activeUserId = userid;
+
+  if (window.innerWidth <= 760) {
+    var modal = document.querySelector('.msg-modal');
+    if (modal) modal.classList.add('msg-mob-thread');
+  }
 
   document.querySelectorAll('.msg-contact').forEach(function(el){ el.classList.remove('on'); });
   var row = document.querySelector('.msg-contact[data-uid="' + userid + '"]');
@@ -1602,7 +1908,7 @@ function toast(msg) {
 function doLogout(ev) {
   ev.preventDefault();
   var logoutUrl = WWWROOT + '/login/logout.php?sesskey=' + SESSKEY;
-  var target    = WWWROOT + '/login/index.php?loginredirect=1';
+  var target    = WWWROOT + '/login/index.php?loginredirect=1&client=<?= $user_client ?>';
   fetch(logoutUrl, { credentials: 'same-origin' }).finally(function() {
     window.location.href = target;
   });
@@ -1661,16 +1967,65 @@ var LIA_BLOCS = [
   {n:'Animation d\'une sensibilisation',     h:35},
   {n:'Evaluation des pratiques',             h:30}
 ];
+/* Saran a 2 autres formations (durée et contenu différents de l'ECSR) —
+   LIA_BLOCS_GESTIONNAIRE / LIA_BLOCS_SUPPORT sont l'équivalent de LIA_BLOCS
+   ci-dessus, pour ces 2 formations. */
+var LIA_BLOCS_GESTIONNAIRE = [
+  {n:'Réglementation et agrément préfectoral',       h:30},
+  {n:'Obligations de l\'exploitant d\'auto-école',   h:25},
+  {n:'Comptabilité analytique et rentabilité',       h:30},
+  {n:'Gestion financière de l\'auto-école',          h:25},
+  {n:'Recrutement des enseignants',                  h:20},
+  {n:'Management et planning des équipes',           h:30},
+  {n:'Acquisition clients et stratégie commerciale', h:30},
+  {n:'Suivi CPF et financements des élèves',         h:34}
+];
+var LIA_BLOCS_SUPPORT = [
+  {n:'Accueil, inscription et accompagnement',  h:22},
+  {n:'Relation client et fidélisation',         h:20},
+  {n:'Gestion des plannings moniteurs',         h:22},
+  {n:'Gestion des passages d\'examen',           h:18},
+  {n:'Suivi des financements CPF',               h:22},
+  {n:'Permis à 1€ et aides France Travail',      h:12},
+  {n:'Outils de gestion au quotidien',           h:12}
+];
+
+/* FORMATIONS : config par formation (durée, type de semaine, contenu).
+   ACTIVE_FORMATION est choisie une fois, selon DATA.formation (calculé
+   côté PHP depuis le cours réel de l'élève) — 'ecsr' par défaut, ce qui
+   couvre LBA (toujours ecsr) et préserve le comportement existant. */
+var FORMATIONS = {
+  ecsr: {
+    totalWeeks: 35,
+    weekType: function(rel) {
+      if (rel === 35) return 'e';
+      if (rel <= 32 && rel % 4 === 0) return 's';
+      if (rel === 7 || rel === 13 || rel === 19) return 'r';
+      if (rel === 25 || rel === 31) return 'rs';
+      if (rel === 26) return 'e1';
+      return 'c';
+    },
+    blocsH: LIA_BLOCS,
+    subtitle: '35 semaines \xb7 Titre professionnel ECSR RNCP 35329'
+  },
+  gestionnaire: {
+    totalWeeks: 17,
+    weekType: function(rel) { return rel === 17 ? 'r' : 'c'; },
+    blocsH: LIA_BLOCS_GESTIONNAIRE,
+    subtitle: '17 semaines \xb7 Formation Gestionnaire d’auto-\xe9cole'
+  },
+  support: {
+    totalWeeks: 13,
+    weekType: function(rel) { return rel === 13 ? 'r' : 'c'; },
+    blocsH: LIA_BLOCS_SUPPORT,
+    subtitle: '13 semaines \xb7 Formation Support commercial & p\xe9dagogique'
+  }
+};
+var ACTIVE_FORMATION = FORMATIONS[DATA.formation] || FORMATIONS.ecsr;
+
 var LIA_DIST_WEEKS = [];
-function liaWType(rel) {
-  if (rel === 35) return 'e';
-  if (rel <= 32 && rel % 4 === 0) return 's';
-  if (rel === 7 || rel === 13 || rel === 19) return 'r';
-  if (rel === 25 || rel === 31) return 'rs';
-  if (rel === 26) return 'e1';
-  return 'c';
-}
-(function(){ for (var i = 1; i <= 34; i++) { var t = liaWType(i); if (t === 'c' || t === 'e1') LIA_DIST_WEEKS.push(i); } })();
+function liaWType(rel) { return ACTIVE_FORMATION.weekType(rel); }
+(function(){ for (var i = 1; i < ACTIVE_FORMATION.totalWeeks; i++) { var t = liaWType(i); if (t === 'c' || t === 'e1') LIA_DIST_WEEKS.push(i); } })();
 
 var LIA_SESSION_H = 2;
 var LIA_WLABELS = {c:'Cours a distance', s:'Semaine entreprise', r:'Regroupement salle', rs:'Regroupement + stage', e1:'Cours + prepa examen', e:'Semaine d\'examen'};
@@ -1686,8 +2041,11 @@ function liaGetWeekBlocs(rel) {
   if (wtype !== 'c' && wtype !== 'e1') return {wtype: wtype, blocs: []};
   var idx = LIA_DIST_WEEKS.indexOf(rel);
   if (idx < 0) return {wtype: wtype, blocs: []};
-  var rS = idx * 35, rE = (idx + 1) * 35, blocs = [], cum = 0;
-  LIA_BLOCS.forEach(function(b) {
+  var blocsH  = ACTIVE_FORMATION.blocsH;
+  var totalH  = blocsH.reduce(function(s, b) { return s + b.h; }, 0);
+  var perWeek = totalH / LIA_DIST_WEEKS.length;
+  var rS = idx * perWeek, rE = (idx + 1) * perWeek, blocs = [], cum = 0;
+  blocsH.forEach(function(b) {
     var bE = cum + b.h;
     if (bE > rS && cum < rE) blocs.push({n: b.n, h: Math.round(Math.min(bE, rE) - Math.max(cum, rS))});
     cum += b.h;
@@ -1725,7 +2083,7 @@ function renderAccueil() {
   // Hero badge
   var winfo = liaGetWeekBlocs(cur);
   var wdates = coh ? liaWeekDates(coh.startdate, cur) : '';
-  document.getElementById('hero-badge').textContent = 'SEMAINE ' + cur + '/35 \xb7 ' + (LIA_WLABELS[winfo.wtype] || '').toUpperCase();
+  document.getElementById('hero-badge').textContent = 'SEMAINE ' + cur + '/' + ACTIVE_FORMATION.totalWeeks + ' \xb7 ' + (LIA_WLABELS[winfo.wtype] || '').toUpperCase();
 
   // Greeting
   var hr = new Date().getHours();
@@ -1733,7 +2091,7 @@ function renderAccueil() {
   document.getElementById('acc-greeting').textContent = greet + ', ' + d.student.firstname + ' !';
 
   // Description
-  var mood = pct >= 70 ? 'en excellente progression' : pct >= 40 ? 'a bonne allure' : pct >= 15 ? 'en progression' : 'au debut du parcours';
+  var mood = pct >= 70 ? "en excellente progression sur l'e-learning" : pct >= 40 ? "a bonne allure sur l'e-learning" : pct >= 15 ? "en progression sur l'e-learning" : "au debut de l'e-learning";
   var descEl = document.getElementById('hero-desc');
   var lc = d.last_course || (d.courses.length ? d.courses[0] : null);
   if (lc && !lc.pct && d.courses.length) {
@@ -1746,7 +2104,7 @@ function renderAccueil() {
   if (resumeCourse) {
     descEl.innerHTML = 'Vous êtes <b>' + mood + '</b>. Reprenez là où vous en étiez : <b>' + esc(resumeCourse.fullname) + '</b>.';
   } else {
-    descEl.textContent = 'Bienvenue dans votre espace de formation. Acces rapide a vos cours et planning.';
+    descEl.textContent = 'Bienvenue dans votre espace de formation. Acces rapide a vos modules et planning.';
   }
 
   // Resume button → ouvre le detail du cours dans espace-eleve
@@ -1776,7 +2134,7 @@ function renderAccueil() {
   }, 50);
   document.getElementById('ring-pct').textContent = pct + '%';
   document.getElementById('ring-lbl').textContent = lbl;
-  document.getElementById('ring-sub').textContent = pct + ' % du parcours';
+  document.getElementById('ring-sub').textContent = pct + " % de l'e-learning complété";
 
   // Alerte devoir en retard
   var alertEl = document.getElementById('acc-alert');
@@ -1786,7 +2144,10 @@ function renderAccueil() {
     var ov = overdues[0];
     document.getElementById('ab-title').textContent = 'Devoir en retard : ' + ov.name;
     document.getElementById('ab-desc').textContent = 'Date limite depassee le ' + ov.duedate_label;
-    document.getElementById('ab-cta').href = WWWROOT + '/mod/assign/view.php?id=' + ov.id;
+    document.getElementById('ab-cta').onclick = function(ev) {
+      ev.preventDefault();
+      openActionAssign(ov.course, ov.course_full || ov.course_short, ov.id);
+    };
     alertEl.style.display = '';
   }
 
@@ -1845,7 +2206,8 @@ function renderAccueil() {
       rows.push({dayLabel: dayNames[dDate.getDay()], dateNum: dDate.getDate(),
                  hourLabel: '', name: 'Devoir : ' + a.name,
                  typeClass: 't-due', typeLbl: 'a rendre',
-                 ts: a.duedate, glowbl: false, assignId: a.id});
+                 ts: a.duedate, glowbl: false, assignId: a.id,
+                 assignCourseId: a.course, assignCourseName: a.course_full || a.course_short});
     }
   });
   rows.sort(function(a, b) { return a.ts - b.ts; });
@@ -1861,7 +2223,8 @@ function renderAccueil() {
         : '<div class="sr-day" style="background:transparent;color:var(--muted)">—</div>';
       var btn = r.glowbl
         ? '<a class="btn mini orange-btn" href="' + esc(glowblJoinUrl(r.courseid)) + '" target="_blank" rel="noopener">Rejoindre</a>'
-        : (r.assignId ? '<a class="btn mini primary" href="' + esc(WWWROOT) + '/mod/assign/view.php?id=' + r.assignId + '" target="_blank" rel="noopener">Rendre</a>' : '');
+        : (r.assignId ? '<button type="button" class="btn mini primary" onclick="openActionAssign(' + r.assignCourseId + ',\'' +
+            (r.assignCourseName||'').replace(/\\/g,'\\\\').replace(/'/g,'\\\'') + '\',' + r.assignId + ')">Rendre</button>' : '');
       return '<div class="semaine-row">' +
         dayHtml +
         '<span class="sr-name">' + esc(r.name) + '</span>' +
@@ -1885,7 +2248,7 @@ function renderAccueil() {
     actions.push({ico: '\u270F', icoStyle: 'background:var(--orange-t);color:var(--orange-d)',
       title: pa.name,
       sub: (pa.duedate_label ? 'Rendre avant le ' + pa.duedate_label : 'A rendre') + ' \xb7 ' + pa.course_short,
-      href: WWWROOT + '/mod/assign/view.php?id=' + pa.id});
+      assignCourseId: pa.course, assignCourseName: pa.course_full || pa.course_short, assignCmid: pa.id});
   }
   actions.push({ico: '\u2709', icoStyle: 'background:var(--violet-t);color:var(--violet-d)',
     title: 'Contacter votre coordinateur', sub: 'Messagerie \xb7 réponse sous 24 h',
@@ -1905,21 +2268,24 @@ function renderAccueil() {
         '<span class="ai-arr">›</span>' +
       '</div>';
     }
-    return '<a class="action-item" href="' + esc(a.href) + '" target="_blank" rel="noopener">' +
+    var courseNameJs = (a.assignCourseName || '').replace(/\\/g,'\\\\').replace(/'/g,'\\\'');
+    return '<div class="action-item" style="cursor:pointer" onclick="openActionAssign(' + a.assignCourseId + ',\'' + courseNameJs + '\',' + a.assignCmid + ')">' +
       '<div class="ai-ico" style="' + a.icoStyle + '">' + a.ico + '</div>' +
       '<div class="ai-body"><div class="ai-title">' + esc(a.title) + '</div><div class="ai-sub">' + esc(a.sub) + '</div></div>' +
       '<span class="ai-arr">\u203a</span>' +
-    '</a>';
+    '</div>';
   }).join('');
 
-  // Mini-cards vehicule + stage
+  // Mini-cards vehicule + stage — concept propre a la formation ECSR
+  // (semaines vehicule / stage entreprise) : sans objet pour Gestionnaire
+  // et Support, qui n'ont pas ces notions.
   var miniEl = document.getElementById('acc-mini-grid');
   var miniCards = [];
-  if (coh) {
+  if (coh && ACTIVE_FORMATION === FORMATIONS.ecsr) {
     var sd2 = liaParseDate(coh.startdate);
     if (sd2) {
       var relNow = Math.floor((Date.now() - sd2.getTime()) / (7 * 24 * 3600 * 1000)) + 1;
-      if (relNow >= 1 && relNow <= 35) {
+      if (relNow >= 1 && relNow <= ACTIVE_FORMATION.totalWeeks) {
         var vehRels = [7, 13, 19];
         var tgtVeh = null;
         for (var vi = 0; vi < vehRels.length; vi++) {
@@ -1971,10 +2337,13 @@ function renderAccueil() {
   if (coh) {
     var tlEl = document.getElementById('acc-tl');
     tlEl.style.display = '';
-    var fillPct = Math.max(0, Math.min(100, (cur - 1) / 34 * 100));
+    var fillPct = Math.max(0, Math.min(100, (cur - 1) / (ACTIVE_FORMATION.totalWeeks - 1) * 100));
     document.getElementById('tl-fill').style.width = fillPct.toFixed(1) + '%';
-    var mood2 = pct >= 70 ? 'excellent' : pct >= 40 ? 'a bonne allure' : 'en progression';
-    document.getElementById('tl-summary').textContent = pct + '% \xb7 ' + mood2 + ' \xb7 S' + cur + '/35';
+    // Deux mesures distinctes, à ne pas fusionner sur une seule phrase : S{cur}/{tw}
+    // = position réelle dans le calendrier de formation, pct = complétion du
+    // contenu e-learning (indépendante du calendrier — un élève peut finir son
+    // e-learning très en avance sur son parcours calendaire, ou l'inverse).
+    document.getElementById('tl-summary').textContent = 'S' + cur + '/' + ACTIVE_FORMATION.totalWeeks + " \xb7 e-learning : " + pct + '%';
 
     var sd = liaParseDate(coh.startdate);
     function weekDate(w) { return sd ? new Date(sd.getTime() + (w - 1) * 7 * 24 * 3600 * 1000) : null; }
@@ -1984,12 +2353,17 @@ function renderAccueil() {
       return mo[d.getMonth()] + ' ' + d.getFullYear();
     }
 
+    var tw = ACTIVE_FORMATION.totalWeeks;
     var milestones = [
       {pct: 0,       sub: 'Entree en formation', date: fmtMonthYear(weekDate(1)),  done: true,    here: false, ico: '✓'},
       {pct: fillPct, sub: 'Vous êtes ici',        date: fmtMonthYear(new Date()),   done: false,   here: true,  ico: ''},
-      {pct: 73.5,    sub: 'Examen CCP1',          date: fmtMonthYear(weekDate(26)), done: cur > 26, here: false, ico: '\u{1F6A9}'},
-      {pct: 100,     sub: 'Titre pro ECSR',       date: fmtMonthYear(weekDate(35)), done: false,   here: false, ico: '\u{1F393}'},
     ];
+    if (ACTIVE_FORMATION === FORMATIONS.ecsr) {
+      milestones.push({pct: 26 / (tw - 1) * 100, sub: 'Examen CCP1', date: fmtMonthYear(weekDate(26)), done: cur > 26, here: false, ico: '\u{1F6A9}'});
+      milestones.push({pct: 100, sub: 'Titre pro ECSR', date: fmtMonthYear(weekDate(tw)), done: false, here: false, ico: '\u{1F393}'});
+    } else {
+      milestones.push({pct: 100, sub: 'Fin de formation', date: fmtMonthYear(weekDate(tw)), done: false, here: false, ico: '\u{1F393}'});
+    }
     var filtered = milestones.filter(function(m) {
       if (m.here && fillPct < 3) return false;
       if (m.here && fillPct > 97) return false;
@@ -2079,6 +2453,45 @@ var LIA_PHASES = [
   {label:'CCP2 · Sensibiliser à la sécurité routière', blocs:[14,15,16,17], s:27, e:35,
    exam:{label:'Session titre', week:35, desc:'Dossier professionnel + entretien final. Titre professionnel ECSR (niveau 5, RNCP).'}}
 ];
+
+/* Gestionnaire d'auto-école et Support commercial & pédagogique : mêmes
+   structures que LIA_BLOCS_EX/LIA_PHASES ci-dessus, mais propres à ces
+   2 formations (voir LIA_BLOCS_GESTIONNAIRE/LIA_BLOCS_SUPPORT plus haut
+   pour l'équivalent pondéré en heures). */
+var LIA_BLOCS_EX_GESTIONNAIRE = [
+  {n:'Réglementation et agrément préfectoral',       m:['el']},
+  {n:'Obligations de l\'exploitant d\'auto-école',   m:['el']},
+  {n:'Comptabilité analytique et rentabilité',       m:['el','visio']},
+  {n:'Gestion financière de l\'auto-école',          m:['el']},
+  {n:'Recrutement des enseignants',                  m:['el','visio']},
+  {n:'Management et planning des équipes',           m:['el','visio']},
+  {n:'Acquisition clients et stratégie commerciale', m:['el']},
+  {n:'Suivi CPF et financements des élèves',         m:['el','visio']}
+];
+var LIA_PHASES_GESTIONNAIRE = [
+  {label:'Gestionnaire d’auto-école', blocs:[0,1,2,3,4,5,6,7], s:1, e:16, exam:null}
+];
+
+var LIA_BLOCS_EX_SUPPORT = [
+  {n:'Accueil, inscription et accompagnement',  m:['el']},
+  {n:'Relation client et fidélisation',         m:['el','visio']},
+  {n:'Gestion des plannings moniteurs',         m:['el']},
+  {n:'Gestion des passages d\'examen',           m:['el','visio']},
+  {n:'Suivi des financements CPF',               m:['el']},
+  {n:'Permis à 1€ et aides France Travail',      m:['el']},
+  {n:'Outils de gestion au quotidien',           m:['el','visio']}
+];
+var LIA_PHASES_SUPPORT = [
+  {label:'Support commercial & pédagogique', blocs:[0,1,2,3,4,5,6], s:1, e:12, exam:null}
+];
+
+FORMATIONS.ecsr.phases         = LIA_PHASES;
+FORMATIONS.ecsr.blocsEx        = LIA_BLOCS_EX;
+FORMATIONS.gestionnaire.phases  = LIA_PHASES_GESTIONNAIRE;
+FORMATIONS.gestionnaire.blocsEx = LIA_BLOCS_EX_GESTIONNAIRE;
+FORMATIONS.support.phases       = LIA_PHASES_SUPPORT;
+FORMATIONS.support.blocsEx      = LIA_BLOCS_EX_SUPPORT;
+
 var LIA_MONTHS_FR_P = ['janv.','fevr.','mars','avr.','mai','juin','juil.','aout','sept.','oct.','nov.','dec.'];
 
 function renderParcours() {
@@ -2086,12 +2499,12 @@ function renderParcours() {
   var cur = d.current_week || 1;
   var cohort = d.cohort;
 
-  document.getElementById('parc-sub').textContent = '35 semaines · Titre professionnel ECSR RNCP 35329' +
+  document.getElementById('parc-sub').textContent = ACTIVE_FORMATION.subtitle +
     (cohort ? ' · ' + cohort.name : '');
 
-  // ─── Frise 35 semaines ───
+  // ─── Frise de la formation ───
   var barsHtml = '', labsHtml = '';
-  for (var w = 1; w <= 35; w++) {
+  for (var w = 1; w <= ACTIVE_FORMATION.totalWeeks; w++) {
     var wt = liaWType(w);
     var isCur = (w === cur);
     var clr;
@@ -2135,14 +2548,14 @@ function renderParcours() {
   }
 
   var html = '';
-  LIA_PHASES.forEach(function(phase) {
+  ACTIVE_FORMATION.phases.forEach(function(phase) {
     var firstW = LIA_DIST_WEEKS[phase.blocs[0]] || phase.s;
     html += '<div class="parc-phase">';
     html += '<div class="parc-phase-head">' + esc(phase.label) +
             '<span class="parc-wrange">S' + firstW + ' → S' + phase.e + '</span></div>';
 
     phase.blocs.forEach(function(bIdx) {
-      var b      = LIA_BLOCS_EX[bIdx];
+      var b      = ACTIVE_FORMATION.blocsEx[bIdx];
       var status = blocStatus(bIdx);
       var course = sortedC[bIdx] || null;
       var pct    = course ? course.pct : 0;
@@ -2228,7 +2641,7 @@ function renderCours() {
       '<div class="cours-fullname">' + esc(c.fullname) + '</div>' +
       '<div class="pbar"><i style="width:' + c.pct + '%;background:' + pctClr + '"></i></div>' +
       '<div class="cours-pct">' + c.pct + '% complété · ' + c.done_mods + '/' + c.total_mods + ' activités</div>' +
-      '<span class="btn mini primary" style="margin-top:2px;display:inline-block">' +
+      '<span class="btn mini primary" style="display:inline-block">' +
         (isLast ? 'Reprendre' : 'Ouvrir') + ' \u2192' +
       '</span>' +
     '</div>';
@@ -2241,10 +2654,23 @@ var _dv = {id:0, name:'', pct:0, sections:[]};
 function openDetail(courseId, courseName, coursePct) {
   _dv.id = courseId; _dv.name = courseName; _dv.pct = coursePct; _dv.sections = [];
   _rendered['detail'] = false;
+  var dvBody = document.querySelector('.dv-body');
+  if (dvBody) dvBody.classList.remove('dv-mob-content'); // repartir sur la liste des sections en mobile
   document.querySelectorAll('aside button').forEach(function(b){ b.classList.remove('on'); });
   document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('on'); });
   document.getElementById('v-detail').classList.add('on');
   go('detail');
+}
+
+function dvRenderBreadcrumb(crumbs) {
+  var el = document.getElementById('dv-breadcrumb');
+  if (!el) return;
+  if (!crumbs || !crumbs.length) { el.innerHTML = ''; return; }
+  el.innerHTML = crumbs.map(function(c, i) {
+    var isLast = i === crumbs.length - 1;
+    return (i > 0 ? '<span class="dv-crumb-sep">&gt;</span>' : '') +
+      '<span' + (isLast ? ' class="dv-crumb-current"' : '') + '>' + esc(c) + '</span>';
+  }).join('');
 }
 
 function renderDetail() {
@@ -2254,6 +2680,7 @@ function renderDetail() {
   document.getElementById('dv-empty').style.display  = 'none';
   document.getElementById('dv-overview').style.display = 'none';
   document.getElementById('dv-loading').style.display = 'none';
+  dvRenderBreadcrumb(null);
   if (!_dv.id) {
     document.getElementById('dv-empty').style.display = 'flex';
     document.getElementById('dv-sections').innerHTML =
@@ -2272,6 +2699,7 @@ function renderDetail() {
         return;
       }
       _dv.sections = d.sections;
+      dvRenderBreadcrumb(d.breadcrumb);
       dvRenderSections(d.sections);
     })
     .catch(function(){
@@ -2340,6 +2768,11 @@ var _dvIframeCSS = [
   '#region-main-box,#region-main{width:100%!important;max-width:100%!important}',
   /* colors */
   'h1,h2,h3{color:#1C5F58!important}',
+  /* bandeaux d\'intro de module (fond teal plein, contenu authored avec ses
+     propres styles inline) : le override h1/h2/h3 ci-dessus rendait le titre
+     illisible (teal foncé sur teal). On force du blanc uniquement dans ces
+     bandeaux, repérés par leur fond inline #2E9488 commun aux ~40 pages. */
+  'div[style*="background:#2E9488"] h1,div[style*="background:#2E9488"] h2,div[style*="background:#2E9488"] h3,div[style*="background:#2E9488"] p{color:#fff!important}',
   'a{color:#2E9488!important}',
   '.btn-primary,.btn.btn-primary{background:#2E9488!important;border-color:#1C5F58!important}',
   '.btn-secondary,.btn.btn-secondary{background:#fff!important;border-color:#2E9488!important;color:#2E9488!important}',
@@ -2347,7 +2780,27 @@ var _dvIframeCSS = [
   '.badge-info,.badge-primary{background:#2E9488!important}',
   '.completioncheckbox input[type=checkbox]:checked{accent-color:#2E9488}',
   '.progress-bar{background:#2E9488!important}',
-  '.activity-header{border-bottom:3px solid #2E9488!important}'
+  '.activity-header{border-bottom:3px solid #2E9488!important}',
+  /* scrollbar aux couleurs LBA (teal) plutôt que l\'accent doré par défaut du thème */
+  'html{scrollbar-color:#2E9488 #F7F6F1!important}',
+  '::-webkit-scrollbar{width:10px}',
+  '::-webkit-scrollbar-track{background:#F7F6F1}',
+  '::-webkit-scrollbar-thumb{background:#2E9488!important;border-radius:6px}',
+  '::-webkit-scrollbar-thumb:hover{background:#1C5F58!important}',
+  // Selecteur de fichiers Moodle : texte des onglets en noir (illisible par
+  // defaut) et accent orange remplace par le teal de la charte (voir
+  // repository/filepicker.js, classes .fp-repo/.nav-link ajoutees/retirees
+  // dynamiquement selon l\'onglet actif).
+  '.fp-repo .fp-repo-name{color:#1A1714!important}',
+  '.fp-repo-area .fp-repo .nav-link.active{background:#2E9488!important;border-color:#2E9488!important}',
+  '.fp-repo-area .fp-repo .nav-link.active .fp-repo-name{color:#fff!important}',
+  // Panneau "Deposer un fichier" : retire "Enregistrer sous" et "Choisir une
+  // licence" (attributs stables, voir repository/filepicker.js).
+  '.fp-saveas,.fp-setlicense{display:none!important}',
+  // Gestionnaire de fichiers (zone "Fichiers" d'un devoir) : menu contextuel
+  // "..." par fichier, ouvre les memes champs superflus (licence...) —
+  // classe stable core Moodle, voir theme/boost/scss/moodle/filemanager.scss.
+  '.fp-contextmenu{display:none!important}'
 ].join('');
 
 /* ── Aperçu instantané (objectifs + WhatsApp), sans recharger la page de cours ── */
@@ -2421,6 +2874,11 @@ function dvInjectCSS(iframe) {
       }, true);
       doc.body.dataset.l3mDvClickBound = '1';
     }
+    // Appele avant le retour anticipe ci-dessous (garde-fou interne propre a
+    // la fonction, qui doit re-agir a chaque ouverture du selecteur de
+    // fichiers, y compris apres la premiere injection de style sur ce doc).
+    dvHideRepoTabs(doc);
+    dvHideEditSubmissionBtn(doc);
     if (doc.getElementById('l3m-dv-style')) return;
     var s = doc.createElement('style');
     s.id = 'l3m-dv-style';
@@ -2429,6 +2887,51 @@ function dvInjectCSS(iframe) {
     // Remove meta-refresh redirects
     doc.querySelectorAll('meta[http-equiv="refresh"]').forEach(function(m){ m.remove(); });
   } catch(e) {}
+}
+
+// "Selecteur de fichiers" Moodle (repository/filepicker.js), quand un
+// eleve remet un devoir : ne garder que "Deposer un fichier" (upload local
+// depuis l'ordinateur), retirer tous les autres onglets. Chaque onglet n'a
+// qu'un id numerique d'instance propre au site (pas de type stable), donc on
+// filtre par le nom affiche (.fp-repo-name) — meme principe que
+// ceHideChooserAllTab cote formateur/admin.
+function dvHideRepoTabs(doc) {
+  if (doc._l3mRepoObserver) return;
+  var KEEP = 'Déposer un fichier';
+  var hide = function() {
+    doc.querySelectorAll('.fp-repo').forEach(function(el) {
+      var nameEl = el.querySelector('.fp-repo-name');
+      if (nameEl && nameEl.textContent.trim() !== KEEP) {
+        el.style.display = 'none';
+      }
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(hide);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mRepoObserver = obs;
+  } catch (e) {}
+}
+
+// Une fois un devoir remis, l'eleve ne doit pas pouvoir le modifier (evite
+// les remises "definitives" changees apres coup). Pas de classe/attribut
+// propre sur ce bouton, on filtre par le texte affiche (meme principe que
+// dvHideRepoTabs). "Supprimer travail remis" n'est pas concerne par cette
+// demande, on ne touche qu'a "Modifier le travail".
+function dvHideEditSubmissionBtn(doc) {
+  if (doc._l3mEditSubmissionObserver) return;
+  var hide = function() {
+    doc.querySelectorAll('a.btn, button.btn').forEach(function(el) {
+      if (el.textContent.trim() === 'Modifier le travail') el.style.display = 'none';
+    });
+  };
+  hide();
+  try {
+    var obs = new MutationObserver(hide);
+    obs.observe(doc.body, {childList: true, subtree: true});
+    doc._l3mEditSubmissionObserver = obs;
+  } catch (e) {}
 }
 
 function dvWatchIframe(iframe) {
@@ -2448,9 +2951,18 @@ function dvWatchIframe(iframe) {
   } catch(e) {}
 }
 
+function dvMobileBack() {
+  var body = document.querySelector('.dv-body');
+  if (body) body.classList.remove('dv-mob-content');
+}
+
 function dvSelectMod(cmid, modtype, el) {
   document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
   document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
+  if (window.innerWidth <= 760) {
+    var body = document.querySelector('.dv-body');
+    if (body) body.classList.add('dv-mob-content');
+  }
   if (el) {
     el.classList.add('active');
     var dot = el.querySelector('.det-mod-dot');
@@ -2472,6 +2984,33 @@ function dvSelectMod(cmid, modtype, el) {
   iframe.style.display = 'block';
   empty.style.display  = 'none';
   overview.style.display = 'none';
+}
+
+// Ouvre un devoir (Mes actions, banniere "en retard", "Ma semaine") dans le
+// visualiseur "Modules" (meme experience que la navigation manuelle) plutot
+// que dans un nouvel onglet Moodle non habille.
+function openActionAssign(courseId, courseName, cmid) {
+  openDetail(courseId, courseName, 0);
+  var tries = 0;
+  var wait = setInterval(function() {
+    tries++;
+    if (_dv.sections && _dv.sections.length) {
+      clearInterval(wait);
+      var el = document.getElementById('det-mod-' + cmid);
+      if (el) {
+        var mods = el.closest('.det-mods');
+        if (mods) {
+          mods.classList.add('open');
+          var sec = mods.closest('.det-sec');
+          var arrow = sec && sec.querySelector('.det-sec-arrow');
+          if (arrow) arrow.classList.add('open');
+        }
+      }
+      dvSelectMod(cmid, 'assign', el);
+    } else if (tries > 100) {
+      clearInterval(wait); // ~10s : abandon silencieux, l'eleve navigue a la main
+    }
+  }, 100);
 }
 
 function dvFilter(val) {
@@ -2496,7 +3035,24 @@ function dvFilter(val) {
 var _calDate = (function(){ var d = new Date(); d.setDate(1); return d; })();
 var _calViewMode = 'mois';
 
-function renderAgenda() { calDraw(); }
+var _calMobileDefaultDone = false;
+function renderAgenda() {
+  // Sur petit écran, la vue "Mois" (grille 7 colonnes) dépasse la largeur
+  // disponible et oblige à scroller horizontalement pour voir Ven/Sam/Dim
+  // — peu lisible/pas évident. On bascule donc sur "Liste" par défaut sur
+  // mobile (une seule fois, pour ne pas écraser un choix de vue déjà fait
+  // par l'élève pendant sa session).
+  if (!_calMobileDefaultDone) {
+    _calMobileDefaultDone = true;
+    if (window.innerWidth <= 760) {
+      _calViewMode = 'liste';
+      document.querySelectorAll('.cal-view-btns button').forEach(function(b){ b.classList.remove('on'); });
+      var listeBtn = document.getElementById('cal-btn-liste');
+      if (listeBtn) listeBtn.classList.add('on');
+    }
+  }
+  calDraw();
+}
 
 function calPrev() { _calDate.setMonth(_calDate.getMonth() - 1); calDraw(); }
 function calNext() { _calDate.setMonth(_calDate.getMonth() + 1); calDraw(); }
@@ -2536,7 +3092,7 @@ function calGetEvents(year, month) {
         var diffD = Math.round((cur.getTime() - sdMs) / 86400000);
         if (diffD < 0) continue;
         var wk  = Math.floor(diffD / 7) + 1;
-        if (wk > 35) continue;
+        if (wk > ACTIVE_FORMATION.totalWeeks) continue;
         var dow = cur.getDay(); // 0=dim
         var wt  = liaWType(wk);
         if (wt === 'e') {
@@ -2628,7 +3184,7 @@ function calDrawListe(body, evs, cats, year, month, today) {
 
       // Count stage weeks before each week for période label
       var stagesBefore = 0;
-      for (var wk = 1; wk <= 35; wk++) {
+      for (var wk = 1; wk <= ACTIVE_FORMATION.totalWeeks; wk++) {
         var wkStart = new Date(sdMs + (wk - 1) * 7 * 86400000);
         var wkFri   = new Date(wkStart.getTime() + 4 * 86400000);
         var wt      = liaWType(wk);
@@ -2639,7 +3195,7 @@ function calDrawListe(body, evs, cats, year, month, today) {
       }
 
       // Cohort span for pagination info
-      var cohortEnd  = new Date(sdMs + 34 * 7 * 86400000 + 4 * 86400000);
+      var cohortEnd  = new Date(sdMs + (ACTIVE_FORMATION.totalWeeks - 1) * 7 * 86400000 + 4 * 86400000);
       var pgStart    = MOIS_ABR[sd.getMonth()] + ' ' + sd.getFullYear();
       var pgEnd      = MOIS_ABR[cohortEnd.getMonth()] + ' ' + cohortEnd.getFullYear();
       // Current page index
@@ -2704,7 +3260,7 @@ function calDrawListe(body, evs, cats, year, month, today) {
     html += '<div class="cal-wrow" style="border-left-color:' + borderColor + '">';
     html += '<div class="cal-wrow-left">';
     html += '<div class="cal-wrow-dates">' + sLabel + ' → ' + eLabel + '</div>';
-    html += '<div class="cal-wrow-snum">S' + w.wk + ' / 35' +
+    html += '<div class="cal-wrow-snum">S' + w.wk + ' / ' + ACTIVE_FORMATION.totalWeeks +
             (inCurWeek ? ' · <b style="color:var(--violet)">cette semaine</b>' : '') + '</div>';
     html += '</div>';
     html += '<div class="cal-wrow-right">';
@@ -2859,9 +3415,9 @@ function renderParams() {
   }
   var statsEl = document.getElementById('params-stats');
   statsEl.innerHTML =
-    '<div class="param-row"><span class="lbl">Cours assignés</span><span class="val">' + d.courses.length + '</span></div>' +
-    '<div class="param-row"><span class="lbl">Progression globale</span><span class="val">' + d.global_pct + '%</span></div>' +
-    '<div class="param-row"><span class="lbl">Semaine LIA</span><span class="val">S ' + d.current_week + '/35</span></div>' +
+    '<div class="param-row"><span class="lbl">Modules assignés</span><span class="val">' + d.courses.length + '</span></div>' +
+    '<div class="param-row"><span class="lbl">E-learning complété</span><span class="val">' + d.global_pct + '%</span></div>' +
+    '<div class="param-row"><span class="lbl">Semaine LIA</span><span class="val">S ' + d.current_week + '/' + ACTIVE_FORMATION.totalWeeks + '</span></div>' +
     '<div class="param-row"><span class="lbl">Devoirs en attente</span><span class="val">' + d.pending_assigns.length + '</span></div>';
 }
 

@@ -26,6 +26,7 @@ $lastname  = trim(optional_param('lastname', '', PARAM_TEXT));
 $phone     = trim(optional_param('phone', '', PARAM_TEXT));
 $email     = trim(optional_param('email', '', PARAM_EMAIL));
 $postal    = trim(optional_param('postal_code', '', PARAM_TEXT));
+$city      = trim(optional_param('city', '', PARAM_TEXT));
 $situation = trim(optional_param('situation', '', PARAM_TEXT));
 $source    = trim(optional_param('source', 'lba-academie', PARAM_ALPHANUMEXT));
 
@@ -44,6 +45,7 @@ try {
       `phone` varchar(30) NOT NULL DEFAULT '',
       `email` varchar(255) NOT NULL DEFAULT '',
       `postal_code` varchar(10) NOT NULL DEFAULT '',
+      `city` varchar(100) NOT NULL DEFAULT '',
       `situation` varchar(100) NOT NULL DEFAULT '',
       `source` varchar(50) NOT NULL DEFAULT 'lba-academie',
       `status` varchar(20) NOT NULL DEFAULT 'nouveau',
@@ -52,12 +54,18 @@ try {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 } catch (Exception $e) {}
 
+// Ajoute la colonne `city` aux tables déjà créées avant son introduction.
+try {
+    $DB->execute("ALTER TABLE `{$CFG->prefix}l3m_leads` ADD COLUMN `city` varchar(100) NOT NULL DEFAULT '' AFTER `postal_code`");
+} catch (Exception $e) {}
+
 $rec              = new stdClass();
 $rec->firstname   = $firstname;
 $rec->lastname    = $lastname;
 $rec->phone       = $phone;
 $rec->email       = $email;
 $rec->postal_code = $postal;
+$rec->city        = $city;
 $rec->situation   = $situation;
 $rec->source      = $source;
 $rec->status      = 'nouveau';
@@ -84,6 +92,7 @@ try {
         . "Téléphone : $phone\n"
         . "E-mail : $email\n"
         . ($postal !== '' ? "Code postal : $postal\n" : '')
+        . ($city !== '' ? "Ville : $city\n" : '')
         . ($situation !== '' ? "Situation : $situation\n" : '');
 
     $noreply = core_user::get_noreply_user();
