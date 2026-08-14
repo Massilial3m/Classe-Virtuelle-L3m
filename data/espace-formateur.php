@@ -197,6 +197,155 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // ── Pédagogie : gestion des accès + droit d'édition des formateurs
+    // (réservé au Responsable pédagogique — formateur_meta[uid]['is_ped_lead']).
+    // state : 'none' (aucun accès) | 'view' (accès, rôle "Formateur non-
+    // éditeur") | 'edit' (accès + édition, rôle "Formateur"/editingteacher).
+    if ($action === 'set_formateur_course_access') {
+        $my_meta_chk = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+        if (empty($my_meta_chk[$USER->id]['is_ped_lead'])) {
+            echo json_encode(['ok' => false, 'msg' => 'Accès réservé au Responsable pédagogique']); exit;
+        }
+        $target_uid = required_param('formateur_id', PARAM_INT);
+        $courseid   = required_param('courseid', PARAM_INT);
+        $state      = required_param('state', PARAM_ALPHA);
+        if (!in_array($state, ['none', 'view', 'edit'], true)) {
+            echo json_encode(['ok' => false, 'msg' => 'État invalide']); exit;
+        }
+
+        $saran_cat_pl = (int)($DB->get_field('course_categories', 'id', ['name' => 'Saran Conduite']) ?: 0);
+        $course_pl = $DB->get_record('course', ['id' => $courseid]);
+        $target_client_pl = l3m_get_user_client($target_uid);
+        $course_client_pl = ($course_pl && (int)$course_pl->category === $saran_cat_pl) ? 'saran' : 'lba';
+        // On ne touche jamais un formateur ou un module d'un autre client
+        // que celui du Responsable pédagogique connecté.
+        if (!$course_pl || $target_client_pl !== $user_client || $course_client_pl !== $user_client) {
+            echo json_encode(['ok' => false, 'msg' => 'Module ou formateur introuvable']); exit;
+        }
+        $enrol_pl = enrol_get_plugin('manual');
+        $inst_pl  = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $courseid]);
+        if (!$inst_pl) { echo json_encode(['ok' => false, 'msg' => "Pas d'inscription manuelle sur ce module"]); exit; }
+        $viewroleid_pl = (int)$DB->get_field('role', 'id', ['shortname' => 'teacher']);
+        try {
+            if ($state === 'none') {
+                $enrol_pl->unenrol_user($inst_pl, $target_uid);
+            } else {
+                $desired_roleid_pl = ($state === 'edit') ? $teacherroleid : $viewroleid_pl;
+                $other_roleid_pl   = ($state === 'edit') ? $viewroleid_pl : $teacherroleid;
+                $context_pl = context_course::instance($courseid);
+                // Retire l'autre rôle avant d'assigner le rôle voulu : un
+                // formateur ne doit jamais cumuler éditeur + non-éditeur sur
+                // le même module (source de confusion sur ses vrais droits).
+                // role_unassign_all() (et non role_unassign()) : les rôles
+                // existants sur cette plateforme ont été assignés avec des
+                // component/itemid hétérogènes selon comment le formateur a
+                // été inscrit historiquement — filtrer par component précis
+                // raterait certaines lignes et laisserait les deux rôles
+                // cumulés.
+                role_unassign_all(['userid' => $target_uid, 'roleid' => $other_roleid_pl, 'contextid' => $context_pl->id]);
+                $enrol_pl->enrol_user($inst_pl, $target_uid, $desired_roleid_pl);
+            }
+            echo json_encode(['ok' => true]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    // ── Pédagogie : déblocage ponctuel d'un module verrouillé pour un
+    // élève précis (réservé au Responsable pédagogique). Le calcul de
+    // verrouillage lui-même (chaîne séquentielle) reste 100% côté
+    // espace-eleve.php — ici on ne fait que lire/ecrire la liste des
+    // exceptions et, pour l'affichage admin, rejouer le même calcul.
+    if ($action === 'ped_student_modules' || $action === 'toggle_module_unlock') {
+        $my_meta_chk2 = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+        if (empty($my_meta_chk2[$USER->id]['is_ped_lead'])) {
+            echo json_encode(['ok' => false, 'msg' => 'Accès réservé au Responsable pédagogique']); exit;
+        }
+        // $student_roleid n'est defini que plus bas dans ce fichier (hors du
+        // bloc de traitement POST, qui s'execute avant) — recalcule locale
+        // indispensable ici, sinon la requete de cours de l'eleve ne trouve
+        // aucune ligne (roleid=0).
+        $student_roleid_psm = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        $target_student_id = required_param('student_id', PARAM_INT);
+        if (l3m_get_user_client($target_student_id) !== $user_client) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+
+        if ($action === 'toggle_module_unlock') {
+            $courseid_tmu = required_param('courseid', PARAM_INT);
+            $enable_tmu   = (bool)required_param('enable', PARAM_INT);
+            $saran_cat_tmu = (int)($DB->get_field('course_categories', 'id', ['name' => 'Saran Conduite']) ?: 0);
+            $course_tmu = $DB->get_record('course', ['id' => $courseid_tmu]);
+            $course_client_tmu = ($course_tmu && (int)$course_tmu->category === $saran_cat_tmu) ? 'saran' : 'lba';
+            if (!$course_tmu || $course_client_tmu !== $user_client) {
+                echo json_encode(['ok' => false, 'msg' => 'Module introuvable']); exit;
+            }
+            $overrides_tmu = json_decode(get_config('local_l3madmin', 'module_unlock_overrides') ?: '{}', true) ?: [];
+            $list_tmu = $overrides_tmu[$target_student_id] ?? [];
+            $idx_tmu = array_search($courseid_tmu, $list_tmu, true);
+            if ($enable_tmu && $idx_tmu === false) {
+                $list_tmu[] = $courseid_tmu;
+            } elseif (!$enable_tmu && $idx_tmu !== false) {
+                array_splice($list_tmu, $idx_tmu, 1);
+            }
+            if ($list_tmu) {
+                $overrides_tmu[$target_student_id] = array_values($list_tmu);
+            } else {
+                unset($overrides_tmu[$target_student_id]);
+            }
+            set_config('module_unlock_overrides', json_encode($overrides_tmu), 'local_l3madmin');
+        }
+
+        // Rejoue exactement le meme calcul que espace-eleve.php (ordre du
+        // parcours + verrouillage en cascade + overrides) pour cet eleve.
+        $psm_courses_raw = $DB->get_records_sql(
+            "SELECT DISTINCT c.id, c.fullname, c.shortname
+             FROM {course} c
+             JOIN {context} cx ON cx.instanceid = c.id AND cx.contextlevel = 50
+             JOIN {role_assignments} ra ON ra.contextid = cx.id
+             WHERE ra.userid = :uid AND ra.roleid = :rid AND c.id > 1
+             ORDER BY
+               CASE WHEN c.shortname LIKE '%CCP1%' THEN 1 WHEN c.shortname LIKE '%CCP2%' THEN 2 ELSE 3 END,
+               CASE WHEN c.shortname LIKE '%EXAM%' THEN 1 ELSE 0 END,
+               c.shortname",
+            ['uid' => $target_student_id, 'rid' => $student_roleid_psm]
+        );
+        $psm_out = [];
+        $psm_course_ids = array_keys((array)$psm_courses_raw);
+        $psm_comp_map = [];
+        if ($psm_course_ids) {
+            list($psm_in, $psm_par) = $DB->get_in_or_equal($psm_course_ids, SQL_PARAMS_NAMED, 'pcid');
+            $psm_comp_raw = $DB->get_records_sql(
+                "SELECT cm.course, COUNT(DISTINCT cm.id) AS total_mods,
+                        SUM(CASE WHEN cmc.completionstate >= 1 THEN 1 ELSE 0 END) AS done_mods
+                 FROM {course_modules} cm
+                 LEFT JOIN {course_modules_completion} cmc ON cmc.coursemoduleid = cm.id AND cmc.userid = :uid
+                 WHERE cm.course $psm_in AND cm.completion > 0
+                 GROUP BY cm.course",
+                array_merge(['uid' => $target_student_id], $psm_par)
+            );
+            foreach ($psm_comp_raw as $cd) {
+                $psm_comp_map[(int)$cd->course] = (int)$cd->total_mods > 0
+                    ? min(100, (int)round($cd->done_mods / $cd->total_mods * 100)) : 0;
+            }
+        }
+        $psm_overrides_all = json_decode(get_config('local_l3madmin', 'module_unlock_overrides') ?: '{}', true) ?: [];
+        $psm_unlocks = $psm_overrides_all[$target_student_id] ?? [];
+        $psm_chain_broken = false;
+        foreach ($psm_courses_raw as $c) {
+            $pct = $psm_comp_map[(int)$c->id] ?? 0;
+            $is_override = in_array((int)$c->id, $psm_unlocks, true);
+            $psm_out[] = [
+                'id' => (int)$c->id, 'fullname' => $c->fullname, 'shortname' => $c->shortname,
+                'pct' => $pct, 'locked' => $psm_chain_broken && !$is_override, 'unlocked_override' => $is_override,
+            ];
+            if ($pct < 100) $psm_chain_broken = true;
+        }
+        echo json_encode(['ok' => true, 'modules' => $psm_out]);
+        exit;
+    }
+
     // ── Messagerie (vraie messagerie Moodle, UI custom) ──
     if ($action === 'msg_list') {
         $convs = \core_message\api::get_conversations(
@@ -413,21 +562,25 @@ foreach ($lia_all_formateurs_raw as $f) {
         'role_label' => $fmeta['role_label'] ?? '',
         'type'       => $ftype,
         'habs'       => $fmeta['habs'] ?? [],
+        'secteur'    => $fmeta['secteur'] ?? '',
         'capacity'   => $ftype === 'vacataire' ? (int)$ecsr_params['vacataire_h'] : (int)$ecsr_params['salarie_h'],
     ];
 }
 
 $lia_all_cohorts_raw = $DB->get_records_sql(
-    "SELECT c.id, c.name, c.idnumber AS startdate, COUNT(DISTINCT cm.userid) AS nb_members
+    "SELECT c.id, c.name, c.idnumber AS startdate, c.description AS secteur, COUNT(DISTINCT cm.userid) AS nb_members
      FROM {cohort} c
      LEFT JOIN {cohort_members} cm ON cm.cohortid = c.id
      WHERE c.idnumber IS NULL OR c.idnumber NOT IN (:clba, :csaran)
-     GROUP BY c.id, c.name, c.idnumber",
+     GROUP BY c.id, c.name, c.idnumber, c.description",
     ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN]
 );
 $lia_all_classes = [];
 foreach ($lia_all_cohorts_raw as $coh) {
-    $lia_all_classes[] = ['name' => $coh->name, 'startdate' => $coh->startdate ?? '', 'nb_members' => (int)$coh->nb_members];
+    $lia_all_classes[] = [
+        'name' => $coh->name, 'startdate' => $coh->startdate ?? '', 'nb_members' => (int)$coh->nb_members,
+        'secteur' => trim(strip_tags($coh->secteur ?? '')),
+    ];
 }
 
 $lia_people  = lia_build_people($lia_all_formateurs);
@@ -802,8 +955,9 @@ if ($course_ids) {
              WHERE e.courseid $in_sql_we AND e.visible = 1
                AND e.timestart >= :wstart AND e.timestart < :wend
                AND e.eventtype NOT IN ('due','gradingdue','open','close')
+               AND e.userid = :myuserid
              ORDER BY e.timestart ASC",
-            array_merge(['wstart' => $monday, 'wend' => $sunday], $in_params_we)
+            array_merge(['wstart' => $monday, 'wend' => $sunday, 'myuserid' => $USER->id], $in_params_we)
         );
         foreach ($week_ev_raw as $ev) {
             $week_events[] = [
@@ -841,6 +995,73 @@ if ($course_ids) {
 // ── Label semaine ──
 $week_label = userdate($monday, '%d %B %Y');
 
+// ── Pédagogie : accès + droit d'édition des formateurs (Responsable
+// pédagogique uniquement) ──
+// "edit" = rôle editingteacher (Formateur) — accès + édition du contenu.
+// "view" = rôle teacher (Formateur non-éditeur) — accès sans édition.
+// "none" = ni l'un ni l'autre — aucun accès à ce module.
+$is_ped_lead = !empty($my_meta['is_ped_lead']);
+$viewroleid  = (int)$DB->get_field('role', 'id', ['shortname' => 'teacher']);
+$ped_courses = [];
+$ped_formateurs = [];
+$ped_access = [];
+$ped_students = [];
+if ($is_ped_lead) {
+    $saran_category_id_pl = (int)($DB->get_field('course_categories', 'id', ['name' => 'Saran Conduite']) ?: 0);
+    $client_op_pl = ($user_client === 'saran') ? '=' : '!=';
+
+    $ped_courses_raw = $DB->get_records_select(
+        'course', "id > 1 AND category $client_op_pl :satcat", ['satcat' => $saran_category_id_pl],
+        'fullname ASC', 'id, fullname, shortname'
+    );
+    $ped_courses = array_values(array_map(fn($c) => ['id' => (int)$c->id, 'fullname' => $c->fullname, 'shortname' => $c->shortname], $ped_courses_raw));
+
+    list($ped_roles_sql, $ped_roles_params) = $DB->get_in_or_equal([(int)$teacherroleid, $viewroleid], SQL_PARAMS_NAMED, 'pedrole');
+    $ped_formateurs_raw = $DB->get_records_sql(
+        "SELECT DISTINCT u.id, u.firstname, u.lastname
+         FROM {user} u
+         JOIN {role_assignments} ra ON ra.userid = u.id
+         JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50
+         WHERE ra.roleid $ped_roles_sql AND u.deleted = 0",
+        $ped_roles_params
+    );
+    // ra.id en 1re colonne : get_records_sql indexe par la 1re colonne, et un
+    // même formateur a plusieurs lignes (une par cours/rôle) — sans clé
+    // vraiment unique ici, Moodle en écraserait silencieusement toutes sauf une.
+    $ped_access_raw = $DB->get_records_sql(
+        "SELECT ra.id, ra.userid, ra.roleid, cx.instanceid AS courseid
+         FROM {role_assignments} ra
+         JOIN {context} cx ON cx.id = ra.contextid AND cx.contextlevel = 50
+         WHERE ra.roleid $ped_roles_sql",
+        $ped_roles_params
+    );
+    $ped_access_map = [];
+    foreach ($ped_access_raw as $r) {
+        $ped_access_map[(int)$r->userid][(int)$r->courseid] = ((int)$r->roleid === (int)$teacherroleid) ? 'edit' : 'view';
+    }
+
+    foreach ($ped_formateurs_raw as $f) {
+        if (l3m_get_user_client((int)$f->id) !== $user_client) continue;
+        $ped_formateurs[] = ['id' => (int)$f->id, 'nom' => $f->firstname . ' ' . $f->lastname];
+        $ped_access[(int)$f->id] = $ped_access_map[(int)$f->id] ?? [];
+    }
+
+    // Eleves du meme client — pour le deblocage ponctuel de module (voir
+    // section "Modules" côté espace-eleve.php, verrouillage sequentiel).
+    $ped_students_raw = $DB->get_records_sql(
+        "SELECT DISTINCT u.id, u.firstname, u.lastname
+         FROM {user} u
+         JOIN {role_assignments} ra ON ra.userid = u.id
+         JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50
+         WHERE ra.roleid = :rid AND u.deleted = 0",
+        ['rid' => (int)$student_roleid]
+    );
+    foreach ($ped_students_raw as $s) {
+        if (l3m_get_user_client((int)$s->id) !== $user_client) continue;
+        $ped_students[] = ['id' => (int)$s->id, 'nom' => $s->firstname . ' ' . $s->lastname];
+    }
+}
+
 // ── JSON DATA → window.DATA ──
 $formateur_data = json_encode([
     'formateur'    => $formateur_info,
@@ -850,6 +1071,11 @@ $formateur_data = json_encode([
         'capacity'   => $capacity,
         'habs'       => $my_meta['habs'] ?? [],
     ],
+    'is_ped_lead'    => $is_ped_lead,
+    'ped_courses'    => $ped_courses,
+    'ped_formateurs' => $ped_formateurs,
+    'ped_access'     => $ped_access,
+    'ped_students'   => $ped_students,
     'courses'      => array_values(array_map(function($c) {
         return ['id' => (int)$c->id, 'fullname' => $c->fullname, 'shortname' => $c->shortname];
     }, (array)$my_courses)),
@@ -1015,6 +1241,7 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .chip { display:inline-block; font-size:10px; font-weight:700; border-radius:99px; padding:2px 8px; white-space:nowrap; vertical-align:1px; }
 .c-today { background:var(--violet-t); color:var(--violet-d); border:1px solid var(--violet); }
 .c-ko { background:var(--red-t); color:var(--red); }
+.c-ok { background:var(--teal-t); color:var(--teal-d); }
 
 /* ── Buttons ── */
 .btn { display:inline-flex; align-items:center; gap:5px; border:none; border-radius:99px; padding:7px 16px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit; text-decoration:none; transition:filter .12s; white-space:nowrap; }
@@ -1060,6 +1287,15 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .visio-tag { background:var(--teal-t,#E3F2EF); color:var(--teal-d); border:1px solid var(--teal); border-radius:99px; font-size:10.5px; font-weight:700; padding:2px 9px; white-space:nowrap; }
 .veh-tag { background:var(--orange-t,#FBEDDA); color:var(--orange-d,#9A5E13); border:1px solid var(--orange); border-radius:99px; font-size:10.5px; font-weight:700; padding:2px 9px; white-space:nowrap; }
 .salle-tag { background:#FBF3E3; color:var(--amber-d,#8a5a10); border:1px solid var(--amber,#F6C685); border-radius:99px; font-size:10.5px; font-weight:700; padding:2px 9px; white-space:nowrap; }
+
+.peda-legend { list-style:none; padding:0; margin:0 0 14px; font-size:12.5px; color:var(--muted); line-height:1.9; }
+.peda-cell { border:1px solid var(--line); background:var(--card); border-radius:8px; font-size:11px; font-weight:600; padding:4px 8px; cursor:pointer; white-space:nowrap; color:var(--muted); transition:transform .1s; }
+.peda-cell:hover { transform:scale(1.05); }
+.peda-cell.peda-none { color:var(--muted); }
+.peda-cell.peda-view { background:var(--amber-t,#FBF3E3); border-color:var(--amber,#F6C685); color:var(--amber-d,#8a5a10); }
+.peda-cell.peda-edit { background:var(--teal-t,#E3F2EF); border-color:var(--teal); color:var(--teal-d); }
+#peda-table th { text-align:center; }
+#peda-table th:first-child { text-align:left; }
 
 /* ── Corrections ── */
 .cor { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
@@ -1204,14 +1440,16 @@ input:checked + .slider::before { transform:translateX(16px); }
      sections (300px fixes) et l'apercu de l'activite se partagent la
      largeur de la modale, ce qui ecrase l'apercu sur mobile. On passe en
      plein ecran avec bouton retour. */
-  .course-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  /* width:100% (pas 100vw) : 100vw inclut la barre de defilement et pousse
+     le bord droit hors zone visible (bug confirme par rendu reel). */
+  .course-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
   .dv-left { width:100%; }
   .dv-right { display:none; }
   .course-modal-body.mob-content .dv-left { display:none; }
   .course-modal-body.mob-content .dv-right { display:flex; }
   .dv-mobile-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fff; font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; }
 }
-.msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:none; background:rgba(255,255,255,.92); width:28px; height:28px; border-radius:50%; font-size:13px; color:var(--muted); cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.14); line-height:1; }
+.msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:1px solid var(--line); background:var(--card); width:30px; height:30px; border-radius:50%; font-size:14px; color:var(--ink); cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.14); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
 .msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
@@ -1274,6 +1512,21 @@ input:checked + .slider::before { transform:translateX(16px); }
 .msg-thread-input input:focus { outline:none; border-color:var(--teal); }
 .msg-send-btn { width:36px; height:36px; border-radius:50%; background:var(--orange); color:#fff; border:none; font-size:14px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
 .msg-send-btn:hover { background:var(--orange-d); }
+.msg-thread-back { display:none; }
+@media(max-width:760px){
+  /* Meme correctif que la messagerie eleve/admin : liste de contacts (308px
+     fixes) qui ecrase la conversation sur mobile. Plein ecran + retour.
+     width:100% (pas 100vw) : 100vw inclut la largeur de la barre de
+     defilement du document sous-jacent, ce qui pousse le bord droit de la
+     modale hors de la zone visible sans scroll horizontal. */
+  .msg-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
+  .msg-list-pane { width:100%; flex:1 1 auto; }
+  .msg-thread-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-list-pane { display:none; }
+  .msg-modal.msg-mob-thread .msg-thread-pane { display:flex; }
+  .msg-thread-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; background:var(--card); }
+  .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
+}
 
 @media(max-width:760px) { aside { flex-basis:54px; } aside button .nav-ico { font-size:13px; } }
 button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
@@ -1327,6 +1580,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <button data-v="elev"   onclick="nav(this)"><span class="nav-ico">👥</span>Élèves</button>
   <button data-v="dispo"  onclick="nav(this)"><span class="nav-ico">🕒</span>Dispos</button>
   <button data-v="cours"  onclick="nav(this)"><span class="nav-ico">🎓</span>Mes modules</button>
+  <?php if (!empty($my_meta['is_ped_lead'])): ?>
+  <button data-v="peda"   onclick="nav(this)"><span class="nav-ico">🧭</span>Pédagogie</button>
+  <?php endif; ?>
   <button data-v="params" onclick="nav(this)"><span class="nav-ico">⚙</span>Réglages</button>
   <div class="sep"></div>
   <div class="nav-user-wrap">
@@ -1504,6 +1760,45 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
+<?php if (!empty($my_meta['is_ped_lead'])): ?>
+<!-- ═══════════════════════════════════════
+     VUE PÉDAGOGIE — accès formateurs (Responsable pédagogique)
+═══════════════════════════════════════ -->
+<div class="view" id="v-peda">
+  <h1>Pédagogie</h1>
+  <p class="sub">Cliquez une case pour faire défiler les 3 états :</p>
+  <ul class="peda-legend">
+    <li>— aucun accès</li>
+    <li>👁 Accès (rôle "Formateur non-éditeur" : peut consulter/enseigner, pas modifier)</li>
+    <li>✏️ Édition (rôle "Formateur"/éditeur :accès complet)</li>
+  </ul>
+  <div class="twrap">
+    <table class="mm-table" id="peda-table">
+      <thead><tr id="peda-thead"><th>Formateur</th></tr></thead>
+      <tbody id="peda-tbody"></tbody>
+    </table>
+  </div>
+
+  <h2 style="margin-top:36px">Déblocage ponctuel de module</h2>
+  <p class="sub">Un module verrouillé pour un élève (verrouillage séquentiel : le précédent module n'est pas à 100%) peut être débloqué au cas par cas, sans toucher au calcul automatique.</p>
+  <div class="fld" style="max-width:360px">
+    <label>Élève</label>
+    <select id="peda-student-select" onchange="pedaLoadStudentModules()">
+      <option value="">— Choisir un élève —</option>
+      <?php foreach ($ped_students as $s): ?>
+        <option value="<?= (int)$s['id'] ?>"><?= s($s['nom']) ?></option>
+      <?php endforeach; ?>
+    </select>
+  </div>
+  <div class="twrap" style="margin-top:14px">
+    <table class="mm-table" id="peda-unlock-table" style="display:none">
+      <thead><tr><th>Module</th><th>Progression</th><th>Statut</th><th></th></tr></thead>
+      <tbody id="peda-unlock-tbody"></tbody>
+    </table>
+  </div>
+</div>
+<?php endif; ?>
+
 <!-- ═══════════════════════════════════════
      VUE RÉGLAGES
 ═══════════════════════════════════════ -->
@@ -1525,18 +1820,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div id="params-habs" style="min-height:30px">—</div>
     </div>
 
-    <div class="set-card pc-violet">
-      <div class="sc-head"><div class="ico">◧</div><div class="text"><h3>Notifications</h3><p>Préférences d'alertes (Phase 2)</p></div></div>
-      <div class="toggle-row"><span class="lbl">Signal Lia — inactivité élève</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div>
-      <div class="toggle-row"><span class="lbl">Nouvelle correction déposée</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div>
-      <div class="toggle-row"><span class="lbl">Rappel séance du jour</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
-    </div>
-
     <div class="set-card pc-sand">
       <div class="sc-head"><div class="ico">◷</div><div class="text"><h3>Préférences</h3><p>Statistiques de session</p></div></div>
       <div class="param-row"><span class="lbl">Modules enseignés</span><span class="val" id="params-nb-cours">—</span></div>
       <div class="param-row"><span class="lbl">Élèves suivis</span><span class="val" id="params-nb-eleves">—</span></div>
-      <div class="param-row"><span class="lbl">Heures cette semaine</span><span class="val" id="params-heure">—</span></div>
+      <div class="param-row"><span class="lbl">Temps de connexion cette semaine</span><span class="val" id="params-heure">—</span></div>
     </div>
 
   </div>
@@ -1562,6 +1850,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
+      <div class="msg-thread-back" onclick="msgMobileBack()">&#8592; Retour aux contacts</div>
       <div class="msg-thread-head" id="msg-thread-head" style="display:none">
         <div class="msg-thread-who">
           <span class="msg-thread-avatar" id="msg-thread-avatar"></span>
@@ -1571,14 +1860,12 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
           </div>
         </div>
         <div class="msg-thread-actions">
-          <button type="button" class="btn mini ghost" id="msg-thread-fiche" onclick="msgGoFiche()">Fiche élève</button>
           <button type="button" class="btn mini gold" id="msg-thread-traite" onclick="msgToggleTraite()">Marquer traité</button>
         </div>
       </div>
       <div class="msg-thread-body" id="msg-thread-body"></div>
       <div class="msg-thread-empty" id="msg-thread-empty">Sélectionnez une conversation</div>
       <div class="msg-thread-input" id="msg-thread-input" style="display:none">
-        <button type="button" class="msg-attach" title="Joindre">&#128206;</button>
         <input type="text" id="msg-input-text" placeholder="Écrire un message..." onkeydown="if(event.key==='Enter'){msgSendCurrent();}">
         <button type="button" class="msg-send-btn" onclick="msgSendCurrent()" aria-label="Envoyer">&#10148;</button>
       </div>
@@ -1716,6 +2003,8 @@ function msgDayLabel(ts) {
 
 function openMessageModal(uid, nom, prefillText) {
   document.getElementById('msg-modal-bg').classList.add('on');
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread'); // repartir sur la liste des contacts en mobile
   _msg.pendingUserId = uid;
   _msg.pendingName   = nom;
   _msg.prefillText   = prefillText || '';
@@ -1723,6 +2012,10 @@ function openMessageModal(uid, nom, prefillText) {
 }
 function closeMessageModal() {
   document.getElementById('msg-modal-bg').classList.remove('on');
+}
+function msgMobileBack() {
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread');
 }
 
 function msgLoadList() {
@@ -1800,6 +2093,9 @@ function msgRenderContacts() {
 function msgSelectContact(convid, userid, nom, cls, isonline) {
   _msg.activeConvId = convid;
   _msg.activeUserId = userid;
+
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.add('msg-mob-thread'); // bascule vers la conversation en mobile
 
   document.querySelectorAll('.msg-contact').forEach(function(el){ el.classList.remove('on'); });
   var row = document.querySelector('.msg-contact[data-uid="' + userid + '"]');
@@ -1913,6 +2209,19 @@ var _ceIframeCSS = [
   '#page-header,#main-header,.navbar,#page-footer,.main-footer,footer,',
   '.breadcrumb-nav,.breadcrumb,#nav-drawer,.drawer-toggle,.skiplinks,',
   '.secondary-navigation,.tertiary-navigation,.activity-navigation,.section-navigation,#fsmod-header { display:none !important; }',
+  // Zone "blocs visibles seulement par les admins" du theme mb2nl (voir
+  // theme/mb2nl/layout/parts/region_adminblock.php) : ne devrait pas
+  // s'afficher pour un formateur (guarde sur moodle/site:config), mais on
+  // la masque par precaution au cas ou ce role l'obtiendrait par ailleurs.
+  '#adminblock-region { display:none !important; }',
+  // Zone de bloc "Bottom" du theme mb2nl (theme/mb2nl/layout/parts/region_bottom.php) :
+  // s'affiche meme vide, en style sombre (classe "dark1") — bandeau noir
+  // sans contenu ni utilite ici.
+  '#bottom { display:none !important; }',
+  // Tiroir de messagerie natif Moodle (data-region="right-hand-drawer") :
+  // reste visible malgre sa classe "hidden" (conflit de priorite avec le
+  // theme) — sans interet ici puisque la plateforme a sa propre messagerie.
+  '[data-region="right-hand-drawer"] { display:none !important; }',
   // Menu ⋮ d'une activite : ne garder que Parametres / Cacher / Dupliquer /
   // Supprimer. Classes stables de Moodle (course/lib.php,
   // course_get_cm_edit_actions + controlmenu.php), pas du texte devine.
@@ -1922,7 +2231,7 @@ var _ceIframeCSS = [
   // Fenetre "Ajouter une activite ou ressource" : ne garder que les types
   // reellement utilises sur cette plateforme (attribut data-internal stable,
   // voir course/format/templates/local/activitychooser/item.mustache).
-  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="forum"]):not([data-internal="assign"]) { display:none !important; }',
+  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="assign"]) { display:none !important; }',
   // Formulaire "Parametres" d'une activite : ne garder que Apparence /
   // Reglages courants / Conditions d'achevement + la case notification.
   // Retire Restriction d'acces / Tags / Competences (noms d'elements de
@@ -1937,14 +2246,21 @@ var _ceIframeCSS = [
   // Options de relecture / Apparence / Restrictions sur les tentatives /
   // Safe Exam Browser (noms d'elements stables, voir mod/quiz/mod_form.php
   // et mod/quiz/accessrule/seb/classes/settings_provider.php).
-  '#id_layouthdrcontainer,#id_interactionhdrcontainer,#id_reviewoptionshdrcontainer,',
-  '#id_displaycontainer,#id_securitycontainer,#id_sebcontainer,',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
+  // Scope a "body.path-mod-quiz" : #id_displaycontainer est un id generique
+  // (mod_form.php, header "display") reutilise TEL QUEL par d'autres
+  // modules (ex. Fichier/resource, meme id) — sans ce filtre, masquer
+  // "Apparence" sur un Quiz masquait aussi le meme bloc chez un Fichier,
+  // empechant de choisir "Integrer" pour afficher la description avant le
+  // PDF (elle etait injoignable, cachee par erreur).
+  'body.path-mod-quiz #id_layouthdrcontainer,body.path-mod-quiz #id_interactionhdrcontainer,',
+  'body.path-mod-quiz #id_reviewoptionshdrcontainer,body.path-mod-quiz #id_displaycontainer,',
+  'body.path-mod-quiz #id_securitycontainer,body.path-mod-quiz #id_sebcontainer,',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
   '{ display:none !important; }',
   // Formulaire "Parametres" d'un Devoir : ne garder que Instructions de
   // l'activite / Fichiers supplementaires / Types de remise / Note.
@@ -1958,6 +2274,22 @@ var _ceIframeCSS = [
   '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_groupsubmissionsettingscontainer"]),',
   '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_notificationscontainer"])',
   '{ display:none !important; }',
+  // Formulaire "Question a choix multiple" (question/type/multichoice/
+  // edit_multichoice_form.php) : ne garder que Nom / Texte de la question /
+  // Note par defaut / Une seule reponse / les Choix (texte + note de chaque
+  // reponse). Retire Feedback general, Melanger les reponses, Numeroter les
+  // choix, Identifiant de la question, Feedback combine, Reglages tentatives
+  // multiples (penalite + indices), Tags, et le commentaire de chaque
+  // reponse (formateur remplit juste question + reponses, sans ces options
+  // techniques secondaires).
+  '#id_combinedfeedbackhdr,#id_multitriesheader,#id_tagsheader,#id_coursetagsheader,',
+  '#fitem_id_generalfeedback,#fitem_id_answernumbering,',
+  '#fitem_id_idnumber,[id^="fitem_id_feedback_"]',
+  '{ display:none !important; }',
+  // "Melanger les reponses" : cette ligne (advcheckbox) n'a pas d'id propre
+  // sur son conteneur (particularite de ce template Moodle) — on cible via
+  // :has() la ligne qui contient la case a cocher #id_shuffleanswers.
+  '.row.fitem:has(#id_shuffleanswers) { display:none !important; }',
   'html, body { background:#fff !important; }',
   '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
   '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
@@ -1981,6 +2313,18 @@ var _ceIframeCSS = [
   '::-webkit-scrollbar-track { background: #f0f0f0; }',
   '::-webkit-scrollbar-thumb { background: #2E9488 !important; border-radius: 6px; }',
   '::-webkit-scrollbar-thumb:hover { background: #1C5F58 !important; }',
+  // Titre et description d'une activite (ex. nom du fichier + texte saisi
+  // en "Apparence > Afficher la description") : par defaut en noir brut,
+  // sans rapport avec la charte du reste de l'interface. On applique la
+  // couleur/typo d'accent automatiquement, sans que le formateur ait besoin
+  // d'ajouter du style HTML lui-meme a chaque fois.
+  '.activity-name { color:#1C5F58 !important; font-weight:800 !important; }',
+  '.activity-description { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
+  '.activity-description strong { color:#1C5F58 !important; }',
+  // Contenu d'une Page/Etiquette : classe differente (.box.generalbox, pas
+  // .activity-description), meme logique de style automatique.
+  '.box.generalbox { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
+  '.box.generalbox strong { color:#1C5F58 !important; }',
   // Boutons "+" d\'insertion d\'activite entre deux activites existantes —
   // tres discrets par defaut (icone minuscule dans un dropdown Bootstrap).
   // Cible specifiquement id="dropdownMenuButton-XXX" (le declencheur du menu
@@ -2078,6 +2422,7 @@ function ceInjectCSS(iframe, css) {
     ceHideChooserAllTab(doc);
     ceHideRepoTabs(doc);
     ceFixGraderPlaceholder(doc);
+    ceAutoFixVideoUrl(doc);
     ceWatchInplaceEdits(doc);
     // Une suppression d'activite passe par une page de confirmation qui
     // recharge entierement l'iframe (pas une simple mise a jour AJAX) : ni
@@ -2149,6 +2494,10 @@ function ceHideChooserAllTab(doc) {
     nav.querySelectorAll('.nav-link').forEach(function(el) {
       if (el.textContent.trim() === 'Tout') el.style.display = 'none';
     });
+    // "URL" -> "Vidéo" : c'est l'option utilisee ici pour ajouter un lien
+    // video (Glowbl, YouTube...), le nom natif Moodle preterait a confusion.
+    var urlTile = doc.querySelector('[data-region="chooser-option-container"][data-internal="url"] .optionname');
+    if (urlTile && urlTile.textContent.trim() === 'URL') urlTile.textContent = 'Vidéo';
   };
   hide();
   try {
@@ -2167,6 +2516,32 @@ function ceHideChooserAllTab(doc) {
 // donc on filtre par le nom affiche (.fp-repo-name) — meme principe que
 // ceHideChooserAllTab. Ne garde que "Deposer un fichier" et "Fichiers
 // recents", les deux seuls cas d'usage reels d'un formateur.
+// Sur le formulaire d'une activite "Video" (mod_url), convertit
+// automatiquement un lien YouTube colle sous sa forme normale
+// (youtube.com/watch?v=ID ou youtu.be/ID) vers le format "embed/ID" —
+// le seul que YouTube autorise a etre affiche dans une iframe (sa page de
+// visionnage normale bloque explicitement le cadrage). Bascule aussi
+// l'affichage sur "Integrer" pour que la video se lance directement au
+// clic, sans que le formateur ait besoin de connaitre cette distinction.
+function ceAutoFixVideoUrl(doc) {
+  var urlInput = doc.getElementById('id_externalurl');
+  if (!urlInput || urlInput._l3mVideoWatched) return;
+  urlInput._l3mVideoWatched = true;
+  var convert = function() {
+    var val = urlInput.value.trim();
+    if (/youtube\.com\/embed\//.test(val)) return; // deja au bon format
+    var m = val.match(/[?&]v=([a-zA-Z0-9_-]{6,})/) || val.match(/youtu\.be\/([a-zA-Z0-9_-]{6,})/);
+    if (!m) return;
+    urlInput.value = 'https://www.youtube.com/embed/' + m[1];
+    var disp = doc.getElementById('id_display');
+    if (disp) disp.value = '1'; // RESOURCELIB_DISPLAY_EMBED
+  };
+  urlInput.addEventListener('blur', convert);
+  urlInput.addEventListener('change', convert);
+  var form = urlInput.closest('form');
+  if (form) form.addEventListener('submit', convert, true);
+}
+
 function ceHideRepoTabs(doc) {
   if (doc._l3mRepoObserver) return;
   var HIDE = ['Banque de contenus', 'Fichiers disponibles', 'Téléchargement d’URL', 'Fichiers personnels', 'Wikimedia'];
@@ -2228,6 +2603,15 @@ function ceSelectMod(cmid, modtype, el, extra) {
 
 function ceRenderSections(sections) {
   var box = document.getElementById('ce-sections');
+  // Retient quelles sections etaient depliees avant de reconstruire tout le
+  // HTML : ceRefreshSections() est appelee tres souvent (a chaque
+  // navigation dans l'iframe, y compris ouvrir une simple activite), et
+  // sans ça chaque rafraichissement refermait toutes les sections — d'ou
+  // l'impression que cliquer sur "›" "ne marche pas".
+  var openIdx = {};
+  document.querySelectorAll('#ce-sections .det-mods.open').forEach(function(el){
+    openIdx[el.id.replace('ce-mods-', '')] = true;
+  });
   if (!sections || !sections.length) {
     box.innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Aucun contenu.</p>';
     return;
@@ -2235,13 +2619,14 @@ function ceRenderSections(sections) {
   var html = '';
   sections.forEach(function(s, si) {
     var allDone = s.total > 0 && s.done_n === s.total;
+    var isOpen  = !!openIdx[si];
     html += '<div class="det-sec" id="ce-sec-' + si + '">';
     html += '<div class="det-sec-head" onclick="ceToggleSec(' + si + ')">';
     html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + s.num + '</div>';
     html += '<div class="det-sec-info"><div class="det-sec-name">' + esc(s.name) + '</div>';
     if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
-    html += '</div><div class="det-sec-arrow" id="ce-arr-' + si + '">›</div></div>';
-    html += '<div class="det-mods" id="ce-mods-' + si + '">';
+    html += '</div><div class="det-sec-arrow' + (isOpen ? ' open' : '') + '" id="ce-arr-' + si + '">›</div></div>';
+    html += '<div class="det-mods' + (isOpen ? ' open' : '') + '" id="ce-mods-' + si + '">';
     s.mods.forEach(function(m) {
       var dotCls = m.done ? ' done' : '';
       html += '<div class="det-mod" data-cmid="' + m.cmid + '" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
@@ -2452,14 +2837,22 @@ function ceWatchInplaceEdits(doc) {
   // cours. On observe donc aussi directement les changements de structure du
   // contenu du cours, avec un debounce pour ne rafraichir qu'une fois
   // l'action terminee (evite les rafales pendant l'animation Moodle).
+  // Important : seulement si .course-content existe reellement (page de
+  // cours) — sans ce garde-fou, le repli sur doc.body observait N'IMPORTE
+  // QUELLE page chargee dans l'iframe (un PDF, un quiz...), et les
+  // manipulations DOM internes d'un visualiseur (ex. PDF.js qui redessine
+  // ses pages en continu) declenchaient des rafraichissements en boucle —
+  // d'ou les ralentissements/l'affichage instable observes sur un PDF.
   try {
-    var content = doc.querySelector('.course-content') || doc.body;
-    var timer = null;
-    var obs = new MutationObserver(function() {
-      clearTimeout(timer);
-      timer = setTimeout(refresh, 500);
-    });
-    obs.observe(content, {childList: true, subtree: true});
+    var content = doc.querySelector('.course-content');
+    if (content) {
+      var timer = null;
+      var obs = new MutationObserver(function() {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 500);
+      });
+      obs.observe(content, {childList: true, subtree: true});
+    }
   } catch (e) {}
   // "Supprimer" (.editing_delete) ouvre une boite de dialogue de
   // confirmation Moodle avant d'agir : on ne peut pas savoir a l'avance
@@ -2529,6 +2922,7 @@ function go(v) {
   else if (v === 'elev')   renderElev();
   else if (v === 'dispo')  renderDispo();
   else if (v === 'cours')  renderMesCours();
+  else if (v === 'peda')   renderPeda();
   else if (v === 'params') renderParams();
 }
 
@@ -2652,7 +3046,27 @@ function renderJour() {
   // 5 KPIs
   var nbCorr = DATA.corrections.length;
   var nbLia  = DATA.signal_lia.length;
-  var totalH_cours = totalBlocs * LIA_SESSION_H;
+  // Un evenement calendrier reel s'AJOUTE au calcul du moteur Lia (ce n'est
+  // pas la meme seance formalisee, c'est une seance en plus du programme —
+  // si une seance Lia doit au contraire etre annulee/remplacee, ça se fait
+  // via l'affectation manuelle "Planning & Lia" cote admin, qui peut la
+  // ramener a 0h, pas en creant un evenement calendrier a cote).
+  var hasRealEvents = !!(DATA.week_events && DATA.week_events.length);
+  var hasPlanJour   = Array.isArray(DATA.my_week_hours) && DATA.my_week_hours.length > 0;
+  var curWeekGrid   = (DATA.my_grid || {})[DATA.current_week || 1] || [];
+  var liaSeances = hasPlanJour ? curWeekGrid.length : totalBlocs;
+  var liaH       = hasPlanJour
+    ? curWeekGrid.reduce(function(s, e) { return s + e.h; }, 0)
+    : totalBlocs * LIA_SESSION_H;
+  var realSeances = hasRealEvents ? DATA.week_events.length : 0;
+  var realH       = hasRealEvents ? DATA.week_events.reduce(function(s, ev) { return s + (ev.duration_h || 0); }, 0) : 0;
+  var nbSeancesReel = liaSeances + realSeances;
+  // Arrondi a la demi-heure (pas a l'heure entiere) : la liste des seances
+  // juste en dessous affiche chaque duree arrondie a 0.5h (ex. "2.5 h") —
+  // arrondir ce total a l'entier creerait une contradiction visible des
+  // qu'une seule seance de 2.5h donnerait "3h au total" a cote d'une liste
+  // qui affiche elle-meme "2.5 h".
+  var totalH_cours = Math.round((liaH + realH) * 2) / 2;
   var cap = DATA.meta.capacity || 28;
   var firstLiaName = nbLia ? (DATA.signal_lia[0].nom.split(' ')[0] + ' ' + DATA.signal_lia[0].nom.split(' ').slice(-1)[0].slice(0,1) + '.') : '';
   var kpis = [
@@ -2662,9 +3076,16 @@ function renderJour() {
       sub: 'Capacité contractuelle ' + (DATA.meta.type === 'vacataire' ? 'vacataire' : 'salariée'),
       action: null },
     { cls:'k-mint', title:'Séances aujourd\'hui',
-      num: totalBlocs,
+      // Meme source reelle (evenements Moodle > moteur Lia > theorique) que
+      // "Heures cours" ci-dessus : le nombre theorique de blocs (totalBlocs)
+      // ne correspond plus au nombre reel de seances des qu'un vrai
+      // evenement calendrier existe ou qu'une delegation/un decalage Lia a
+      // eu lieu.
+      num: nbSeancesReel,
       chip: cohortWeeks.length ? cohortWeeks.map(function(cw){return cw.name.split(' ').pop();}).join(' · ') : null, chipCls:'',
-      sub: totalBlocs > 0 ? totalBlocs + ' séance' + (totalBlocs>1?'s':'') + ' · ' + LIA_SESSION_H + 'h chacune' : 'Semaine du ' + esc(DATA.week_label),
+      sub: (hasRealEvents || hasPlanJour)
+        ? (nbSeancesReel > 0 ? nbSeancesReel + ' séance' + (nbSeancesReel>1?'s':'') + ' · ' + totalH_cours + 'h au total' : 'Semaine du ' + esc(DATA.week_label))
+        : (totalBlocs > 0 ? totalBlocs + ' séance' + (totalBlocs>1?'s':'') + ' · ' + LIA_SESSION_H + 'h chacune' : 'Semaine du ' + esc(DATA.week_label)),
       action: null },
     { cls:'k-violet', title:'Élèves suivis',
       num: DATA.students.length,
@@ -2764,18 +3185,16 @@ function renderJour() {
     }).join('');
   }
 
-  // Séances : events Moodle si disponibles, sinon LIA
+  // Séances : evenements Moodle reels ET charge Lia (ou repli theorique),
+  // affiches ensemble — un evenement calendrier s'ajoute au programme Lia,
+  // il ne le remplace pas (voir note sur liaH/realH ci-dessus).
   document.getElementById('seances-title').textContent = 'Séances · semaine du ' + DATA.week_label;
   var seancesEl = document.getElementById('seances-list');
+  var seancesBlocks = [];
 
   if (DATA.week_events && DATA.week_events.length) {
     // Events réels depuis mdl_event (admin a planifié les cours)
-    seancesEl.innerHTML = DATA.week_events.map(function(ev) {
-      var cohName = '';
-      DATA.cohorts.forEach(function(c) {
-        // On essaie de matcher le cours au nom de la cohorte via le shortname
-        if (!cohName && ev.course_name) cohName = ev.course_name;
-      });
+    seancesBlocks.push(DATA.week_events.map(function(ev) {
       return '<div class="event" style="align-items:center;gap:8px">' +
         '<span class="lw" style="flex:0 0 56px;font-size:12px;font-weight:800;color:var(--teal-d);line-height:1.3">' +
           esc(ev.day_label) + '<br>' + esc(ev.hour_label) +
@@ -2788,12 +3207,29 @@ function renderJour() {
         '<span class="visio-tag">visio</span>' +
         '<a class="btn mini orange-btn" href="' + esc(glowblJoinUrl(ev.courseid)) + '" target="_blank" rel="noopener">Rejoindre</a>' +
       '</div>';
-    }).join('');
-  } else if (!cohortWeeks.length) {
-    seancesEl.innerHTML = '<p style="color:var(--muted);font-size:13px">Aucune cohorte active — vérifiez la date de rentrée (champ idnumber).</p>';
-  } else {
-    // Repli LIA : blocs calculés sans heure précise
-    seancesEl.innerHTML = cohortWeeks.map(function(cw, i){
+    }).join(''));
+  }
+
+  if (hasPlanJour && curWeekGrid.length) {
+    // Charge reelle calculee par le moteur Lia (meme source que la carte
+    // "Heures cours" et que "Mon planning") : reflete les delegations/
+    // decalages reels (une seance deleguee a un collegue en cas de
+    // surcharge n'apparait plus ici, et une seance recue apparait).
+    var tagClassJ = function(t) { return t === 'veh' ? 'veh-tag' : t === 'salle' ? 'salle-tag' : 'visio-tag'; };
+    var tagLabelJ = function(t) { return t === 'veh' ? 'véhicule' : t === 'salle' ? 'salle' : 'visio'; };
+    seancesBlocks.push(curWeekGrid.map(function(e) {
+      return '<div class="plan-session">' +
+        '<div class="plan-session-name">' + esc(e.label) + (e.lia ? ' <span style="color:var(--violet)">✦</span>' : '') +
+          ' <span class="plan-session-cls">· classe ' + esc(e.coh) + '</span>' +
+        '</div>' +
+        '<span class="plan-session-h">' + Math.round(e.h * 2) / 2 + ' h</span>' +
+        '<span class="' + tagClassJ(e.type) + '">' + tagLabelJ(e.type) + '</span>' +
+      '</div>';
+    }).join(''));
+  } else if (!hasPlanJour && cohortWeeks.length) {
+    // Repli theorique (pas de plan Lia calculable, ex. aucune classe avec
+    // date de rentree connue) : blocs du curriculum sans heure precise.
+    seancesBlocks.push(cohortWeeks.map(function(cw, i){
       var wtypeColor = {c:'var(--teal)',s:'var(--muted)',r:'var(--violet)',rs:'var(--violet)',e1:'var(--orange)',e:'var(--orange)'}[cw.wtype]||'var(--muted)';
       var chip = '<span style="display:inline-block;background:' + wtypeColor + '22;color:' + wtypeColor + ';border:1px solid ' + wtypeColor + '44;font-size:10.5px;font-weight:700;border-radius:99px;padding:2px 9px">' + esc(cw.label) + '</span>';
       var header = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
@@ -2816,7 +3252,15 @@ function renderJour() {
       }
       var sep = i > 0 ? '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">' : '';
       return sep + '<div>' + header + body + '</div>';
-    }).join('');
+    }).join(''));
+  }
+
+  if (!seancesBlocks.length) {
+    seancesEl.innerHTML = !cohortWeeks.length
+      ? '<p style="color:var(--muted);font-size:13px">Aucune cohorte active — vérifiez la date de rentrée (champ idnumber).</p>'
+      : '<p style="color:var(--muted);font-size:13px">Rien de planifié cette semaine.</p>';
+  } else {
+    seancesEl.innerHTML = seancesBlocks.join('<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">');
   }
 
 
@@ -2890,6 +3334,16 @@ function renderPlan() {
   var weekHours;
   if (hasPlan) {
     weekHours = DATA.my_week_hours.map(function(h) { return Math.round(h * 10) / 10; });
+    // Les evenements calendrier reels ne sont connus que pour la semaine en
+    // cours (DATA.week_events) : on les ajoute a son total dans la bande
+    // annuelle, sinon le chiffre au-dessus de la barre de cette semaine
+    // resterait perime par rapport au detail affiche juste en dessous.
+    if (DATA.week_events && DATA.week_events.length) {
+      var curIdx = (DATA.current_week || 1) - 1;
+      if (weekHours[curIdx] !== undefined) {
+        weekHours[curIdx] += DATA.week_events.reduce(function(s, ev) { return s + (ev.duration_h || 0); }, 0);
+      }
+    }
   } else {
     weekHours = [];
     for (var w = 1; w <= 35; w++) {
@@ -2908,11 +3362,15 @@ function renderPlan() {
     var isLia = hasPlan && (myGrid[w] || []).some(function(e) { return e.lia; });
     var px    = h > 0 ? Math.max(6, Math.round(h / maxH * MAXPX)) : 4;
 
-    numsHtml += '<span class="' + (h === 0 ? 'pn-empty' : '') + '">' + (h > 0 ? Math.round(h) : '') +
+    // Arrondi a la demi-heure (pas a l'heure entiere) : coherent avec le
+    // detail "Mon planning" et l'accueil juste en dessous, qui affichent
+    // eux-memes les heures a la demi-heure pres.
+    var hRounded = Math.round(h * 2) / 2;
+    numsHtml += '<span class="' + (h === 0 ? 'pn-empty' : '') + '">' + (h > 0 ? hRounded : '') +
       (isLia ? ' <span style="color:var(--violet)">✦</span>' : '') + '</span>';
     barsHtml += '<div class="strip-bar' + (isCur ? ' cur-week' : '') + '"' +
       ' style="height:' + px + 'px;background:' + barColor(h) + '"' +
-      ' title="S' + w + (isVeh ? ' · Regroupement véhicule' : '') + (isLia ? ' · ✦ ajusté par Lia' : '') + ' · ' + Math.round(h) + 'h"></div>';
+      ' title="S' + w + (isVeh ? ' · Regroupement véhicule' : '') + (isLia ? ' · ✦ ajusté par Lia' : '') + ' · ' + hRounded + 'h"></div>';
     labsHtml += '<span' + (isCur ? ' class="cur-lbl"' : '') + '>' + w + '</span>';
   });
 
@@ -2961,15 +3419,40 @@ function renderPlan() {
 
   if (hasPlan) {
     var curEntries = myGrid[cur] || [];
-    var totalH = curEntries.reduce(function(s, e) { return s + e.h; }, 0);
-    titleEl.textContent = 'SEMAINE DU ' + dtLabel + (totalH > 0 ? ' · ' + Math.round(totalH) + ' H' : '');
+    // Les evenements calendrier reels ne sont connus que pour la semaine EN
+    // COURS (DATA.week_events ne couvre que celle-ci) : on les ajoute au
+    // total et a la liste de cette semaine precise, en plus de la charge
+    // Lia — meme regle d'additivite que sur l'accueil (un evenement reel
+    // s'ajoute au programme Lia, il ne le remplace pas).
+    var realForCur = (cur === (DATA.current_week || 1) && DATA.week_events) ? DATA.week_events : [];
+    var totalH = curEntries.reduce(function(s, e) { return s + e.h; }, 0)
+      + realForCur.reduce(function(s, ev) { return s + (ev.duration_h || 0); }, 0);
+    // Arrondi a la demi-heure, pas a l'heure entiere : coherent avec
+    // l'arrondi de chaque ligne de la liste ci-dessous (voir Accueil pour
+    // le meme correctif — sinon une seule seance de 2.5h affichait "3 H"
+    // en titre a cote d'une liste qui montre elle-meme "2.5 h").
+    var totalHRounded = Math.round(totalH * 2) / 2;
+    titleEl.textContent = 'SEMAINE DU ' + dtLabel + (totalHRounded > 0 ? ' · ' + totalHRounded + ' H' : '');
 
-    if (!curEntries.length) {
+    if (!curEntries.length && !realForCur.length) {
       listEl.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:4px 0">Rien de planifié cette semaine.</p>';
     } else {
       var tagClass = function(t) { return t === 'veh' ? 'veh-tag' : t === 'salle' ? 'salle-tag' : 'visio-tag'; };
       var tagLabel = function(t) { return t === 'veh' ? 'véhicule' : t === 'salle' ? 'salle' : 'visio'; };
-      listEl.innerHTML = curEntries.map(function(e) {
+      var realHtml = realForCur.map(function(ev) {
+        return '<div class="event" style="align-items:center;gap:8px">' +
+          '<span class="lw" style="flex:0 0 56px;font-size:12px;font-weight:800;color:var(--teal-d);line-height:1.3">' +
+            esc(ev.day_label) + '<br>' + esc(ev.hour_label) +
+          '</span>' +
+          '<span class="info">' + esc(ev.name) +
+            (ev.course_short ? ' <span style="color:var(--muted);font-weight:400;font-size:12px">· ' + esc(ev.course_short) + '</span>' : '') +
+          '</span>' +
+          '<span style="color:var(--teal-d);font-weight:700;font-size:12.5px;white-space:nowrap">' + ev.duration_h + ' h</span>' +
+          '<span class="visio-tag">visio</span>' +
+          '<a class="btn mini orange-btn" href="' + esc(glowblJoinUrl(ev.courseid)) + '" target="_blank" rel="noopener">Rejoindre</a>' +
+        '</div>';
+      }).join('');
+      var liaHtml = curEntries.map(function(e) {
         return '<div class="plan-session">' +
           '<div class="plan-session-name">' + esc(e.label) + (e.lia ? ' <span style="color:var(--violet)">✦</span>' : '') +
             ' <span class="plan-session-cls">· classe ' + esc(e.coh) + '</span>' +
@@ -2978,6 +3461,7 @@ function renderPlan() {
           '<span class="' + tagClass(e.type) + '">' + tagLabel(e.type) + '</span>' +
         '</div>';
       }).join('');
+      listEl.innerHTML = realHtml + liaHtml;
     }
   } else {
     // Repli : pas de plan Lia calculable (ex. aucune classe avec date de rentrée) — estimation théorique
@@ -3109,7 +3593,7 @@ function renderElevTable() {
       '<td>' + bar + '</td>' +
       '<td>' + esc(s.last_access) + '</td>' +
       '<td style="display:flex;gap:6px;align-items:center">' +
-        '<button class="btn mini ghost" onclick="toast(\'Point avec ' + esc(s.firstname) + ' — Phase 2\')">Point</button>' +
+        '<button class="btn mini ghost" onclick="openMessageModal(' + s.id + ',\'' + esc(s.firstname + ' ' + s.lastname).replace(/'/g,"\\'") + '\')">Message</button>' +
       '</td>' +
     '</tr>';
   }).join('');
@@ -3213,6 +3697,110 @@ function renderMesCours() {
       '<td><button type="button" class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Ajouter du contenu</button></td>' +
     '</tr>';
   }).join('');
+}
+
+/* ─────────────────────────────────────────
+   PÉDAGOGIE — accès formateurs (Responsable pédagogique)
+───────────────────────────────────────── */
+// 3 états par case (formateur × module) : aucun accès -> accès sans édition
+// -> accès + édition -> aucun accès -> ...
+var PEDA_STATES = ['none', 'view', 'edit'];
+var PEDA_LABELS = { none: '—', view: '👁 Accès', edit: '✏️ Édition' };
+var PEDA_NEXT   = { none: 'view', view: 'edit', edit: 'none' };
+
+function renderPeda() {
+  var thead = document.getElementById('peda-thead');
+  var tbody = document.getElementById('peda-tbody');
+  if (!thead || !tbody) return;
+  var courses = DATA.ped_courses || [];
+  var formateurs = DATA.ped_formateurs || [];
+  if (!courses.length || !formateurs.length) {
+    tbody.innerHTML = '<tr><td style="color:var(--muted);text-align:center;padding:20px">Rien à afficher.</td></tr>';
+    return;
+  }
+  thead.innerHTML = '<th>Formateur</th>' + courses.map(function(c) {
+    return '<th title="' + esc(c.fullname) + '" style="font-size:11px;text-align:center">' + esc(c.shortname) + '</th>';
+  }).join('');
+  tbody.innerHTML = formateurs.map(function(f) {
+    var access = (DATA.ped_access || {})[f.id] || {};
+    return '<tr>' +
+      '<td class="mm-name">' + esc(f.nom) + '</td>' +
+      courses.map(function(c) {
+        var state = access[c.id] || 'none';
+        return '<td style="text-align:center">' +
+          '<button type="button" class="peda-cell peda-' + state + '" onclick="cyclePedaAccess(' + f.id + ',' + c.id + ')">' + PEDA_LABELS[state] + '</button>' +
+        '</td>';
+      }).join('') +
+    '</tr>';
+  }).join('');
+}
+
+function cyclePedaAccess(formateurId, courseId) {
+  var access = (DATA.ped_access || {})[formateurId] || {};
+  var current = access[courseId] || 'none';
+  var next = PEDA_NEXT[current];
+  apiPost({ action: 'set_formateur_course_access', formateur_id: formateurId, courseid: courseId, state: next })
+    .then(function(r) {
+      if (r.ok) {
+        if (!DATA.ped_access[formateurId]) DATA.ped_access[formateurId] = {};
+        if (next === 'none') delete DATA.ped_access[formateurId][courseId];
+        else DATA.ped_access[formateurId][courseId] = next;
+        renderPeda();
+        toast(next === 'none' ? 'Accès retiré' : (next === 'edit' ? 'Édition accordée' : 'Accès (lecture) accordé'));
+      } else {
+        toast('Erreur : ' + (r.msg || '?'));
+        renderPeda(); // resynchronise l'affichage si l'action a été refusée côté serveur
+      }
+    })
+    .catch(function() { toast('Erreur réseau'); renderPeda(); });
+}
+
+/* ─────────────────────────────────────────
+   PÉDAGOGIE — déblocage ponctuel de module
+───────────────────────────────────────── */
+function pedaLoadStudentModules() {
+  var sel = document.getElementById('peda-student-select');
+  var table = document.getElementById('peda-unlock-table');
+  var tbody = document.getElementById('peda-unlock-tbody');
+  var studentId = sel.value;
+  if (!studentId) { table.style.display = 'none'; return; }
+  apiPost({ action: 'ped_student_modules', student_id: studentId })
+    .then(function(r) {
+      if (!r.ok) { toast('Erreur : ' + (r.msg || '?')); return; }
+      table.style.display = '';
+      if (!r.modules.length) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">Aucun module.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = r.modules.map(function(m) {
+        var statusHtml = m.locked ? '<span class="chip c-ko">🔒 Verrouillé</span>'
+          : (m.unlocked_override ? '<span class="chip c-ok">Débloqué (exception)</span>' : '<span class="chip c-ok">Ouvert</span>');
+        var actionHtml = '';
+        if (m.locked) {
+          actionHtml = '<button type="button" class="btn mini primary" onclick="pedaToggleUnlock(' + studentId + ',' + m.id + ',1)">Débloquer</button>';
+        } else if (m.unlocked_override) {
+          actionHtml = '<button type="button" class="btn mini ghost" onclick="pedaToggleUnlock(' + studentId + ',' + m.id + ',0)">Retirer l\'exception</button>';
+        }
+        return '<tr>' +
+          '<td class="mm-name">' + esc(m.fullname) + '</td>' +
+          '<td>' + m.pct + '%</td>' +
+          '<td>' + statusHtml + '</td>' +
+          '<td>' + actionHtml + '</td>' +
+        '</tr>';
+      }).join('');
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
+
+function pedaToggleUnlock(studentId, courseId, enable) {
+  apiPost({ action: 'toggle_module_unlock', student_id: studentId, courseid: courseId, enable: enable })
+    .then(function(r) {
+      if (r.ok) {
+        toast(enable ? 'Module débloqué pour cet élève' : 'Exception retirée');
+        pedaLoadStudentModules();
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
 }
 
 /* ─────────────────────────────────────────

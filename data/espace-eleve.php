@@ -6,6 +6,74 @@ require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
 require_login();
+
+// Appel a l'API Gemini (offre gratuite Google) pour la remediation de quiz
+// (action AJAX 'lia_remediate' plus bas). Cle lue depuis une variable
+// d'environnement Docker (GEMINI_API_KEY sur le conteneur moodle_app) —
+// jamais en dur dans le code ni en base. Modele "flash" : rapide et
+// suffisant pour ce cas d'usage, dans le quota gratuit.
+function l3m_call_gemini($prompt) {
+    $apikey = getenv('GEMINI_API_KEY');
+    if (!$apikey) {
+        return ['ok' => false, 'msg' => "Cle API Gemini non configuree sur le serveur"];
+    }
+    // "flash-lite" plutot que "flash" : le modele flash complet (gemini-3.6-flash
+    // derriere l'alias gemini-flash-latest) s'est revele limite a 20 requetes/JOUR
+    // sur l'offre gratuite (quota "GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+    // largement insuffisant. Les variantes "lite" ont un quota gratuit plus genereux.
+    $url  = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=' . $apikey;
+    $body = json_encode([
+        'contents'         => [['parts' => [['text' => $prompt]]]],
+        'generationConfig' => ['responseMimeType' => 'application/json'],
+    ]);
+
+    // L'offre gratuite Gemini a un quota de requetes/minute assez bas : un
+    // 429 (quota atteint) ou 503 (surcharge cote Google) est transitoire et
+    // se resout en general en quelques secondes — on retente automatiquement
+    // avant de renvoyer une erreur a l'eleve.
+    $max_tries = 3;
+    $httpcode  = 0;
+    $response  = false;
+    $curlerr   = '';
+    for ($try = 1; $try <= $max_tries; $try++) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS     => $body,
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+        $response = curl_exec($ch);
+        $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlerr  = curl_error($ch);
+        curl_close($ch);
+
+        if ($response !== false && in_array($httpcode, [429, 503], true) === false) {
+            break; // succes, ou echec definitif (pas de retry utile) : on sort de la boucle
+        }
+        if ($try < $max_tries) {
+            sleep($try * 2); // 2s puis 4s avant les tentatives suivantes
+        }
+    }
+
+    if ($response === false) {
+        return ['ok' => false, 'msg' => 'Erreur reseau vers Gemini : ' . $curlerr];
+    }
+    $decoded = json_decode($response, true);
+    if ($httpcode !== 200 || !$decoded) {
+        if (in_array($httpcode, [429, 503], true)) {
+            return ['ok' => false, 'msg' => "Lia est momentanement surchargee (beaucoup de demandes en meme temps). Reessaie dans une minute."];
+        }
+        return ['ok' => false, 'msg' => 'Erreur API Gemini (HTTP ' . $httpcode . ')'];
+    }
+    $text = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $data = json_decode($text, true);
+    if (!$data) {
+        return ['ok' => false, 'msg' => 'Reponse IA illisible'];
+    }
+    return ['ok' => true, 'data' => $data];
+}
 $user_client = l3m_get_user_client($USER->id);
 $brand = l3m_get_brand_by_client($user_client);
 
@@ -86,14 +154,66 @@ if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
                 if (!isset($minfo->cms[$cmid])) continue;
                 $cm = $minfo->cms[$cmid];
                 if (!$cm->visible) continue;
-                $done = isset($comps[$cmid]) && $comps[$cmid] > 0;
-                $mods[] = ['cmid'=>$cmid,'name'=>$cm->name,'modtype'=>$cm->modname,'done'=>$done];
+                $locked = !$cm->uservisible; // restriction d'accès non satisfaite (ex. attestation avant fin des activités)
+                // $cm->availableinfo peut être une chaîne avec placeholders
+                // <AVAILABILITY_CMNAME_x/> ou un objet "renderable" (multi-
+                // conditions) selon Moodle — format_info() gère les deux et
+                // résout les noms d'activités réels.
+                $lockinfo = '';
+                if ($locked && $cm->availableinfo) {
+                    $raw_info = strip_tags(\core_availability\info::format_info($cm->availableinfo, $course));
+                    $lockinfo = trim(preg_replace('/\s+/u', ' ', $raw_info));
+                }
+                // Restriction "totalement masquée" (showc=false côté Moodle) : ne meme
+                // pas révéler l'existence de l'activité, comme le ferait la page native.
+                if ($locked && $lockinfo === '') continue;
+                // Un enregistrement d'achèvement "done" peut exister alors que
+                // l'accès réel est bloqué (ex. ancienne donnée) — on ne le
+                // compte pas comme fait tant que l'accès n'est pas réel, pour
+                // que le compteur de section (X/Y) ne mente pas.
+                // COMPLETION_COMPLETE_FAIL (3) : l'activité (ex. quiz noté) a
+                // bien été tentée jusqu'au bout mais SANS atteindre la note de
+                // passage — Moodle lui-même ne compte pas ça comme "achevé"
+                // pour les restrictions d'accès (voir availability_completion),
+                // donc ne pas l'afficher comme "fait" ici non plus (sinon la
+                // coche verte contredit le verrou de l'attestation juste après).
+                $failed = isset($comps[$cmid]) && (int)$comps[$cmid] === COMPLETION_COMPLETE_FAIL;
+                $done = !$locked && isset($comps[$cmid]) && $comps[$cmid] > 0 && !$failed;
+                $mods[] = ['cmid'=>$cmid,'name'=>$cm->name,'modtype'=>$cm->modname,'done'=>$done,
+                           'failed'=>$failed && !$locked,'locked'=>$locked,'lockinfo'=>$lockinfo];
             }
             $total = count($mods);
             $done_n = count(array_filter($mods, function($m){ return $m['done']; }));
             $sections[] = ['num'=>$snum,'name'=>$sinfo->name ?: ('Section '.$snum),
                            'mods'=>$mods,'total'=>$total,'done_n'=>$done_n];
         }
+
+        // Verrouillage sequentiel des SECTIONS (meme principe en cascade que
+        // celui entre modules, cote "Mes modules") : une section n'est
+        // accessible que si la precedente est entierement terminee. Une
+        // section vide (aucune activite a suivi d'achevement) ne bloque pas
+        // la suite. Independant des restrictions Moodle natives par
+        // activite (deja gerees plus haut) — ici on verrouille tout le
+        // contenu d'une section d'un coup des que la chaine est cassee.
+        $section_chain_broken = false;
+        foreach ($sections as &$sec) {
+            $sec['locked'] = $section_chain_broken;
+            if ($section_chain_broken) {
+                foreach ($sec['mods'] as &$m) {
+                    if (!$m['locked']) {
+                        $m['locked']   = true;
+                        $m['lockinfo'] = 'Terminez la section précédente pour débloquer celle-ci';
+                        $m['done']     = false;
+                    }
+                }
+                unset($m);
+                $sec['done_n'] = 0;
+            }
+            if ($sec['total'] > 0 && $sec['done_n'] < $sec['total']) {
+                $section_chain_broken = true;
+            }
+        }
+        unset($sec);
         // Fil d'ariane (catégorie racine → sous-catégories → cours) — masqué
         // par le CSS qui nettoie l'iframe (breadcrumb natif Moodle caché),
         // reconstruit ici pour le panneau de gauche du viewer.
@@ -258,6 +378,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'save_geoloc') {
+        // Position GPS transmise avec l'autorisation explicite de l'eleve
+        // (voir geolocRequest() cote JS) : utilisee uniquement pour affiner
+        // la "Localisation" de l'emargement (bien plus precise qu'une
+        // estimation par IP), jamais pour un autre usage.
+        $lat      = required_param('lat', PARAM_FLOAT);
+        $lng      = required_param('lng', PARAM_FLOAT);
+        $accuracy = optional_param('accuracy', 0, PARAM_FLOAT);
+
+        $address = null;
+        try {
+            require_once($CFG->libdir . '/filelib.php');
+            $url = 'https://api-adresse.data.gouv.fr/reverse/?lon=' . urlencode($lng) . '&lat=' . urlencode($lat);
+            $resp = download_file_content($url, null, null, false, 5, 3, false, false, false);
+            if ($resp) {
+                $json = json_decode($resp, true);
+                $props = $json['features'][0]['properties'] ?? [];
+                // Ville + code postal seulement (pas l'adresse complete/la
+                // rue, non necessaire pour l'emargement).
+                if (!empty($props['city'])) {
+                    $address = trim((!empty($props['postcode']) ? $props['postcode'] . ' ' : '') . $props['city']);
+                }
+            }
+        } catch (Throwable $e) {
+            // API indisponible : on garde quand meme la position brute,
+            // l'emargement affichera les coordonnees en secours.
+        }
+
+        $geoloc = json_decode(get_config('local_l3madmin', 'student_geoloc') ?: '[]', true) ?: [];
+        $geoloc[] = [
+            'userid'      => $USER->id,
+            'lat'         => $lat,
+            'lng'         => $lng,
+            'accuracy'    => $accuracy,
+            'address'     => $address,
+            'timecreated' => time(),
+        ];
+        // On ne garde qu'un historique raisonnable (60 jours) pour eviter
+        // que cette config grossisse indefiniment au fil des mois.
+        $cutoff = time() - 60 * 24 * 3600;
+        $geoloc = array_values(array_filter($geoloc, fn($g) => (int)($g['timecreated'] ?? 0) >= $cutoff));
+        set_config('student_geoloc', json_encode($geoloc), 'local_l3madmin');
+
+        echo json_encode(['ok' => true, 'address' => $address], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'header_counts') {
         $unread_msgs = 0;
         try {
@@ -323,6 +490,121 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // AJAX : remediation IA sur un quiz rate — reformule le cours + genere
+    // 3 nouvelles questions d'entrainement (voir l3m_call_gemini en tete de
+    // fichier). Ne touche jamais au moteur de quiz Moodle : aucune note,
+    // aucune tentative enregistree, purement un entrainement supplementaire
+    // a cote — l'eleve doit toujours repasser le vrai quiz pour progresser.
+    if ($action === 'lia_remediate') {
+        $cmid = optional_param('cmid', 0, PARAM_INT);
+        try {
+            // COMPLETION_COMPLETE_FAIL (et les autres constantes COMPLETION_*)
+            // vivent dans completionlib.php, charge paresseusement par Moodle
+            // — ailleurs dans ce fichier (course_detail) la constante est
+            // deja disponible car get_fast_modinfo() a ete appele avant. Ici
+            // on l'utilise en premier, donc on charge explicitement la lib
+            // plutot que de compter sur un effet de bord d'un autre appel.
+            require_once($CFG->libdir . '/completionlib.php');
+
+            $cm = get_coursemodule_from_id('quiz', $cmid, 0, false, MUST_EXIST);
+
+            // Securite : seulement si CET eleve a reellement rate CE quiz
+            // (meme regle que l'affichage du bouton cote client) — empeche
+            // d'appeler cette action sur un quiz/eleve arbitraire.
+            $comp = $DB->get_record('course_modules_completion',
+                ['coursemoduleid' => $cmid, 'userid' => $USER->id]);
+            if (!$comp || (int)$comp->completionstate !== COMPLETION_COMPLETE_FAIL) {
+                echo json_encode(['ok' => false, 'msg' => "Ce quiz n'est pas en echec pour cet eleve"]);
+                exit;
+            }
+
+            $quiz = $DB->get_record('quiz', ['id' => $cm->instance], '*', MUST_EXIST);
+            $attempt = $DB->get_record_sql(
+                "SELECT * FROM {quiz_attempts}
+                  WHERE quiz = :quiz AND userid = :uid AND state = 'finished'
+                  ORDER BY attempt DESC LIMIT 1",
+                ['quiz' => $quiz->id, 'uid' => $USER->id]
+            );
+            if (!$attempt) {
+                echo json_encode(['ok' => false, 'msg' => 'Aucune tentative terminee trouvee']);
+                exit;
+            }
+
+            require_once($CFG->dirroot . '/question/engine/lib.php');
+            $quba  = question_engine::load_questions_usage_by_activity($attempt->uniqueid);
+            $wrong = [];
+            foreach ($quba->get_slots() as $slot) {
+                $state = $quba->get_question_state($slot);
+                if (!$state->is_graded() || $state->is_correct()) continue;
+                $wrong[] = [
+                    'question'      => trim(strip_tags($quba->get_question_summary($slot))),
+                    'reponse_eleve' => trim(strip_tags((string)$quba->get_response_summary($slot))),
+                    'bonne_reponse' => trim(strip_tags((string)$quba->get_right_answer_summary($slot))),
+                ];
+                if (count($wrong) >= 5) break;
+            }
+            if (!$wrong) {
+                echo json_encode(['ok' => false, 'msg' => 'Aucune question en echec identifiee sur cette tentative']);
+                exit;
+            }
+
+            // Contexte pedagogique : texte de toutes les pages de cours
+            // (mod_page) du module Moodle entier (pas seulement la section du
+            // quiz — en pratique les pages de contenu precedent le quiz dans
+            // des sections separees, la section du quiz elle-meme ne contenant
+            // souvent que le quiz + l'attestation), pour que la reformulation
+            // s'appuie sur le contenu reel du cours plutot que des
+            // connaissances generiques. Un "cours" Moodle ici reste de taille
+            // raisonnable (quelques pages), donc parcourir tout le module au
+            // lieu d'une seule section n'alourdit pas significativement le
+            // prompt tout en etant plus fiable face a des structures variees.
+            $minfo = get_fast_modinfo($cm->course);
+            $section_text = '';
+            foreach ($minfo->get_cms() as $othercm) {
+                if ($othercm->modname !== 'page') continue;
+                $page = $DB->get_record('page', ['id' => $othercm->instance]);
+                if ($page && $page->content) {
+                    $section_text .= "\n\n" . trim(strip_tags($page->content));
+                }
+            }
+            $section_text = trim(preg_replace('/\s+/u', ' ', $section_text));
+            if (mb_strlen($section_text) > 6000) $section_text = mb_substr($section_text, 0, 6000);
+
+            $wrong_txt = '';
+            foreach ($wrong as $i => $w) {
+                $wrong_txt .= ($i + 1) . ". Question : " . $w['question']
+                    . "\n   Reponse de l'eleve : " . ($w['reponse_eleve'] !== '' ? $w['reponse_eleve'] : '(vide)')
+                    . "\n   Bonne reponse : " . $w['bonne_reponse'] . "\n";
+            }
+
+            $prompt = "Tu es Lia, l'assistante pedagogique d'une formation professionnelle (ECSR, moniteur auto-ecole). "
+                . "Un eleve vient d'echouer a un quiz. Voici le contenu du cours concerne :\n\n"
+                . ($section_text !== '' ? $section_text : '(pas de contenu texte disponible pour ce cours)')
+                . "\n\nVoici les questions que l'eleve a ratees, avec sa reponse et la bonne reponse :\n\n" . $wrong_txt
+                . "\n\nReponds UNIQUEMENT avec un objet JSON valide, de cette forme exacte :\n"
+                . '{"explication": "texte court et clair reformulant la ou les notions ratees, en tutoyant l\'eleve", '
+                . '"questions": [{"question": "...", "choix": ["...","...","...","..."], "bonne_reponse_index": 0}]}'
+                . "\n\nGenere exactement 3 nouvelles questions a choix multiples (4 choix chacune), testant les memes "
+                . "notions que les questions ratees mais formulees differemment, avec un niveau de difficulte equivalent. "
+                . "N'inclus aucun texte en dehors de cet objet JSON.";
+
+            $result = l3m_call_gemini($prompt);
+            if (!$result['ok']) {
+                echo json_encode(['ok' => false, 'msg' => $result['msg']]);
+                exit;
+            }
+
+            echo json_encode([
+                'ok'          => true,
+                'explication' => $result['data']['explication'] ?? '',
+                'questions'   => $result['data']['questions'] ?? [],
+            ], JSON_UNESCAPED_UNICODE);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => 'Erreur : ' . $e->getMessage()]);
+        }
         exit;
     }
 
@@ -426,10 +708,25 @@ try {
         if ($last_raw) {
             $last_course = ['id' => (int)$last_raw->courseid, 'fullname' => $last_raw->fullname, 'shortname' => $last_raw->shortname];
         }
+        // Deblocages ponctuels accordes par le Responsable pedagogique (voir
+        // espace-formateur.php, section Pedagogie) — un module dans cette
+        // liste reste ouvert meme si la chaine est cassee avant lui.
+        $unlock_overrides_all = json_decode(get_config('local_l3madmin', 'module_unlock_overrides') ?: '{}', true) ?: [];
+        $my_unlocks = $unlock_overrides_all[$USER->id] ?? [];
+
+        // Verrouillage sequentiel EN CASCADE : un module n'est accessible
+        // que si le precedent est a 100% ET etait lui-meme deverrouille —
+        // une fois la chaine cassee, tout ce qui suit reste verrouille
+        // meme si une progression (donnee de test, rattrapage manuel...)
+        // existe deja dessus. Le tout premier module n'est jamais verrouille.
+        $chain_broken = false;
         foreach ($courses_raw as $c) {
             $co = $comp_map[$c->id] ?? ['total' => 0, 'done' => 0, 'pct' => 0];
+            $is_unlocked_override = in_array((int)$c->id, $my_unlocks, true);
             $my_courses[] = ['id' => (int)$c->id, 'fullname' => $c->fullname, 'shortname' => $c->shortname,
-                             'total_mods' => $co['total'], 'done_mods' => $co['done'], 'pct' => $co['pct']];
+                             'total_mods' => $co['total'], 'done_mods' => $co['done'], 'pct' => $co['pct'],
+                             'locked' => $chain_broken && !$is_unlocked_override];
+            if ($co['pct'] < 100) $chain_broken = true;
         }
     }
 } catch (Exception $e) { $my_courses = []; }
@@ -642,7 +939,7 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 
 /* ===== Messagerie (UI custom, meme visuel que espace-formateur) ===== */
 .msg-modal { width:960px; max-width:96vw; height:94vh; max-height:920px; display:flex; flex-direction:row; overflow:hidden; padding:0; position:relative; background:var(--card); border-radius:18px; box-shadow:0 20px 60px rgba(0,0,0,.25); }
-.msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:none; background:rgba(255,255,255,.92); width:28px; height:28px; border-radius:50%; font-size:13px; color:var(--muted); cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.14); line-height:1; }
+.msg-modal-close { position:absolute; top:12px; right:12px; z-index:5; border:none; background:var(--ink); width:32px; height:32px; border-radius:50%; font-size:15px; color:#fff; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
 .msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
@@ -706,13 +1003,19 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
   /* Meme probleme que "Modules" : la liste de contacts (308px fixes) et la
      conversation se partagent la largeur de la modale, ce qui ecrase la
      conversation sur mobile. On passe en plein ecran avec bouton retour. */
-  .msg-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  /* width:100% (pas 100vw) : 100vw inclut la largeur de la barre de
+     defilement verticale du document sous-jacent, ce qui pousse le bord
+     droit de la modale (et le bouton fermer positionne "right:12px" par
+     rapport a elle) hors de la zone visible sans scroll horizontal — bug
+     confirme par rendu reel, pas visible en lisant le CSS seul. */
+  .msg-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
   .msg-list-pane { width:100%; flex:1 1 auto; }
   .msg-thread-pane { display:none; }
   .msg-modal.msg-mob-thread .msg-list-pane { display:none; }
   .msg-modal.msg-mob-thread .msg-thread-pane { display:flex; }
   .msg-thread-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; background:var(--card); }
   .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
+  .msg-modal-close { top:max(12px, env(safe-area-inset-top)) !important; }
 }
 
 /* Typography */
@@ -842,6 +1145,9 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .det-sec-head:hover{background:var(--bg)}
 .det-sec-num{width:32px;height:32px;border-radius:50%;border:2px solid var(--teal);color:var(--teal);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;transition:background .15s}
 .det-sec-num.done{background:var(--teal);color:#fff}
+.det-sec-locked .det-sec-num{border-color:var(--line);color:var(--muted);font-size:14px}
+.det-sec-locked .det-sec-name{color:var(--muted)}
+.det-sec-locked .det-sec-count{color:var(--muted);font-style:italic}
 .det-sec-info{flex:1;min-width:0}
 .det-sec-name{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}
 .det-sec-count{font-size:11px;color:var(--muted);margin-top:1px}
@@ -857,6 +1163,29 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .det-mod-dot.done{background:var(--teal)}
 .det-mod-dot.active-dot{background:var(--orange)}
 .det-mod-name{line-height:1.35;flex:1}
+.det-mod-locked{cursor:default;opacity:.6}
+.det-mod-locked:hover .det-mod-name{color:var(--ink)}
+.det-mod-dot.locked{background:transparent;font-size:10px;line-height:1;width:auto;height:auto;margin-top:1px}
+.det-mod-lockinfo{font-size:11px;color:var(--muted);font-style:italic;margin-top:2px;line-height:1.3}
+.det-mod-dot.failed{background:var(--red,#D64545)}
+.det-mod-failed-info{color:var(--red,#D64545)}
+.lia-remediate-btn{margin-top:6px;border:1px solid var(--teal);background:var(--teal-t);color:var(--teal-d);font-size:12px;font-weight:600;padding:5px 10px;border-radius:8px;cursor:pointer}
+.lia-remediate-btn:hover{background:var(--teal);color:#fff}
+.lia-modal{width:600px;max-width:94vw;max-height:88vh;overflow-y:auto;background:var(--card);border-radius:16px;padding:26px 28px;position:relative;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.lia-modal-close{position:absolute;top:12px;right:12px;border:none;background:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;color:#fff;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
+.lia-modal h2{margin:0 0 4px;font-size:17px;color:var(--ink)}
+.lia-modal .lia-sub{font-size:12px;color:var(--muted);margin-bottom:16px}
+.lia-explication{background:var(--teal-t);border-radius:10px;padding:14px 16px;font-size:14px;line-height:1.55;color:var(--ink);margin-bottom:18px}
+.lia-q{margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.lia-q:last-child{border-bottom:none}
+.lia-q-text{font-size:14px;font-weight:600;color:var(--ink);margin-bottom:10px}
+.lia-choice{display:block;width:100%;text-align:left;border:1px solid var(--line);background:#fff;border-radius:8px;padding:9px 12px;margin-bottom:7px;font-size:13px;cursor:pointer;color:var(--ink)}
+.lia-choice:hover{border-color:var(--teal)}
+.lia-choice.correct{border-color:var(--teal);background:var(--teal-t);font-weight:600}
+.lia-choice.incorrect{border-color:var(--red,#D64545);background:#FBEAEA}
+.lia-choice[disabled]{cursor:default}
+.lia-loading{text-align:center;padding:30px 0;color:var(--muted);font-size:13px}
+.lia-error{color:var(--red,#D64545);font-size:13px;text-align:center;padding:20px 0}
 /* Panneau droite : iframe */
 .dv-right{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
 #dv-iframe{flex:1;border:none;width:100%;display:block;opacity:1;transition:opacity .15s}
@@ -897,6 +1226,9 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .pbar { height:6px; border-radius:3px; background:var(--line); }
 .pbar i { display:block; height:100%; border-radius:3px; background:var(--teal); }
 .cours-card .btn.mini.primary { margin-top:auto !important; align-self:flex-start; }
+.cours-card.cours-locked { opacity:.6; cursor:not-allowed; }
+.cours-card.cours-locked .cours-fullname,.cours-card.cours-locked .cours-shortname { color:var(--muted); }
+.cours-lock-btn { margin-top:auto !important; align-self:flex-start; background:var(--line) !important; color:var(--muted) !important; cursor:not-allowed !important; }
 
 /* Agenda */
 .cal-wrap{display:flex;flex-direction:column;height:calc(100vh - 40px);margin:-24px -28px -80px;overflow:hidden;background:var(--bg)}
@@ -938,6 +1270,15 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
   .cal-cell{min-height:54px}
   .cal-dn{font-size:9px;width:15px;height:15px}
   .cal-ev{font-size:6.5px}
+}
+@media(max-width:560px){
+  /* "Parcours" : le bloc barre de progression + bouton (largeur fixe,
+     flex-shrink:0) entrait en concurrence avec le texte du bloc sur la
+     meme ligne — sur un ecran etroit, le texte se retrouvait ecrase a
+     presque rien (un mot par ligne) et le bouton depassait de l'ecran.
+     On fait passer ce bloc sur sa propre ligne, sous le texte. */
+  .parc-row { flex-wrap:wrap; row-gap:8px; }
+  .parc-right { flex:0 0 calc(100% - 34px); margin-left:34px; }
 }
 @media(max-width:760px){
   /* Barre du haut : les 110px de marge droite (pensés pour le desktop) et
@@ -1028,6 +1369,10 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .ab-content { flex:1; font-size:13px; }
 .ab-content b { color:#B91C1C; display:block; }
 .ab-content span { color:var(--muted); }
+.geoloc-banner { display:flex; align-items:center; gap:12px; background:var(--teal-t); border:1px solid var(--teal); border-radius:12px; padding:14px 18px; margin-bottom:16px; color:#24333C; flex-wrap:wrap; }
+.geoloc-banner .gb-icon { font-size:20px; flex-shrink:0; }
+.geoloc-banner .gb-content { flex:1; font-size:13px; min-width:200px; }
+.geoloc-banner .gb-actions { display:flex; gap:8px; flex-shrink:0; }
 
 /* Hero redesign */
 .hero-card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:26px 28px; display:flex; justify-content:space-between; align-items:center; gap:24px; margin-bottom:16px; flex-wrap:wrap; }
@@ -1148,6 +1493,16 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <span class="ab-icon">&#9888;</span>
     <div class="ab-content"><b id="ab-title"></b><span id="ab-desc"></span></div>
     <a class="btn mini orange-btn" id="ab-cta" href="#" target="_blank" rel="noopener">Traiter</a>
+  </div>
+
+  <!-- Bandeau consentement geolocalisation (emargement) -->
+  <div class="geoloc-banner" id="geoloc-banner" style="display:none">
+    <span class="gb-icon">📍</span>
+    <div class="gb-content">Autorisez la localisation pour un émargement plus précis (position utilisée uniquement pour votre feuille d'émargement).</div>
+    <div class="gb-actions">
+      <button type="button" class="btn mini primary" onclick="geolocRequest()">Autoriser</button>
+      <button type="button" class="btn mini ghost" onclick="geolocDismiss()">Plus tard</button>
+    </div>
   </div>
 
   <!-- Hero -->
@@ -1384,6 +1739,15 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
+<div class="util-modal-bg" id="lia-modal-bg" onclick="if(event.target===this)closeLiaRemediation()">
+  <div class="lia-modal">
+    <button type="button" class="lia-modal-close" onclick="closeLiaRemediation()" aria-label="Fermer">✕</button>
+    <h2>🔄 Réviser avec Lia</h2>
+    <div class="lia-sub" id="lia-modal-sub"></div>
+    <div id="lia-modal-body"><div class="lia-loading"><span class="dv-spinner"></span> Lia prépare ta révision…</div></div>
+  </div>
+</div>
+
 <div class="util-modal-bg" id="msg-modal-bg" onclick="if(event.target===this)closeMessageModal()">
   <div class="msg-modal">
     <button type="button" class="msg-modal-close" onclick="closeMessageModal()" aria-label="Fermer">✕</button>
@@ -1412,7 +1776,6 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="msg-thread-body" id="msg-thread-body"></div>
       <div class="msg-thread-empty" id="msg-thread-empty">Sélectionnez une conversation</div>
       <div class="msg-thread-input" id="msg-thread-input" style="display:none">
-        <button type="button" class="msg-attach" title="Joindre">&#128206;</button>
         <input type="text" id="msg-input-text" placeholder="Écrire un message..." onkeydown="if(event.key==='Enter'){msgSendCurrent();}">
         <button type="button" class="msg-send-btn" onclick="msgSendCurrent()" aria-label="Envoyer">&#10148;</button>
       </div>
@@ -2515,10 +2878,18 @@ function renderParcours() {
     else if (wt === 'e1') clr = '#B0A8E0';
     else                  clr = (w < cur) ? '#2E9488' : '#7CC9AC';
     var tipTxt = 'S' + w + ' · ' + (LIA_WLABELS[wt] || wt);
+    // La bulle "Vous etes ici" est centree par defaut (translateX(-50%)) sur
+    // sa barre — mais la frise defile horizontalement (overflow-x:auto) et ne
+    // peut pas "scroller avant le debut" : pres du bord gauche ou droit, la
+    // moitie de la bulle qui deborderait hors de la frise est simplement
+    // coupee. On aligne alors la bulle sur le bord plutot que de la centrer.
+    var youAreHereStyle = 'left:50%;transform:translateX(-50%)';
+    if (w <= 3) youAreHereStyle = 'left:0;transform:none';
+    else if (w >= ACTIVE_FORMATION.totalWeeks - 2) youAreHereStyle = 'left:auto;right:0;transform:none';
     barsHtml += '<div class="strip-bar' + (isCur ? ' cur-week' : '') + '"' +
       ' style="height:54px;background:' + clr + ';opacity:' + (w < cur && wt === 'c' ? '.5' : '1') + ';position:relative"' +
       ' title="' + tipTxt + '">' +
-      (isCur ? '<div class="strip-youarehere">Vous êtes ici</div>' : '') +
+      (isCur ? '<div class="strip-youarehere" style="' + youAreHereStyle + '">Vous êtes ici</div>' : '') +
       '</div>';
     labsHtml += '<span' + (isCur ? ' style="color:var(--violet);font-weight:800"' : '') + '>' + w + '</span>';
   }
@@ -2635,6 +3006,15 @@ function renderCours() {
     var link = WWWROOT + '/course/view.php?id=' + c.id;
     var isLast = (c.id === lcId);
     var pctClr = c.pct >= 80 ? 'var(--teal)' : c.pct >= 40 ? 'var(--violet)' : 'var(--orange)';
+    if (c.locked) {
+      return '<div class="cours-card cours-locked" title="Terminez le module précédent pour débloquer celui-ci">' +
+        '<div class="cours-shortname">' + esc(c.shortname) + '</div>' +
+        '<div class="cours-fullname">' + esc(c.fullname) + '</div>' +
+        '<div class="pbar"><i style="width:' + c.pct + '%;background:var(--muted)"></i></div>' +
+        '<div class="cours-pct">' + c.pct + '% complété · ' + c.done_mods + '/' + c.total_mods + ' activités</div>' +
+        '<span class="btn mini cours-lock-btn">🔒 Verrouillé</span>' +
+      '</div>';
+    }
     return '<div class="cours-card" style="cursor:pointer;' + (isLast ? 'border-color:var(--teal);box-shadow:0 0 0 2px var(--teal-t)' : '') + '" data-cid="' + c.id + '" data-pct="' + c.pct + '" onclick="openDetail(+this.dataset.cid,this.querySelector(\'.cours-fullname\').textContent,+this.dataset.pct)">' +
       (isLast ? '<div style="font-size:10px;font-weight:700;color:var(--teal-d);margin-bottom:2px">Dernier cours ouvert</div>' : '') +
       '<div class="cours-shortname">' + esc(c.shortname) + '</div>' +
@@ -2652,6 +3032,14 @@ function renderCours() {
 var _dv = {id:0, name:'', pct:0, sections:[]};
 
 function openDetail(courseId, courseName, coursePct) {
+  // Verrou sequentiel centralise ici (et pas seulement dans le rendu de la
+  // grille "Mes modules") pour couvrir aussi les autres points d'entree
+  // vers un cours (Parcours, reprise rapide, actions en attente...).
+  var courseData = (DATA.courses || []).filter(function(c) { return c.id === courseId; })[0];
+  if (courseData && courseData.locked) {
+    toast('Terminez le module précédent pour débloquer celui-ci');
+    return;
+  }
   _dv.id = courseId; _dv.name = courseName; _dv.pct = coursePct; _dv.sections = [];
   _rendered['detail'] = false;
   var dvBody = document.querySelector('.dv-body');
@@ -2717,18 +3105,32 @@ function dvRenderSections(sections) {
   var html = '';
   sections.forEach(function(s, si) {
     var allDone = s.total > 0 && s.done_n === s.total;
-    html += '<div class="det-sec" id="det-sec-' + si + '">';
+    html += '<div class="det-sec' + (s.locked ? ' det-sec-locked' : '') + '" id="det-sec-' + si + '">';
     html += '<div class="det-sec-head" onclick="dvToggleSec(' + si + ')">';
-    html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + s.num + '</div>';
+    html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + (s.locked ? '🔒' : s.num) + '</div>';
     html += '<div class="det-sec-info"><div class="det-sec-name">' + esc(s.name) + '</div>';
-    if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
+    if (s.locked) html += '<div class="det-sec-count">Terminez la section précédente</div>';
+    else if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
     html += '</div><div class="det-sec-arrow" id="det-arr-' + si + '">›</div></div>';
     html += '<div class="det-mods" id="det-mods-' + si + '">';
     s.mods.forEach(function(m) {
-      var dotCls = m.done ? ' done' : '';
-      html += '<div class="det-mod" id="det-mod-' + m.cmid + '" onclick="dvSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
-      html += '<div class="det-mod-dot' + dotCls + '"></div>';
-      html += '<div class="det-mod-name">' + esc(m.name) + '</div></div>';
+      // "locked" prioritaire sur "done" : un enregistrement d'achevement peut
+      // exister (ex. ancienne donnee, coche manuellement) alors que l'acces
+      // reel est bloque par une restriction — mieux vaut refleter l'acces
+      // reel (uservisible) que l'etat d'achevement brut.
+      var dotCls = m.locked ? ' locked' : (m.done ? ' done' : (m.failed ? ' failed' : ''));
+      var click  = m.locked ? '' : (' onclick="dvSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)"');
+      html += '<div class="det-mod' + (m.locked ? ' det-mod-locked' : '') + '" id="det-mod-' + m.cmid + '"' + click + '>';
+      html += '<div class="det-mod-dot' + dotCls + '">' + (m.locked ? '🔒' : '') + '</div>';
+      html += '<div class="det-mod-name">' + esc(m.name);
+      if (m.locked && m.lockinfo) html += '<div class="det-mod-lockinfo">' + esc(m.lockinfo) + '</div>';
+      else if (m.failed) {
+        html += '<div class="det-mod-lockinfo det-mod-failed-info">Non réussi — à recommencer pour valider</div>';
+        if (m.modtype === 'quiz') {
+          html += '<button type="button" class="lia-remediate-btn" onclick="event.stopPropagation();openLiaRemediation(' + m.cmid + ',\'' + esc(m.name).replace(/'/g,"\\'") + '\')">🔄 Réviser avec Lia</button>';
+        }
+      }
+      html += '</div></div>';
     });
     html += '</div></div>';
   });
@@ -2748,6 +3150,69 @@ function dvUnfoldAll() {
   document.querySelectorAll('.det-sec-arrow').forEach(function(el){ el.classList.add('open'); });
 }
 
+/* ===== Révision IA (Lia) sur un quiz raté — entraînement à côté, ne
+   touche jamais au quiz Moodle réel (pas de note, pas de tentative). ===== */
+function openLiaRemediation(cmid, modname) {
+  document.getElementById('lia-modal-sub').textContent = modname || '';
+  document.getElementById('lia-modal-body').innerHTML =
+    '<div class="lia-loading"><span class="dv-spinner"></span> Lia prépare ta révision…</div>';
+  document.getElementById('lia-modal-bg').classList.add('on');
+  apiPost({ action: 'lia_remediate', cmid: cmid }).then(function(r) {
+    var body = document.getElementById('lia-modal-body');
+    if (!r.ok) {
+      body.innerHTML = '<div class="lia-error">' + esc(r.msg || "Impossible de préparer la révision pour l'instant.") + '</div>';
+      return;
+    }
+    var html = '<div class="lia-explication">' + esc(r.explication || '').replace(/\n/g,'<br>') + '</div>';
+    (r.questions || []).forEach(function(q, qi) {
+      // Securite : si Gemini omet ou malforme bonne_reponse_index, on retombe
+      // sur -1 (aucune reponse ne matchera jamais) plutot que de generer un
+      // onclick avec "undefined" en dur — le clic reste fonctionnel (le choix
+      // choisi est quand meme marque incorrect), juste sans reponse verte.
+      var correctIdx = (typeof q.bonne_reponse_index === 'number' && q.bonne_reponse_index >= 0) ? q.bonne_reponse_index : -1;
+      html += '<div class="lia-q"><div class="lia-q-text">' + (qi+1) + '. ' + esc(q.question) + '</div>';
+      (q.choix || []).forEach(function(choice, ci) {
+        html += '<button type="button" class="lia-choice" onclick="liaCheckAnswer(this,' + qi + ',' + ci + ',' + correctIdx + ')">' + esc(choice) + '</button>';
+      });
+      html += '</div>';
+    });
+    if (!(r.questions || []).length) html += '<p style="color:var(--muted);font-size:13px">Aucune question générée.</p>';
+    // Bouton vers le vrai quiz Moodle — l'entrainement ci-dessus ne compte
+    // pas, seule une nouvelle tentative du quiz reel valide le module (les
+    // quiz formatifs autorisent desormais 3 tentatives). Charge dans l'iframe
+    // habillee via dvSelectMod (meme mecanisme que le clic sur une activite
+    // dans le menu) plutot qu'un lien classique, qui sortirait l'eleve de
+    // l'interface LBA vers l'interface Moodle brute.
+    html += '<button type="button" class="btn primary" style="display:block;width:100%;text-align:center;margin-top:6px" '
+      + 'onclick="liaGoToQuiz(' + cmid + ')">🔄 Refaire le quiz</button>';
+    body.innerHTML = html;
+  }).catch(function() {
+    document.getElementById('lia-modal-body').innerHTML =
+      '<div class="lia-error">Erreur de connexion (ta session a peut-être expiré). Recharge la page et réessaie.</div>';
+  });
+}
+
+function liaCheckAnswer(btn, qi, choiceIdx, correctIdx) {
+  var group = btn.parentElement.querySelectorAll('.lia-choice');
+  group.forEach(function(b, i) {
+    b.disabled = true;
+    if (i === correctIdx) b.classList.add('correct');
+    else if (i === choiceIdx) b.classList.add('incorrect');
+  });
+}
+
+function closeLiaRemediation() {
+  document.getElementById('lia-modal-bg').classList.remove('on');
+}
+
+// Ferme la modale Lia et charge le quiz dans l'iframe habillee (dvSelectMod),
+// pour rester dans l'interface LBA plutot que de naviguer vers Moodle brut.
+function liaGoToQuiz(cmid) {
+  closeLiaRemediation();
+  var el = document.getElementById('det-mod-' + cmid);
+  dvSelectMod(cmid, 'quiz', el);
+}
+
 var _dvIframeCSS = [
   /* header / footer / nav */
   '#page-header,#page-footer,#page-navbar,nav.navbar,.navbar,#masthead,',
@@ -2762,6 +3227,10 @@ var _dvIframeCSS = [
   '#l3m-activity-iframe-container,[class*="coursetoc"],[id*="coursetoc"],',
   /* secondary / tertiary nav, activity prev-next */
   '.secondary-navigation,.tertiary-navigation,.activity-navigation{display:none!important}',
+  /* zone de bloc "Bottom" du theme mb2nl, vide mais rendue en bandeau sombre */
+  '#bottom{display:none!important}',
+  /* tiroir de messagerie natif Moodle, reste visible malgre sa classe "hidden" */
+  '[data-region="right-hand-drawer"]{display:none!important}',
   /* layout */
   'body,#page{background:#F7F6F1!important}',
   '#page-content,#region-main{padding-top:8px!important}',
@@ -2776,8 +3245,21 @@ var _dvIframeCSS = [
   'a{color:#2E9488!important}',
   '.btn-primary,.btn.btn-primary{background:#2E9488!important;border-color:#1C5F58!important}',
   '.btn-secondary,.btn.btn-secondary{background:#fff!important;border-color:#2E9488!important;color:#2E9488!important}',
+  // Sans regles :hover dediees, le survol retombe sur l\'accent orange par
+  // defaut du theme mb2nl (memes regles que _ceIframeCSS cote admin/formateur,
+  // manquantes ici). Catch-all .btn:hover en filet pour les boutons du theme
+  // qui ne portent pas .btn-primary/.btn-secondary.
+  '.btn:hover{background:#1C5F58!important;border-color:#1C5F58!important;color:#fff!important}',
+  '.btn-primary:hover,.btn.btn-primary:hover{background:#1C5F58!important;border-color:#1C5F58!important}',
+  '.btn-secondary:hover,.btn.btn-secondary:hover{background:#E3F2EF!important;border-color:#2E9488!important;color:#1C5F58!important}',
   '.nav-tabs .nav-link.active{border-bottom-color:#2E9488!important;color:#1C5F58!important}',
   '.badge-info,.badge-primary{background:#2E9488!important}',
+  // Numero de question dans un quiz ("Question 1", "Question 2"...) : fond
+  // dore par defaut du theme (accent du theme, sans lien avec la charte LBA)
+  // — retire plutot que remplace par une autre couleur, car le texte herite
+  // deja de l\'override h1/h2/h3 teal fonce plus haut (deviendrait illisible
+  // sur un fond teal).
+  '.que h3.no{background:transparent!important;border-radius:0!important;padding:0!important}',
   '.completioncheckbox input[type=checkbox]:checked{accent-color:#2E9488}',
   '.progress-bar{background:#2E9488!important}',
   '.activity-header{border-bottom:3px solid #2E9488!important}',
@@ -3429,6 +3911,94 @@ function renderParams() {
   else go('accueil');
 })();
 loadHeaderCounts();
+
+/* ===== Géolocalisation (émargement) =====
+   Demande explicite avant de déclencher la popup native du navigateur
+   (plus honnête et moins souvent rejetée par réflexe qu'un
+   navigator.geolocation.getCurrentPosition() surprise au chargement). */
+var GEOLOC_DISMISS_KEY = 'l3m_geoloc_dismiss_until';
+
+function geolocShowBannerIfNotDismissed() {
+  var dismissedUntil = parseInt(localStorage.getItem(GEOLOC_DISMISS_KEY) || '0', 10);
+  if (Date.now() >= dismissedUntil) {
+    document.getElementById('geoloc-banner').style.display = 'flex';
+  }
+}
+
+function geolocMaybeShowBanner() {
+  if (!('geolocation' in navigator)) return;
+
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'geolocation' }).then(function(status) {
+      if (status.state === 'granted') {
+        // Deja autorise (session precedente, meme si "Plus tard" avait ete
+        // clique une fois entretemps) : on capture silencieusement, pas
+        // besoin de redemander ni d'afficher le bandeau — le "Plus tard"
+        // ne doit bloquer que le BANDEAU, jamais une capture deja permise.
+        geolocCapture();
+      } else if (status.state === 'prompt') {
+        geolocShowBannerIfNotDismissed();
+      }
+      // state === 'denied' : on n'insiste pas, le navigateur redemanderait
+      // de toute facon pour rien.
+    }).catch(function() {
+      geolocShowBannerIfNotDismissed();
+    });
+  } else {
+    // Navigateurs sans l'API Permissions (ex. anciens Safari) : on propose,
+    // le "Plus tard" suffit a ne pas re-solliciter en boucle.
+    geolocShowBannerIfNotDismissed();
+  }
+}
+
+// Messages d'erreur explicites (au lieu d'un echec silencieux) : sans ça,
+// impossible de savoir si le blocage vient du navigateur (permission
+// refusee/timeout/GPS indisponible) ou du serveur (voir geolocSend).
+function geolocErrorMessage(err) {
+  if (err && err.code === err.PERMISSION_DENIED) return 'Localisation refusée par le navigateur.';
+  if (err && err.code === err.POSITION_UNAVAILABLE) return 'Position indisponible (GPS/réseau).';
+  if (err && err.code === err.TIMEOUT) return 'Délai dépassé pour obtenir la position.';
+  return 'Localisation impossible.';
+}
+
+function geolocRequest() {
+  document.getElementById('geoloc-banner').style.display = 'none';
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    geolocSend(pos);
+  }, function(err) {
+    toast(geolocErrorMessage(err));
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 });
+}
+
+function geolocCapture() {
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    geolocSend(pos);
+  }, function() {
+    // Capture silencieuse (pas d'action explicite de l'élève ici) : pas de
+    // toast, pour ne pas l'alerter sur un échec qu'il n'a pas provoqué.
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 300000 });
+}
+
+function geolocSend(pos) {
+  apiPost({
+    action: 'save_geoloc',
+    lat: pos.coords.latitude,
+    lng: pos.coords.longitude,
+    accuracy: pos.coords.accuracy || 0,
+  }).then(function(r) {
+    if (r && r.ok) toast('Localisation enregistrée ✓');
+    else toast('Erreur serveur lors de l\'enregistrement de la position.');
+  }).catch(function() {
+    toast('Erreur réseau lors de l\'enregistrement de la position.');
+  });
+}
+
+function geolocDismiss() {
+  document.getElementById('geoloc-banner').style.display = 'none';
+  localStorage.setItem(GEOLOC_DISMISS_KEY, String(Date.now() + 24 * 3600 * 1000));
+}
+
+geolocMaybeShowBanner();
 </script>
 </body>
 </html>

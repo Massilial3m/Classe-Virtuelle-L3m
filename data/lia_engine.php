@@ -89,10 +89,11 @@ function lia_build_people(array $formateurs): array {
     $people = [];
     foreach ($formateurs as $f) {
         $people[] = [
-            'id'   => (int)$f['id'],
-            'nom'  => $f['nom'],
-            'role' => $f['role_label'] ?: $f['nom'],
-            'cap'  => $f['capacity'] ?: 28,
+            'id'      => (int)$f['id'],
+            'nom'     => $f['nom'],
+            'role'    => $f['role_label'] ?: $f['nom'],
+            'cap'     => $f['capacity'] ?: 28,
+            'secteur' => trim($f['secteur'] ?? ''),
         ];
     }
     return $people;
@@ -177,7 +178,9 @@ function lia_earliest_start(array $classes): ?int {
     return lia_parse_startdate($classes[0]['startdate']);
 }
 
-// $classes : liste de ['name','startdate','nb_members'] — startdate stocké dans cohort.idnumber
+// $classes : liste de ['name','startdate','nb_members','secteur'] — startdate
+// stocké dans cohort.idnumber, secteur dans cohort.description (tous deux
+// des champs natifs Moodle réaffectés, aucun n'étant utilisé nativement ici).
 function lia_build_cohorts(array $classes): array {
     $classes = array_values(array_filter($classes, fn($c) => !empty($c['startdate'])));
     if (!$classes) return [];
@@ -189,9 +192,31 @@ function lia_build_cohorts(array $classes): array {
         $sd = lia_parse_startdate($c['startdate']);
         $off = $sd !== null ? max(0, (int)round(($sd - $earliest) / (7 * 86400))) : 0;
         $letter = lia_class_letter($c['name']) ?: mb_substr($c['name'], 0, 1);
-        $cohorts[] = ['L' => $letter, 'off' => $off, 'name' => $c['name'], 'nb_members' => $c['nb_members'] ?? 0];
+        $cohorts[] = [
+            'L' => $letter, 'off' => $off, 'name' => $c['name'], 'nb_members' => $c['nb_members'] ?? 0,
+            'secteur' => trim($c['secteur'] ?? ''),
+        ];
     }
     return $cohorts;
+}
+
+// Filtre $ids pour ne garder QUE les formateurs du même secteur que
+// $secteur (ordre relatif conservé) — quitte à ne renvoyer qu'une seule
+// personne au lieu de deux si un seul formateur de ce secteur existe. On ne
+// propose jamais quelqu'un d'un autre secteur en complément : mieux vaut un
+// seul superviseur du bon secteur que deux dont un qui doit faire le trajet.
+// Si personne ne correspond encore (secteur de classe non renseigné, ou
+// renseigné mais aucun formateur de l'équipe ne le porte pour l'instant), on
+// revient au comportement historique ($ids tel quel) plutôt que de laisser
+// la classe sans aucun superviseur véhicule/salle.
+function lia_prioritize_by_secteur(array $ids, string $secteur, array $secteurById): array {
+    $secteur = mb_strtolower(trim($secteur));
+    if ($secteur === '') return $ids;
+    $match = [];
+    foreach ($ids as $id) {
+        if (mb_strtolower(trim($secteurById[$id] ?? '')) === $secteur) $match[] = $id;
+    }
+    return $match ?: $ids;
 }
 
 function lia_total_weeks(array $cohorts): int {
@@ -318,6 +343,9 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
     $distWeeks = lia_dist_weeks();
     $blocs     = lia_blocs();
 
+    $secteurById = [];
+    foreach ($people as $p) { $secteurById[$p['id']] = $p['secteur'] ?? ''; }
+
     // ── Affectation des blocs de cours + semaines véhicule/salle fixes ──
     foreach ($cohorts as $cohort) {
         $L = $cohort['L']; $off = $cohort['off']; $cum = 0;
@@ -352,22 +380,37 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
 
         $cfg  = lia_week_config();
         $tIds = $prof2p['_T_ids'] ?? [];
+        // Formateurs du même secteur que la classe en tête de pool — à
+        // habilitation égale, on préfère qui n'a pas à se déplacer loin pour
+        // superviser le véhicule/la salle de cette classe.
+        $tIdsCoh = lia_prioritize_by_secteur($tIds, $cohort['secteur'] ?? '', $secteurById);
         foreach ($cfg['veh'] as $r) {
-            foreach (array_slice($tIds, 0, 2) as $tid) {
+            foreach (array_slice($tIdsCoh, 0, 2) as $tid) {
                 $e = new stdClass(); $e->coh = $L; $e->type = 'veh'; $e->label = 'Semaine véhicule'; $e->h = 28; $e->fix = true;
                 $add($tid, $r + $off, $e);
             }
         }
         $bId = $prof2p['B'] ?? null;
+        // Le référent pédagogique porte par défaut les 2 "Regroupement"
+        // nommés — mais s'il n'est pas du secteur de cette classe (et qu'un
+        // secteur est bien renseigné des deux côtés), on ne le fait pas non
+        // plus voyager : ce rôle bascule sur le formateur local qui assure
+        // déjà l'appui véhicule/salle de la classe.
+        $cohSecteur = mb_strtolower(trim($cohort['secteur'] ?? ''));
+        $bSecteur   = mb_strtolower(trim($secteurById[$bId] ?? ''));
+        $bIdForCoh  = $bId;
+        if ($bId && $cohSecteur !== '' && $bSecteur !== '' && $bSecteur !== $cohSecteur && !empty($tIdsCoh)) {
+            $bIdForCoh = $tIdsCoh[0];
+        }
         $salleLabels = ['Regroupement — mises en situation', 'Regroupement — examens blancs'];
         foreach ($cfg['salle'] as $sIdx => $sw) {
             $label = $salleLabels[$sIdx] ?? ('Regroupement — session ' . ($sIdx + 1));
-            if ($bId) {
+            if ($bIdForCoh) {
                 $e = new stdClass(); $e->coh = $L; $e->type = 'salle'; $e->label = $label; $e->h = 20; $e->fix = true;
-                $add($bId, $sw + $off, $e);
+                $add($bIdForCoh, $sw + $off, $e);
             }
-            if (!empty($tIds)) {
-                $tid = $tIds[$sIdx % count($tIds)];
+            if (!empty($tIdsCoh)) {
+                $tid = $tIdsCoh[$sIdx % count($tIdsCoh)];
                 $e = new stdClass(); $e->coh = $L; $e->type = 'salle'; $e->label = 'Regroupement — appui'; $e->h = 15; $e->fix = true;
                 $add($tid, $sw + $off, $e);
             }

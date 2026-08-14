@@ -104,4 +104,29 @@ try {
     }
 } catch (Exception $e) {}
 
+// E-mail de confirmation au visiteur lui-meme (aucun compte Moodle n'existe
+// encore pour lui a ce stade) : on construit un destinataire "factice"
+// minimal, pattern deja utilise dans Moodle core pour emailer une adresse
+// hors compte (voir mod/customcert/classes/service/certificate_email_service.php).
+try {
+    $brand_name = $source === 'saran-conduite' ? 'Saran Conduite' : 'La Bonne Allure';
+    $visitor = new stdClass();
+    $visitor->id        = -1;
+    $visitor->email     = $email;
+    $visitor->firstname = $firstname;
+    $visitor->lastname  = $lastname;
+    $visitor->mailformat = 0; // texte brut
+
+    $noreply = $noreply ?? core_user::get_noreply_user();
+    $subject_visitor = 'Votre demande a bien été reçue — ' . $brand_name;
+    $body_visitor = "Bonjour $firstname,\n\n"
+        . "Nous avons bien reçu votre demande de contact. Un conseiller $brand_name va revenir vers vous très prochainement.\n\n"
+        . "Récapitulatif de votre demande :\n"
+        . "Nom : $firstname $lastname\n"
+        . "Téléphone : $phone\n"
+        . ($situation !== '' ? "Situation : $situation\n" : '')
+        . "\nÀ très bientôt,\nL'équipe $brand_name";
+    email_to_user($visitor, $noreply, $subject_visitor, $body_visitor);
+} catch (Exception $e) {}
+
 echo json_encode(['ok' => true, 'id' => $leadid]);

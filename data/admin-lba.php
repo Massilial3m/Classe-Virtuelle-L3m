@@ -55,6 +55,115 @@ function l3m_admin_owns_user($userid, $admin_client) {
     return l3m_get_user_client((int)$userid) === $admin_client;
 }
 
+// Duplique la mise en page visuelle (bordure + textes ECSR) d'un template
+// mod_customcert existant vers un template cible fraîchement créé (qui n'a
+// encore qu'une page vide auto-générée par customcert_add_instance). Les
+// éléments texte "coursename"/"studentname"/"date" sont des placeholders
+// dynamiques Moodle — aucune donnée propre à un cours n'est copiée.
+function l3m_clone_customcert_template($master_templateid, $target_templateid) {
+    global $DB;
+
+    $master_pages = $DB->get_records('customcert_pages', ['templateid' => $master_templateid], 'sequence ASC');
+    if (!$master_pages) {
+        return;
+    }
+
+    // Retire la page vide auto-créée pour le nouveau template (et ses
+    // éventuels éléments) avant d'y recopier les vraies pages du modèle.
+    $target_pages = $DB->get_records('customcert_pages', ['templateid' => $target_templateid]);
+    foreach ($target_pages as $tp) {
+        $DB->delete_records('customcert_elements', ['pageid' => $tp->id]);
+        $DB->delete_records('customcert_pages', ['id' => $tp->id]);
+    }
+
+    $now = time();
+    foreach ($master_pages as $mp) {
+        $newpage               = clone $mp;
+        unset($newpage->id);
+        $newpage->templateid   = $target_templateid;
+        $newpage->timecreated  = $now;
+        $newpage->timemodified = $now;
+        $newpageid = $DB->insert_record('customcert_pages', $newpage);
+
+        $elements = $DB->get_records('customcert_elements', ['pageid' => $mp->id], 'sequence ASC');
+        foreach ($elements as $el) {
+            $newel               = clone $el;
+            unset($newel->id);
+            $newel->pageid       = $newpageid;
+            $newel->timecreated  = $now;
+            $newel->timemodified = $now;
+            $DB->insert_record('customcert_elements', $newel);
+        }
+    }
+}
+
+// Ajoute automatiquement l'activité "Attestation de cours" (mod_customcert)
+// sur un nouveau module, avec le même gabarit visuel que les 9 modules
+// existants — évite de devoir reconstruire la mise en page à la main à
+// chaque création. La restriction d'accès ("achèvement du quiz final +
+// note ≥ 60%") n'est PAS reproduite automatiquement : le quiz n'existe pas
+// encore à ce stade (le cours vient d'être créé vide), c'est donc à
+// l'admin/formateur de l'ajouter une fois le quiz du module construit,
+// via "Restreindre l'accès" sur l'activité (comme pour les 9 autres
+// modules). Pour la même raison, l'envoi automatique par email est laissé
+// DÉSACTIVÉ à la création (voir emailstudents ci-dessous) : la tâche
+// planifiée Moodle qui envoie l'attestation par mail se base UNIQUEMENT
+// sur cette restriction d'accès pour savoir qui est éligible — sans elle,
+// elle enverrait l'attestation à tous les élèves inscrits dès la première
+// minute (vécu en conditions réelles sur le module M6 avant sa mise en
+// place). L'admin doit donc penser à cocher "Envoyer aux participants"
+// dans les réglages de l'attestation EN MÊME TEMPS qu'il configure la
+// restriction d'accès.
+function l3m_add_default_certificate($course, $master_templateid = 23) {
+    global $DB, $CFG;
+
+    require_once($CFG->dirroot . '/course/modlib.php');
+
+    $moduleid = (int)$DB->get_field('modules', 'id', ['name' => 'customcert']);
+    if (!$moduleid) {
+        return null;
+    }
+    if (!$DB->record_exists('customcert_templates', ['id' => $master_templateid])) {
+        return null; // modèle de référence introuvable, on ne crée rien plutôt que de créer un certificat vide/casse.
+    }
+
+    $last_section = (int)$DB->get_field_sql(
+        'SELECT MAX(section) FROM {course_sections} WHERE course = ?', [$course->id]
+    );
+
+    $mi = new stdClass();
+    $mi->modulename         = 'customcert';
+    $mi->module             = $moduleid;
+    $mi->course             = $course->id;
+    $mi->section            = $last_section;
+    $mi->visible            = 1;
+    $mi->visibleoncoursepage = 1;
+    $mi->name               = 'Attestation de cours';
+    $mi->intro              = '<p>Votre attestation est générée automatiquement à la fin de cette formation.</p>';
+    $mi->introformat        = FORMAT_HTML;
+    $mi->requiredtime       = 0;
+    $mi->verifyany          = 0;
+    $mi->deliveryoption     = 0;
+    $mi->emailstudents      = 0; // activé manuellement par l'admin avec la restriction d'accès, voir commentaire ci-dessus
+    $mi->emailteachers      = 0;
+    $mi->emailothers        = '';
+    $mi->language           = '';
+    $mi->completion         = 2; // COMPLETION_TRACKING_AUTOMATIC, comme les 9 modules existants.
+    $mi->completionview     = 1; // marquée terminée dès consultation (l'achèvement réel reste protégé par la restriction d'accès).
+    $mi->groupmode          = 0;
+    $mi->groupingid         = 0;
+
+    $created = add_moduleinfo($mi, $course);
+
+    $certid = (int)$DB->get_field('course_modules', 'instance', ['id' => $created->coursemodule]);
+    $target_templateid = (int)$DB->get_field('customcert', 'templateid', ['id' => $certid]);
+    if ($certid && $target_templateid) {
+        l3m_clone_customcert_template($master_templateid, $target_templateid);
+    }
+
+    return $created->coursemodule;
+}
+
 // Liste des "formations" inscriptibles pour le client de l'admin — utilisée
 // par convert_lead_to_student : un lead s'inscrit sur UNE formation entière,
 // jamais sur un seul module. Côté LBA, une formation = une catégorie racine
@@ -233,6 +342,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'delete_class') {
+        $cohortid = required_param('cohortid', PARAM_INT);
+        $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
+        $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
+        if (!$target_cohort || $reserved) {
+            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+        }
+        // Meme regle d'appartenance que le listing "Classes & eleves" (voir
+        // plus bas) : au moins un membre du client de l'admin, ou tag direct
+        // du component pour une classe fraichement creee sans eleve encore.
+        $owns = $DB->record_exists_sql(
+            "SELECT 1 FROM {cohort_members} cm WHERE cm.cohortid = :cid AND " . l3m_admin_client_sql('cm.userid', $admin_client, $saran_cohort_id),
+            ['cid' => $cohortid]
+        ) || $target_cohort->component === 'l3m_client_' . $admin_client;
+        if (!$owns) {
+            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+        }
+        // Ne supprime que le regroupement (cohorte) : les comptes eleves et
+        // leurs inscriptions aux cours ne sont pas touches, ils sont juste
+        // retires de cette classe.
+        cohort_delete_cohort($target_cohort);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    if ($action === 'save_class_secteur') {
+        $cohortid = required_param('cohortid', PARAM_INT);
+        $secteur  = optional_param('secteur', '', PARAM_TEXT);
+        $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
+        $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
+        if (!$target_cohort || $reserved) {
+            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+        }
+        $owns = $DB->record_exists_sql(
+            "SELECT 1 FROM {cohort_members} cm WHERE cm.cohortid = :cid AND " . l3m_admin_client_sql('cm.userid', $admin_client, $saran_cohort_id),
+            ['cid' => $cohortid]
+        ) || $target_cohort->component === 'l3m_client_' . $admin_client;
+        if (!$owns) {
+            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+        }
+        // Champ natif "description" de la cohorte, inutilisé jusqu'ici —
+        // réutilisé pour stocker le secteur géographique de la classe (même
+        // pattern que "startdate" réutilise déjà idnumber). Lia s'en sert pour
+        // prioriser un formateur du même secteur sur les séances véhicule/salle.
+        $DB->set_field('cohort', 'description', trim($secteur), ['id' => $cohortid]);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     if ($action === 'add_to_class') {
         $cohortid = required_param('cohortid', PARAM_INT);
         $userid   = required_param('userid', PARAM_INT);
@@ -337,13 +495,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!l3m_admin_owns_user($uid, $admin_client)) {
             echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
         }
-        $role_label = optional_param('role_label', '', PARAM_TEXT);
-        $type       = optional_param('type', 'salarie', PARAM_ALPHA);
-        $client     = optional_param('client', '', PARAM_ALPHA);
+        $role_label  = optional_param('role_label', '', PARAM_TEXT);
+        $type        = optional_param('type', 'salarie', PARAM_ALPHA);
+        $client      = optional_param('client', '', PARAM_ALPHA);
+        $secteur     = optional_param('secteur', '', PARAM_TEXT);
+        $is_ped_lead = (bool)optional_param('is_ped_lead', 0, PARAM_INT);
         $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
         if (!isset($meta[$uid])) $meta[$uid] = [];
-        $meta[$uid]['role_label'] = trim($role_label);
-        $meta[$uid]['type']       = $type;
+        $meta[$uid]['role_label']  = trim($role_label);
+        $meta[$uid]['type']        = $type;
+        $meta[$uid]['secteur']     = trim($secteur);
+        $meta[$uid]['is_ped_lead'] = $is_ped_lead;
         set_config('formateur_meta', json_encode($meta), 'local_l3madmin');
         // Changer le rattachement client d'un compte existant est une action
         // inter-tenant sensible : réservée aux vrais administrateurs du site,
@@ -477,9 +639,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $firstname  = required_param('firstname', PARAM_TEXT);
         $lastname   = required_param('lastname', PARAM_TEXT);
         $email      = required_param('email', PARAM_EMAIL);
-        $role_label = optional_param('role_label', '', PARAM_TEXT);
-        $type       = optional_param('type', 'salarie', PARAM_ALPHA);
-        $client     = optional_param('client', 'lba', PARAM_ALPHA);
+        $role_label  = optional_param('role_label', '', PARAM_TEXT);
+        $type        = optional_param('type', 'salarie', PARAM_ALPHA);
+        $client      = optional_param('client', 'lba', PARAM_ALPHA);
+        $secteur     = optional_param('secteur', '', PARAM_TEXT);
+        $is_ped_lead = (bool)optional_param('is_ped_lead', 0, PARAM_INT);
         // Un manager (non site admin) ne peut créer un intervenant que dans
         // son propre client — seul un vrai administrateur du site peut choisir.
         if (!is_siteadmin()) { $client = $admin_client; }
@@ -506,11 +670,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $inst = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $course->id]);
             if ($inst) try { $enrol_ai->enrol_user($inst, $uid, $teacher_roleid_ai); } catch (Exception $e) {}
         }
-        if ($role_label || $type) {
+        if ($role_label || $type || $secteur || $is_ped_lead) {
             $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
             if (!isset($meta[$uid])) $meta[$uid] = [];
-            $meta[$uid]['role_label'] = trim($role_label);
-            $meta[$uid]['type']       = $type;
+            $meta[$uid]['role_label']  = trim($role_label);
+            $meta[$uid]['type']        = $type;
+            $meta[$uid]['secteur']     = trim($secteur);
+            $meta[$uid]['is_ped_lead'] = $is_ped_lead;
             set_config('formateur_meta', json_encode($meta), 'local_l3madmin');
         }
         l3m_set_user_client($uid, $client === 'saran' ? 'saran' : 'lba');
@@ -574,35 +740,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header('Content-Type: application/json');
         try {
             $courseid     = required_param('courseid', PARAM_INT);
+            $formateurid  = required_param('formateurid', PARAM_INT);
             $timestart    = required_param('timestart', PARAM_INT);
             $duration_min = optional_param('duration_min', 120, PARAM_INT);
             $event_name   = required_param('event_name', PARAM_TEXT);
             if (!$DB->record_exists('course', ['id' => $courseid])) {
                 echo json_encode(['ok' => false, 'msg' => 'Module introuvable']); exit;
             }
+            if (!l3m_admin_owns_user($formateurid, $admin_client)) {
+                echo json_encode(['ok' => false, 'msg' => 'Formateur introuvable']); exit;
+            }
+            // Passe par l'API calendrier officielle (calendar_event::create)
+            // plutot qu'un insert direct en base : un insert direct ne
+            // declenche pas l'evenement Moodle core\event\calendar_event_created,
+            // dont depend la notification WhatsApp existante ("Nouvelle
+            // session planifiee") — avec un insert direct, aucune
+            // notification n'est jamais envoyee.
+            require_once($CFG->dirroot . '/calendar/lib.php');
             $ev = new stdClass();
-            $ev->name          = clean_param(trim($event_name), PARAM_TEXT);
-            $ev->description   = '';
-            $ev->format        = FORMAT_HTML;
-            $ev->categoryid    = 0;
-            $ev->courseid      = $courseid;
-            $ev->groupid       = 0;
-            $ev->userid        = $USER->id;
-            $ev->repeatid      = 0;
-            $ev->component     = '';
-            $ev->modulename    = '';
-            $ev->instance      = 0;
-            $ev->eventtype     = 'course';
-            $ev->type          = 0;
-            $ev->timestart     = (int)$timestart;
-            $ev->timeduration  = (int)$duration_min * 60;
-            $ev->timesort      = (int)$timestart;
-            $ev->visible       = 1;
-            $ev->uuid          = '';
-            $ev->sequence      = 1;
-            $ev->timemodified  = time();
-            $ev_id = $DB->insert_record('event', $ev);
-            echo json_encode(['ok' => true, 'id' => (int)$ev_id]);
+            $ev->name         = clean_param(trim($event_name), PARAM_TEXT);
+            $ev->description  = '';
+            $ev->format       = FORMAT_HTML;
+            $ev->courseid     = $courseid;
+            $ev->groupid      = 0;
+            // "userid" sert ici a identifier le formateur auquel la seance
+            // est destinee (pas l'admin qui l'a creee) : les evenements de
+            // type 'course' sont de toute facon visibles par tous les
+            // inscrits cote Moodle natif, ce champ n'a donc pas d'usage
+            // natif conflictuel a ce niveau — on le reutilise pour que
+            // espace-formateur.php puisse filtrer "Mes seances" par
+            // formateur precis (utile en cas de delegation Lia entre
+            // plusieurs formateurs d'un meme module).
+            $ev->userid       = $formateurid;
+            $ev->eventtype    = 'course';
+            $ev->timestart    = (int)$timestart;
+            $ev->timeduration = (int)$duration_min * 60;
+            $ev->visible      = 1;
+            $created = calendar_event::create($ev, false);
+            if (!$created) {
+                echo json_encode(['ok' => false, 'msg' => 'Création impossible']); exit;
+            }
+            echo json_encode(['ok' => true, 'id' => (int)$created->id]);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
         }
@@ -613,7 +791,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header('Content-Type: application/json');
         try {
             $ev_id = required_param('event_id', PARAM_INT);
-            $DB->delete_records('event', ['id' => $ev_id, 'eventtype' => 'course']);
+            // Meme raison que create_session : passer par l'API calendrier
+            // (pas un delete_records direct) pour que la notification
+            // WhatsApp "Session annulée" (core\event\calendar_event_deleted)
+            // se declenche correctement.
+            require_once($CFG->dirroot . '/calendar/lib.php');
+            if (!$DB->record_exists('event', ['id' => $ev_id, 'eventtype' => 'course'])) {
+                echo json_encode(['ok' => false, 'msg' => 'Séance introuvable']); exit;
+            }
+            calendar_event::load($ev_id)->delete();
             echo json_encode(['ok' => true]);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
@@ -772,8 +958,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['ok' => false, 'msg' => 'Lead introuvable']);
             exit;
         }
+        // Un lead deja inscrit ("Inscrire") a un vrai compte Moodle + des
+        // inscriptions aux cours (suspendues tant que l'acces n'est pas
+        // active). Ces deux choses sont independantes de la fiche lead
+        // elle-meme : la supprimer seule laissait le compte/les inscriptions
+        // intacts, d'ou l'incoherence avec "En attente d'activation" qui se
+        // base sur les inscriptions reelles, pas sur la table des leads. On
+        // supprime donc aussi le compte associe (retrouve par e-mail, comme
+        // le fait deja activate_student_access dans l'autre sens).
+        $account_deleted = false;
+        if (in_array($lead->status, ['inscrit', 'inscrit_attente'], true) && !empty($lead->email)) {
+            $linked_user = $DB->get_record('user', ['email' => $lead->email, 'deleted' => 0]);
+            if ($linked_user && l3m_admin_owns_user($linked_user->id, $admin_client)) {
+                require_once($CFG->dirroot . '/user/lib.php');
+                $ues_del = $DB->get_records_sql(
+                    "SELECT ue.id, e.id as enrolid
+                     FROM {user_enrolments} ue
+                     JOIN {enrol} e ON e.id = ue.enrolid AND e.enrol = 'manual'
+                     WHERE ue.userid = :uid",
+                    ['uid' => $linked_user->id]
+                );
+                $plugin_del = enrol_get_plugin('manual');
+                foreach ($ues_del as $ue_del) {
+                    $inst_del = $DB->get_record('enrol', ['id' => $ue_del->enrolid]);
+                    if ($inst_del) { try { $plugin_del->unenrol_user($inst_del, $linked_user->id); } catch (Exception $e) {} }
+                }
+                delete_user($linked_user);
+                $account_deleted = true;
+            }
+        }
         $DB->delete_records('l3m_leads', ['id' => $leadid]);
-        echo json_encode(['ok' => true]);
+        echo json_encode(['ok' => true, 'account_deleted' => $account_deleted]);
         exit;
     }
 
@@ -1095,8 +1310,104 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         try {
             $course = create_course($data);
+            // Inscrit automatiquement tous les formateurs deja existants du
+            // meme client comme enseignant sur ce nouveau module — sinon
+            // personne n'y a acces cote "Mes modules" (symetrique de
+            // add_intervenant, qui inscrit un formateur neuf sur tous les
+            // modules deja existants ; sans ce miroir, un module cree APRES
+            // un formateur ne lui serait jamais assigne).
+            $teacher_roleid_cc = (int)$DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
+            if ($teacher_roleid_cc) {
+                $client_op_cc = $is_saran_cat ? '=' : '!=';
+                $formateur_ids = $DB->get_fieldset_sql(
+                    "SELECT DISTINCT ra.userid
+                     FROM {role_assignments} ra
+                     JOIN {context} cx ON cx.id = ra.contextid AND cx.contextlevel = 50
+                     JOIN {course} c2 ON c2.id = cx.instanceid AND c2.id > 1 AND c2.category $client_op_cc :satcat2
+                     WHERE ra.roleid = :rid",
+                    ['satcat2' => $saran_category_id, 'rid' => $teacher_roleid_cc]
+                );
+                $enrol_cc = enrol_get_plugin('manual');
+                $inst_cc  = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $course->id]);
+                if ($inst_cc) {
+                    foreach ($formateur_ids as $fid) {
+                        try { $enrol_cc->enrol_user($inst_cc, (int)$fid, $teacher_roleid_cc); } catch (Exception $e) {}
+                    }
+                }
+            }
+            // Inscrit automatiquement tous les eleves deja inscrits dans un
+            // AUTRE cours de la MEME formation (arbre de categories, ex.
+            // "ECSR" = CCP1+CCP2+Prep) sur ce nouveau module — sans cela un
+            // module ajoute apres la conversion d'un lead en eleve ne lui
+            // serait jamais accessible (l'inscription faite a la conversion
+            // du lead, cf l3m_get_formations_list, est un instantane des
+            // cours existants a ce moment-la). Scope volontairement plus
+            // etroit que pour les formateurs (toute la formation, pas tout
+            // le client) : un meme client peut heberger plusieurs formations
+            // distinctes (ex. LBA a aussi "Formation Test MAE").
+            $student_roleid_cc = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+            if ($student_roleid_cc) {
+                $root_cat_cc = $categoryid;
+                while (true) {
+                    $parent_cc = (int)$DB->get_field('course_categories', 'parent', ['id' => $root_cat_cc]);
+                    if ($parent_cc <= 0) break;
+                    $root_cat_cc = $parent_cc;
+                }
+                $formation_cats_cc = [$root_cat_cc];
+                $queue_cc = [$root_cat_cc];
+                while ($queue_cc) {
+                    $cur_cc = array_shift($queue_cc);
+                    $children_cc = $DB->get_fieldset_select(
+                        'course_categories', 'id', 'parent = :p', ['p' => $cur_cc]
+                    );
+                    foreach ($children_cc as $ch) { $formation_cats_cc[] = (int)$ch; $queue_cc[] = (int)$ch; }
+                }
+                list($catsql_cc, $catparams_cc) = $DB->get_in_or_equal($formation_cats_cc, SQL_PARAMS_NAMED, 'fcat');
+                $eleve_ids = $DB->get_fieldset_sql(
+                    "SELECT DISTINCT ra.userid
+                     FROM {role_assignments} ra
+                     JOIN {context} cx ON cx.id = ra.contextid AND cx.contextlevel = 50
+                     JOIN {course} c2 ON c2.id = cx.instanceid AND c2.id > 1 AND c2.category $catsql_cc
+                     WHERE ra.roleid = :rid",
+                    array_merge($catparams_cc, ['rid' => $student_roleid_cc])
+                );
+                $enrol_st_cc = enrol_get_plugin('manual');
+                $inst_st_cc  = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $course->id]);
+                if ($inst_st_cc) {
+                    foreach ($eleve_ids as $eid) {
+                        try { $enrol_st_cc->enrol_user($inst_st_cc, (int)$eid, $student_roleid_cc); } catch (Exception $e) {}
+                    }
+                }
+            }
+            // Attestation de cours pré-brandée automatiquement (voir
+            // l3m_add_default_certificate) — non bloquant si ça échoue,
+            // le module reste utilisable sans attestation.
+            try { l3m_add_default_certificate($course); } catch (Exception $e) {}
             echo json_encode(['ok' => true, 'id' => (int)$course->id,
                 'fullname' => $course->fullname, 'shortname' => $course->shortname]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    if ($action === 'delete_course') {
+        require_once($CFG->dirroot . '/course/lib.php');
+        $courseid = required_param('courseid', PARAM_INT);
+        $course_dc = $DB->get_record('course', ['id' => $courseid]);
+        if (!$course_dc || $courseid <= 1) {
+            echo json_encode(['ok' => false, 'msg' => 'Module introuvable']); exit;
+        }
+        // Meme critere d'appartenance client que le listing "Modules" et
+        // create_course (categorie Saran vs tout le reste) — jamais
+        // supprimer un module d'un autre client que celui de l'admin connecte.
+        $course_is_saran_dc = ((int)$course_dc->category === $saran_category_id);
+        if (($admin_client === 'saran') !== $course_is_saran_dc) {
+            echo json_encode(['ok' => false, 'msg' => 'Module introuvable']); exit;
+        }
+        try {
+            delete_course($course_dc, false); // false : pas d'affichage de progression (contexte AJAX)
+            echo json_encode(['ok' => true]);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
         }
@@ -1423,7 +1734,7 @@ function l3m_client_of($client_by_user, $userid) {
 
 // Cartes classes avec progression moyenne
 $cohorts_raw = $DB->get_records_sql(
-    "SELECT c.id, c.name, c.idnumber as startdate,
+    "SELECT c.id, c.name, c.idnumber as startdate, c.description as secteur,
        COUNT(DISTINCT cm.userid) as nb_members
      FROM {cohort} c
      LEFT JOIN {cohort_members} cm ON cm.cohortid = c.id
@@ -1432,10 +1743,25 @@ $cohorts_raw = $DB->get_records_sql(
          SELECT 1 FROM {cohort_members} cm2
          WHERE cm2.cohortid = c.id AND " . l3m_admin_client_sql('cm2.userid', $admin_client, $saran_cohort_id) . "
        ) OR c.component = :compclient)
-     GROUP BY c.id, c.name, c.idnumber
+     GROUP BY c.id, c.name, c.idnumber, c.description
      ORDER BY c.idnumber ASC, c.name ASC",
     ['clba' => L3M_CLIENT_COHORT_IDNUMBER_LBA, 'csaran' => L3M_CLIENT_COHORT_IDNUMBER_SARAN, 'compclient' => 'l3m_client_' . $admin_client]
 );
+
+// Secteur élève déduit automatiquement de sa géolocalisation d'émargement
+// (aucune saisie admin) : on garde la ville de son entrée la plus récente,
+// débarrassée du code postal ("44000 Nantes" -> "Nantes"), pour pouvoir se
+// comparer textuellement au secteur (libre) des formateurs/classes.
+$student_secteur_by_uid = [];
+foreach (json_decode(get_config('local_l3madmin', 'student_geoloc') ?: '[]', true) ?: [] as $g) {
+    $uid = (int)($g['userid'] ?? 0);
+    $ts  = (int)($g['timecreated'] ?? 0);
+    if (!$uid || empty($g['address'])) continue;
+    if (isset($student_secteur_by_uid[$uid]) && $student_secteur_by_uid[$uid]['ts'] >= $ts) continue;
+    $ville = trim(preg_replace('/^\d{4,5}\s+/', '', $g['address']));
+    if ($ville === '') continue;
+    $student_secteur_by_uid[$uid] = ['ts' => $ts, 'secteur' => $ville];
+}
 
 $classes = [];
 foreach ($cohorts_raw as $coh) {
@@ -1446,15 +1772,40 @@ foreach ($cohorts_raw as $coh) {
     }
     $avg_prog = count($progs) > 0 ? round(array_sum($progs) / count($progs)) : 0;
     $unsigned_count = count(array_filter($member_uids, fn($uid) => !in_array($uid, $signed_ids)));
+
+    // Secteur suggéré : ville la plus fréquente parmi les élèves de la
+    // classe ayant une géoloc connue — proposé seulement si personne n'a
+    // déjà saisi un secteur manuel pour cette classe.
+    $secteur_suggested = ''; $secteur_suggested_count = 0; $secteur_known_count = 0;
+    $secteur_manual = trim(strip_tags($coh->secteur ?? ''));
+    if ($secteur_manual === '') {
+        $tally = [];
+        foreach ($member_uids as $uid) {
+            if (!isset($student_secteur_by_uid[$uid])) continue;
+            $secteur_known_count++;
+            $v = $student_secteur_by_uid[$uid]['secteur'];
+            $tally[$v] = ($tally[$v] ?? 0) + 1;
+        }
+        if ($tally) {
+            arsort($tally);
+            $secteur_suggested = array_key_first($tally);
+            $secteur_suggested_count = $tally[$secteur_suggested];
+        }
+    }
+
     $classes[] = [
-        'id'             => (int)$coh->id,
-        'name'           => $coh->name,
-        'startdate'      => $coh->startdate ?? '',
-        'nb_members'     => (int)$coh->nb_members,
-        'avg_prog'       => $avg_prog,
-        'member_ids'     => $member_uids,
-        'sub_groups'     => max(0, (int)ceil((int)$coh->nb_members / 3)),
-        'unsigned_count' => $unsigned_count,
+        'id'                       => (int)$coh->id,
+        'name'                     => $coh->name,
+        'startdate'                => $coh->startdate ?? '',
+        'secteur'                  => $secteur_manual,
+        'secteur_suggested'        => $secteur_suggested,
+        'secteur_suggested_count'  => $secteur_suggested_count,
+        'secteur_known_count'      => $secteur_known_count,
+        'nb_members'               => (int)$coh->nb_members,
+        'avg_prog'                 => $avg_prog,
+        'member_ids'               => $member_uids,
+        'sub_groups'               => max(0, (int)ceil((int)$coh->nb_members / 3)),
+        'unsigned_count'           => $unsigned_count,
     ];
 }
 $kpi_groups = count($classes);
@@ -1632,6 +1983,8 @@ foreach ($formateurs_raw as $f) {
         'type'       => $f_type,
         'client'     => l3m_client_of($client_by_user, $f->id),
         'habs'       => $fmeta['habs'] ?? [],
+        'secteur'    => $fmeta['secteur'] ?? '',
+        'is_ped_lead' => !empty($fmeta['is_ped_lead']),
         'events'     => $upcoming_events_map[(int)$f->id] ?? [],
         'classes'    => array_values($classes_per_teacher[(int)$f->id] ?? []),
     ];
@@ -2167,12 +2520,21 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .view-coh-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }
 .view-coh-header h1 { margin:0; }
 .class-cards { display:flex; flex-wrap:wrap; justify-content:center; gap:12px; margin-bottom:20px; margin-top:16px; }
-.class-card { flex:0 0 300px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; cursor:pointer; transition:transform .12s,box-shadow .12s; }
+.class-card { position:relative; flex:0 0 300px; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; cursor:pointer; transition:transform .12s,box-shadow .12s; }
 .class-card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(36,51,60,.1); }
 .class-card.active { border-color:var(--teal); box-shadow:0 0 0 2px var(--teal-t); }
+.cc-delete { position:absolute; top:10px; right:10px; width:24px; height:24px; border:none; border-radius:50%; background:transparent; color:var(--muted); font-size:14px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+.cc-delete:hover { background:var(--red-t,#FDE8E8); color:var(--red); }
 .cc-name { font-size:16px; font-weight:800; color:var(--ink); margin-bottom:3px; }
 .cc-week { font-size:12px; color:var(--muted); margin-bottom:12px; }
 .cc-meta { font-size:12px; color:var(--muted); line-height:1.7; margin-bottom:10px; }
+.cc-secteur { font-size:11.5px; color:var(--teal); font-weight:600; margin-bottom:10px; cursor:pointer; display:inline-block; }
+.cc-secteur:hover { text-decoration:underline; }
+.cc-secteur-empty { color:var(--muted); font-weight:500; font-style:italic; }
+.cc-secteur-sugg { font-size:11.5px; color:var(--muted); margin:-4px 0 10px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.cc-secteur-sugg strong { color:var(--ink); }
+.cc-secteur-valid { border:1px solid var(--teal); background:transparent; color:var(--teal); border-radius:99px; font-size:10.5px; font-weight:700; padding:2px 9px; cursor:pointer; }
+.cc-secteur-valid:hover { background:var(--teal); color:#fff; }
 .cc-phase { color:var(--violet-d); font-weight:600; }
 .cc-prog-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; }
 .cc-prog-label { font-size:11.5px; color:var(--muted); }
@@ -2316,7 +2678,10 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 @media(max-width:760px){
   /* Meme correctif que cote formateur/eleve : liste des sections + apercu
      de l'activite en plein ecran avec bouton retour sur mobile. */
-  .course-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  /* width:100% (pas 100vw) : voir commentaire equivalent sur .msg-modal
+     plus bas — 100vw inclut la barre de defilement et pousse le bord droit
+     hors zone visible. */
+  .course-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
   .dv-left { width:100%; }
   .dv-right { display:none; }
   .course-modal-body.mob-content .dv-left { display:none; }
@@ -2398,7 +2763,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 /* ── Messagerie (modal, vraie messagerie Moodle en arrière-plan) ── */
 .msg-modal { width:960px; max-width:96vw; height:94vh; max-height:920px; display:flex; flex-direction:row; overflow:hidden; padding:0; position:relative; }
-.msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:none; background:rgba(255,255,255,.92); width:28px; height:28px; border-radius:50%; font-size:13px; color:var(--muted); cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.14); line-height:1; }
+.msg-modal-close { position:absolute; top:12px; right:12px; z-index:5; border:none; background:var(--ink); width:32px; height:32px; border-radius:50%; font-size:15px; color:#fff; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
 .msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
@@ -2465,13 +2830,19 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 @media(max-width:760px){
   /* Meme correctif que la messagerie eleve : liste de contacts (308px
      fixes) qui ecrase la conversation sur mobile. Plein ecran + retour. */
-  .msg-modal { width:100vw; max-width:100vw; height:100vh; max-height:100vh; border-radius:0; }
+  /* width:100% (pas 100vw) : 100vw inclut la largeur de la barre de
+     defilement verticale du document sous-jacent, ce qui pousse le bord
+     droit de la modale (et le bouton fermer positionne "right:12px" par
+     rapport a elle) hors de la zone visible sans scroll horizontal — bug
+     confirme par rendu reel, pas visible en lisant le CSS seul. */
+  .msg-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
   .msg-list-pane { width:100%; flex:1 1 auto; }
   .msg-thread-pane { display:none; }
   .msg-modal.msg-mob-thread .msg-list-pane { display:none; }
   .msg-modal.msg-mob-thread .msg-thread-pane { display:flex; }
   .msg-thread-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; background:var(--card); }
   .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
+  .msg-modal-close { top:max(12px, env(safe-area-inset-top)) !important; }
 }
 </style>
 </head>
@@ -3006,6 +3377,17 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <input type="text" id="fmod-role" placeholder="ex : Référent pédagogique, Formateur &amp; moniteur">
     </div>
     <div class="fld">
+      <label>Secteur</label>
+      <input type="text" id="fmod-secteur" placeholder="ex : Nord, Sud, Centre-ville…">
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Lia priorise un formateur du même secteur que la classe pour les séances véhicule/salle.</p>
+    </div>
+    <div class="fld" id="fmod-pedlead-field">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;font-size:13px;color:var(--ink)">
+        <input type="checkbox" id="fmod-pedlead"> Responsable pédagogique
+      </label>
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Accède à une section "Pédagogie" dans son espace formateur pour gérer l'accès des autres intervenants aux modules.</p>
+    </div>
+    <div class="fld">
       <label>Statut contractuel</label>
       <div style="display:flex;gap:18px;margin-top:5px">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--ink);text-transform:none;letter-spacing:0;font-weight:500">
@@ -3078,7 +3460,6 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="msg-thread-body" id="msg-thread-body"></div>
       <div class="msg-thread-empty" id="msg-thread-empty">Sélectionnez une conversation</div>
       <div class="msg-thread-input" id="msg-thread-input" style="display:none">
-        <button type="button" class="msg-attach" title="Joindre">&#128206;</button>
         <input type="text" id="msg-input-text" placeholder="Écrire un message..." onkeydown="if(event.key==='Enter'){msgSendCurrent();}">
         <button type="button" class="msg-send-btn" onclick="msgSendCurrent()" aria-label="Envoyer">&#10148;</button>
       </div>
@@ -3606,7 +3987,8 @@ function openAddFormateur() {
   document.getElementById('fmod-new-fields').style.display = '';
   document.getElementById('fmod-habs-section').style.display = 'none';
   document.getElementById('fmod-client-field').style.display = 'none';
-  ['fmod-firstname','fmod-lastname','fmod-email','fmod-role'].forEach(id => document.getElementById(id).value = '');
+  ['fmod-firstname','fmod-lastname','fmod-email','fmod-role','fmod-secteur'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('fmod-pedlead').checked = false;
   document.querySelector('input[name="fmod-type"][value="salarie"]').checked = true;
   document.querySelector('input[name="fmod-client"][value="' + (DATA.admin_client || 'lba') + '"]').checked = true;
   document.getElementById('modal-form-bg').classList.add('open');
@@ -3621,8 +4003,10 @@ function editFormateur(uid) {
   document.getElementById('fmod-sub').textContent   = f.email;
   document.getElementById('fmod-new-fields').style.display  = 'none';
   document.getElementById('fmod-habs-section').style.display = '';
-  document.getElementById('fmod-client-field').style.display = DATA.is_siteadmin ? '' : 'none';
+  document.getElementById('fmod-client-field').style.display = 'none';
   document.getElementById('fmod-role').value = f.role_label || '';
+  document.getElementById('fmod-secteur').value = f.secteur || '';
+  document.getElementById('fmod-pedlead').checked = !!f.is_ped_lead;
   var typeEl = document.querySelector('input[name="fmod-type"][value="' + (f.type || 'salarie') + '"]');
   if (typeEl) typeEl.checked = true;
   var clientEl = document.querySelector('input[name="fmod-client"][value="' + (f.client || 'lba') + '"]');
@@ -3684,6 +4068,8 @@ function closeFormModal() {
 
 function saveFormateurModal() {
   var role_label = document.getElementById('fmod-role').value.trim();
+  var secteur = document.getElementById('fmod-secteur').value.trim();
+  var is_ped_lead = document.getElementById('fmod-pedlead').checked;
   var typeEl = document.querySelector('input[name="fmod-type"]:checked');
   var type = typeEl ? typeEl.value : 'salarie';
   var clientEl = document.querySelector('input[name="fmod-client"]:checked');
@@ -3696,7 +4082,7 @@ function saveFormateurModal() {
     var ln = document.getElementById('fmod-lastname').value.trim();
     var em = document.getElementById('fmod-email').value.trim();
     if (!fn || !ln || !em) { btn.disabled = false; btn.textContent = 'Enregistrer'; toast('Tous les champs sont requis'); return; }
-    apiPost({ action: 'add_intervenant', firstname: fn, lastname: ln, email: em, role_label: role_label, type: type, client: client })
+    apiPost({ action: 'add_intervenant', firstname: fn, lastname: ln, email: em, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0 })
       .then(r => {
         btn.disabled = false; btn.textContent = 'Enregistrer';
         if (r.ok) { toast('Intervenant ajouté — rechargement…', 3000); setTimeout(() => location.reload(), 2500); }
@@ -3704,13 +4090,13 @@ function saveFormateurModal() {
       })
       .catch(() => { btn.disabled = false; btn.textContent = 'Enregistrer'; toast('Erreur réseau'); });
   } else {
-    apiPost({ action: 'save_formateur_meta', userid: _fmodUid, role_label: role_label, type: type, client: client })
+    apiPost({ action: 'save_formateur_meta', userid: _fmodUid, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0 })
       .then(r => {
         btn.disabled = false; btn.textContent = 'Enregistrer';
         if (r.ok) {
           var f = DATA.formateurs.find(x => x.id === _fmodUid);
           if (f) {
-            f.role_label = role_label; f.type = type; f.client = client;
+            f.role_label = role_label; f.type = type; f.client = client; f.secteur = secteur; f.is_ped_lead = is_ped_lead;
             f.capacity = type === 'vacataire' ? 20 : 28;
             f.pct_load = f.capacity > 0 ? Math.min(100, Math.round((f.hours_avg || 0) / f.capacity * 100)) : 0;
           }
@@ -3867,7 +4253,7 @@ function simulerClasse() {
     btn.disabled = true; btn.textContent = 'Création…';
     apiPost({action: 'create_class', name: 'Classe ' + nextL, startdate: isoDate}).then(function(r) {
       if (!r.ok) { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur : ' + (r.msg || '?')); return; }
-      DATA.classes.push({ id: r.id, name: r.name, startdate: isoDate, nb_members: 0, avg_prog: 0, member_ids: [] });
+      DATA.classes.push({ id: r.id, name: r.name, startdate: isoDate, secteur: '', nb_members: 0, avg_prog: 0, member_ids: [] });
       renderCoh();
       return apiPost({action: 'preview_lia_plan'}).then(function(d) {
         btn.disabled = false; btn.textContent = 'Créer la classe';
@@ -4076,15 +4462,68 @@ function renderClassCards() {
       : '';
 
     return '<div class="class-card' + (activeFilter === String(c.id) ? ' active' : '') + '" id="cc-' + c.id + '" onclick="filterByClass(' + c.id + ')">' +
+      '<button type="button" class="cc-delete" title="Supprimer la classe" onclick="event.stopPropagation();deleteClass(' + c.id + ',\'' + esc(c.name).replace(/'/g,"\\'") + '\',' + c.nb_members + ')">&#10005;</button>' +
       '<div class="cc-name">' + esc(c.name) + '</div>' +
       (weekLabel ? '<div class="cc-week">' + weekLabel + '</div>' : '') +
       '<div class="cc-meta">' + metaHtml + '</div>' +
+      '<div class="cc-secteur" onclick="event.stopPropagation();editClassSecteur(' + c.id + ')">📍 ' +
+        (c.secteur ? esc(c.secteur) : '<span class="cc-secteur-empty">Définir un secteur</span>') + '</div>' +
+      (!c.secteur && c.secteur_suggested ? (
+        '<div class="cc-secteur-sugg">' +
+          '💡 Lia suggère <strong>' + esc(c.secteur_suggested) + '</strong> (' + c.secteur_suggested_count + '/' + c.secteur_known_count + ' élèves localisés) ' +
+          '<button type="button" class="cc-secteur-valid" onclick="event.stopPropagation();validateSuggestedSecteur(' + c.id + ',\'' + esc(c.secteur_suggested).replace(/'/g,"\\'") + '\')">Valider</button>' +
+        '</div>'
+      ) : '') +
       '<div class="cc-prog-row"><span class="cc-prog-label">Progression e-learning</span><span class="cc-prog-pct">' + c.avg_prog + ' %</span></div>' +
       '<div class="prog-wrap"><div class="prog-fill" style="width:' + c.avg_prog + '%"></div></div>' +
       milestonesHtml + alertHtml +
       '</div>';
   });
   el.innerHTML = cards.join('');
+}
+
+function editClassSecteur(cohortId) {
+  var c = DATA.classes.find(function(x) { return x.id === cohortId; });
+  if (!c) return;
+  var val = prompt('Secteur de la classe « ' + c.name + ' » (ex : Nord, Sud, Centre-ville…) — Lia priorise un formateur du même secteur pour les séances véhicule/salle :', c.secteur || c.secteur_suggested || '');
+  if (val === null) return;
+  saveClassSecteur(cohortId, val.trim());
+}
+
+// Accepte en un clic le secteur suggéré par Lia (déduit de la géoloc des
+// élèves de la classe) sans repasser par la saisie manuelle.
+function validateSuggestedSecteur(cohortId, secteur) {
+  saveClassSecteur(cohortId, secteur);
+}
+
+function saveClassSecteur(cohortId, val) {
+  apiPost({ action: 'save_class_secteur', cohortid: cohortId, secteur: val })
+    .then(function(r) {
+      if (r.ok) {
+        var c = DATA.classes.find(function(x) { return x.id === cohortId; });
+        if (c) c.secteur = val;
+        renderClasses(); toast('Secteur enregistré');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
+
+function deleteClass(cohortId, name, nbMembers) {
+  var msg = nbMembers > 0
+    ? '⚠ Supprimer la classe « ' + name + '  » (' + nbMembers + ' élève' + (nbMembers > 1 ? 's' : '') + ') ? Les élèves ne seront pas supprimés, seulement retirés de cette classe.'
+    : 'Supprimer la classe « ' + name + ' » ?';
+  if (!confirm(msg)) return;
+  apiPost({ action: 'delete_class', cohortid: cohortId }).then(function(d) {
+    if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
+    DATA.classes = DATA.classes.filter(function(c){ return c.id !== cohortId; });
+    DATA.students.forEach(function(s){ if (s.cohort_id === cohortId) { s.cohort_id = null; s.cohort_name = null; } });
+    if (activeFilter === String(cohortId)) activeFilter = 'all';
+    renderClassCards();
+    renderFilterBtns();
+    renderStudentsTable();
+    updateClassCards();
+    toast('Classe supprimée.');
+  }).catch(function() { toast('Erreur réseau.'); });
 }
 
 function renderFilterBtns() {
@@ -4220,6 +4659,15 @@ function openSeanceModal(letter, week, off) {
     return '<option value="' + c.id + '">' + esc(c.shortname) + ' – ' + esc(c.fullname) + '</option>';
   }).join('');
 
+  // Populate formateur selector (DATA.lia_people, meme source que la vue
+  // Intervenants) : necessaire pour que la seance n'apparaisse que dans
+  // "Mes seances" du formateur choisi, pas de tous les enseignants du
+  // module (utile notamment en cas de delegation Lia).
+  var selF = document.getElementById('ms-formateur');
+  selF.innerHTML = (DATA.lia_people || []).map(function(p) {
+    return '<option value="' + p.id + '">' + esc(p.nom) + '</option>';
+  }).join('');
+
   // Default name
   var rel = week - off;
   document.getElementById('ms-name').value = 'Séance ECSR · Classe ' + letter + ' · S' + week + (rel > 0 ? ' (rel. ' + rel + ')' : '');
@@ -4232,13 +4680,14 @@ function closeSeanceModal() {
 }
 
 function saveSeance() {
-  var courseid = parseInt(document.getElementById('ms-course').value);
-  var name     = document.getElementById('ms-name').value.trim();
-  var dayOff   = parseInt(document.getElementById('ms-day').value); // 0=Mon
-  var timeStr  = document.getElementById('ms-time').value; // "14:00"
-  var durMin   = parseInt(document.getElementById('ms-dur').value);
+  var courseid    = parseInt(document.getElementById('ms-course').value);
+  var formateurid = parseInt(document.getElementById('ms-formateur').value);
+  var name        = document.getElementById('ms-name').value.trim();
+  var dayOff      = parseInt(document.getElementById('ms-day').value); // 0=Mon
+  var timeStr     = document.getElementById('ms-time').value; // "14:00"
+  var durMin      = parseInt(document.getElementById('ms-dur').value);
 
-  if (!courseid || !name || !timeStr) { alert('Remplir tous les champs.'); return; }
+  if (!courseid || !formateurid || !name || !timeStr) { alert('Remplir tous les champs.'); return; }
 
   // Compute timestart Unix
   var mondayDate = new Date(LIA_START.getTime() + (_seanceWeek - 1) * 7 * 86400 * 1000);
@@ -4250,7 +4699,7 @@ function saveSeance() {
   var btn = document.querySelector('#modal-seance .btn.primary');
   btn.disabled = true; btn.textContent = 'Création...';
 
-  apiPost({ action: 'create_session', courseid: courseid, timestart: timestart,
+  apiPost({ action: 'create_session', courseid: courseid, formateurid: formateurid, timestart: timestart,
             duration_min: durMin, event_name: name })
     .then(function(d) {
       if (d.ok) {
@@ -4482,7 +4931,7 @@ function saveClass() {
     .then(r => {
       btn.disabled = false; btn.textContent = 'Créer la classe';
       if (r.ok) {
-        DATA.classes.push({ id: r.id, name: r.name, startdate: date, nb_members: 0, avg_prog: 0, member_ids: [] });
+        DATA.classes.push({ id: r.id, name: r.name, startdate: date, secteur: '', nb_members: 0, avg_prog: 0, member_ids: [] });
         closeModal();
         renderCoh();
         toast('Classe « ' + r.name + ' » créée');
@@ -4505,9 +4954,28 @@ function renderCoursAdmin() {
       '<td class="mm-short">' + esc(c.shortname) + '</td>' +
       '<td class="mm-cat">' + esc(c.category_name) + '</td>' +
       '<td>' + (c.visible ? '<span class="chip c-ok">Visible</span>' : '<span class="chip c-ko">Masqué</span>') + '</td>' +
-      '<td><button class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Voir</button></td>' +
+      '<td style="display:flex;gap:6px">' +
+        '<button class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Voir</button>' +
+        '<button class="btn mini ghost" style="color:var(--red,#C0392B);border-color:var(--red,#C0392B)" onclick="deleteModule(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Supprimer</button>' +
+      '</td>' +
     '</tr>';
   }).join('');
+}
+
+function deleteModule(courseId, fullname) {
+  var msg = '⚠ Supprimer définitivement le module « ' + fullname + ' » ? Cette action est irréversible : ' +
+    'tout le contenu (sections, activités, quiz, attestation), les inscriptions des formateurs et élèves, ' +
+    'ainsi que leurs notes et leur progression sur ce module seront perdus.';
+  if (!confirm(msg)) return;
+  apiPost({ action: 'delete_course', courseid: courseId })
+    .then(function(r) {
+      if (r.ok) {
+        DATA.courses_full = DATA.courses_full.filter(function(c) { return c.id !== courseId; });
+        renderCoursAdmin();
+        toast('Module supprimé');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
 }
 
 /* ===== VIEWER DE COURS INTÉGRÉ (TOC + iframe) — même composant que
@@ -4525,6 +4993,19 @@ var _ceIframeCSS = [
   '#page-header,#main-header,.navbar,#page-footer,.main-footer,footer,',
   '.breadcrumb-nav,.breadcrumb,#nav-drawer,.drawer-toggle,.skiplinks,',
   '.secondary-navigation,.tertiary-navigation,.activity-navigation,.section-navigation,#fsmod-header { display:none !important; }',
+  // Zone "blocs visibles seulement par les admins" du theme mb2nl
+  // (theme/mb2nl/layout/parts/region_adminblock.php, #adminblock-region) :
+  // s'affiche automatiquement en mode edition pour les comptes ayant
+  // moodle/site:config — pur bruit technique ici, aucun bloc n'y est place.
+  '#adminblock-region { display:none !important; }',
+  // Zone de bloc "Bottom" du theme mb2nl (theme/mb2nl/layout/parts/region_bottom.php) :
+  // s'affiche meme vide, en style sombre (classe "dark1") — bandeau noir
+  // sans contenu ni utilite ici.
+  '#bottom { display:none !important; }',
+  // Tiroir de messagerie natif Moodle (data-region="right-hand-drawer") :
+  // reste visible malgre sa classe "hidden" (conflit de priorite avec le
+  // theme) — sans interet ici puisque la plateforme a sa propre messagerie.
+  '[data-region="right-hand-drawer"] { display:none !important; }',
   // Menu ⋮ d'une activite : ne garder que Parametres / Cacher / Dupliquer /
   // Supprimer. Classes stables de Moodle (course/lib.php,
   // course_get_cm_edit_actions + controlmenu.php), pas du texte devine.
@@ -4534,7 +5015,7 @@ var _ceIframeCSS = [
   // Fenetre "Ajouter une activite ou ressource" : ne garder que les types
   // reellement utilises sur cette plateforme (attribut data-internal stable,
   // voir course/format/templates/local/activitychooser/item.mustache).
-  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="forum"]):not([data-internal="assign"]) { display:none !important; }',
+  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="assign"]) { display:none !important; }',
   // Formulaire "Parametres" d'une activite : ne garder que Apparence /
   // Reglages courants / Conditions d'achevement + la case notification.
   // Retire Restriction d'acces / Tags / Competences (noms d'elements de
@@ -4549,14 +5030,21 @@ var _ceIframeCSS = [
   // Options de relecture / Apparence / Restrictions sur les tentatives /
   // Safe Exam Browser (noms d'elements stables, voir mod/quiz/mod_form.php
   // et mod/quiz/accessrule/seb/classes/settings_provider.php).
-  '#id_layouthdrcontainer,#id_interactionhdrcontainer,#id_reviewoptionshdrcontainer,',
-  '#id_displaycontainer,#id_securitycontainer,#id_sebcontainer,',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
+  // Scope a "body.path-mod-quiz" : #id_displaycontainer est un id generique
+  // (mod_form.php, header "display") reutilise TEL QUEL par d'autres
+  // modules (ex. Fichier/resource, meme id) — sans ce filtre, masquer
+  // "Apparence" sur un Quiz masquait aussi le meme bloc chez un Fichier,
+  // empechant de choisir "Integrer" pour afficher la description avant le
+  // PDF (elle etait injoignable, cachee par erreur).
+  'body.path-mod-quiz #id_layouthdrcontainer,body.path-mod-quiz #id_interactionhdrcontainer,',
+  'body.path-mod-quiz #id_reviewoptionshdrcontainer,body.path-mod-quiz #id_displaycontainer,',
+  'body.path-mod-quiz #id_securitycontainer,body.path-mod-quiz #id_sebcontainer,',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
+  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
   '{ display:none !important; }',
   // Formulaire "Parametres" d'un Devoir : ne garder que Instructions de
   // l'activite / Fichiers supplementaires / Types de remise / Note.
@@ -4570,6 +5058,22 @@ var _ceIframeCSS = [
   '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_groupsubmissionsettingscontainer"]),',
   '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_notificationscontainer"])',
   '{ display:none !important; }',
+  // Formulaire "Question a choix multiple" (question/type/multichoice/
+  // edit_multichoice_form.php) : ne garder que Nom / Texte de la question /
+  // Note par defaut / Une seule reponse / les Choix (texte + note de chaque
+  // reponse). Retire Feedback general, Melanger les reponses, Numeroter les
+  // choix, Identifiant de la question, Feedback combine, Reglages tentatives
+  // multiples (penalite + indices), Tags, et le commentaire de chaque
+  // reponse (formateur remplit juste question + reponses, sans ces options
+  // techniques secondaires).
+  '#id_combinedfeedbackhdr,#id_multitriesheader,#id_tagsheader,#id_coursetagsheader,',
+  '#fitem_id_generalfeedback,#fitem_id_answernumbering,',
+  '#fitem_id_idnumber,[id^="fitem_id_feedback_"]',
+  '{ display:none !important; }',
+  // "Melanger les reponses" : cette ligne (advcheckbox) n'a pas d'id propre
+  // sur son conteneur (particularite de ce template Moodle) — on cible via
+  // :has() la ligne qui contient la case a cocher #id_shuffleanswers.
+  '.row.fitem:has(#id_shuffleanswers) { display:none !important; }',
   'html, body { background:#fff !important; }',
   '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
   '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
@@ -4593,6 +5097,18 @@ var _ceIframeCSS = [
   '::-webkit-scrollbar-track { background: #f0f0f0; }',
   '::-webkit-scrollbar-thumb { background: #2E9488 !important; border-radius: 6px; }',
   '::-webkit-scrollbar-thumb:hover { background: #1C5F58 !important; }',
+  // Titre et description d'une activite (ex. nom du fichier + texte saisi
+  // en "Apparence > Afficher la description") : par defaut en noir brut,
+  // sans rapport avec la charte du reste de l'interface. On applique la
+  // couleur/typo d'accent automatiquement, sans que l'admin ait besoin
+  // d'ajouter du style HTML lui-meme a chaque fois.
+  '.activity-name { color:#1C5F58 !important; font-weight:800 !important; }',
+  '.activity-description { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
+  '.activity-description strong { color:#1C5F58 !important; }',
+  // Contenu d'une Page/Etiquette : classe differente (.box.generalbox, pas
+  // .activity-description), meme logique de style automatique.
+  '.box.generalbox { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
+  '.box.generalbox strong { color:#1C5F58 !important; }',
   // Boutons "+" d\'insertion d\'activite entre deux activites existantes —
   // tres discrets par defaut (icone minuscule dans un dropdown Bootstrap).
   // Cible specifiquement id="dropdownMenuButton-XXX" (le declencheur du menu
@@ -4671,6 +5187,7 @@ function ceInjectCSS(iframe, css) {
     ceHideChooserAllTab(doc);
     ceHideRepoTabs(doc);
     ceFixGraderPlaceholder(doc);
+    ceAutoFixVideoUrl(doc);
     ceWatchInplaceEdits(doc);
     // Une suppression d'activite passe par une page de confirmation qui
     // recharge entierement l'iframe (pas une simple mise a jour AJAX) : ni
@@ -4742,6 +5259,10 @@ function ceHideChooserAllTab(doc) {
     nav.querySelectorAll('.nav-link').forEach(function(el) {
       if (el.textContent.trim() === 'Tout') el.style.display = 'none';
     });
+    // "URL" -> "Vidéo" : c'est l'option utilisee ici pour ajouter un lien
+    // video (Glowbl, YouTube...), le nom natif Moodle preterait a confusion.
+    var urlTile = doc.querySelector('[data-region="chooser-option-container"][data-internal="url"] .optionname');
+    if (urlTile && urlTile.textContent.trim() === 'URL') urlTile.textContent = 'Vidéo';
   };
   hide();
   try {
@@ -4760,6 +5281,32 @@ function ceHideChooserAllTab(doc) {
 // donc on filtre par le nom affiche (.fp-repo-name) — meme principe que
 // ceHideChooserAllTab. Ne garde que "Deposer un fichier" et "Fichiers
 // recents", les deux seuls cas d'usage reels d'un formateur/admin.
+// Sur le formulaire d'une activite "Video" (mod_url), convertit
+// automatiquement un lien YouTube colle sous sa forme normale
+// (youtube.com/watch?v=ID ou youtu.be/ID) vers le format "embed/ID" —
+// le seul que YouTube autorise a etre affiche dans une iframe (sa page de
+// visionnage normale bloque explicitement le cadrage). Bascule aussi
+// l'affichage sur "Integrer" pour que la video se lance directement au
+// clic, sans que l'admin ait besoin de connaitre cette distinction.
+function ceAutoFixVideoUrl(doc) {
+  var urlInput = doc.getElementById('id_externalurl');
+  if (!urlInput || urlInput._l3mVideoWatched) return;
+  urlInput._l3mVideoWatched = true;
+  var convert = function() {
+    var val = urlInput.value.trim();
+    if (/youtube\.com\/embed\//.test(val)) return; // deja au bon format
+    var m = val.match(/[?&]v=([a-zA-Z0-9_-]{6,})/) || val.match(/youtu\.be\/([a-zA-Z0-9_-]{6,})/);
+    if (!m) return;
+    urlInput.value = 'https://www.youtube.com/embed/' + m[1];
+    var disp = doc.getElementById('id_display');
+    if (disp) disp.value = '1'; // RESOURCELIB_DISPLAY_EMBED
+  };
+  urlInput.addEventListener('blur', convert);
+  urlInput.addEventListener('change', convert);
+  var form = urlInput.closest('form');
+  if (form) form.addEventListener('submit', convert, true);
+}
+
 function ceHideRepoTabs(doc) {
   if (doc._l3mRepoObserver) return;
   var HIDE = ['Banque de contenus', 'Fichiers disponibles', 'Téléchargement d’URL', 'Fichiers personnels', 'Wikimedia'];
@@ -4817,6 +5364,15 @@ function ceSelectMod(cmid, modtype, el) {
 
 function ceRenderSections(sections) {
   var box = document.getElementById('ce-sections');
+  // Retient quelles sections etaient depliees avant de reconstruire tout le
+  // HTML : ceRefreshSections() est appelee tres souvent (a chaque
+  // navigation dans l'iframe, y compris ouvrir une simple activite), et
+  // sans ça chaque rafraichissement refermait toutes les sections — d'ou
+  // l'impression que cliquer sur "›" "ne marche pas".
+  var openIdx = {};
+  document.querySelectorAll('#ce-sections .det-mods.open').forEach(function(el){
+    openIdx[el.id.replace('ce-mods-', '')] = true;
+  });
   if (!sections || !sections.length) {
     box.innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Aucun contenu.</p>';
     return;
@@ -4824,13 +5380,14 @@ function ceRenderSections(sections) {
   var html = '';
   sections.forEach(function(s, si) {
     var allDone = s.total > 0 && s.done_n === s.total;
+    var isOpen  = !!openIdx[si];
     html += '<div class="det-sec" id="ce-sec-' + si + '">';
     html += '<div class="det-sec-head" onclick="ceToggleSec(' + si + ')">';
     html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + s.num + '</div>';
     html += '<div class="det-sec-info"><div class="det-sec-name">' + esc(s.name) + '</div>';
     if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
-    html += '</div><div class="det-sec-arrow" id="ce-arr-' + si + '">›</div></div>';
-    html += '<div class="det-mods" id="ce-mods-' + si + '">';
+    html += '</div><div class="det-sec-arrow' + (isOpen ? ' open' : '') + '" id="ce-arr-' + si + '">›</div></div>';
+    html += '<div class="det-mods' + (isOpen ? ' open' : '') + '" id="ce-mods-' + si + '">';
     s.mods.forEach(function(m) {
       var dotCls = m.done ? ' done' : '';
       html += '<div class="det-mod" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
@@ -5038,14 +5595,22 @@ function ceWatchInplaceEdits(doc) {
   // cours. On observe donc aussi directement les changements de structure du
   // contenu du cours, avec un debounce pour ne rafraichir qu'une fois
   // l'action terminee (evite les rafales pendant l'animation Moodle).
+  // Important : seulement si .course-content existe reellement (page de
+  // cours) — sans ce garde-fou, le repli sur doc.body observait N'IMPORTE
+  // QUELLE page chargee dans l'iframe (un PDF, un quiz...), et les
+  // manipulations DOM internes d'un visualiseur (ex. PDF.js qui redessine
+  // ses pages en continu) declenchaient des rafraichissements en boucle —
+  // d'ou les ralentissements/l'affichage instable observes sur un PDF.
   try {
-    var content = doc.querySelector('.course-content') || doc.body;
-    var timer = null;
-    var obs = new MutationObserver(function() {
-      clearTimeout(timer);
-      timer = setTimeout(refresh, 500);
-    });
-    obs.observe(content, {childList: true, subtree: true});
+    var content = doc.querySelector('.course-content');
+    if (content) {
+      var timer = null;
+      var obs = new MutationObserver(function() {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 500);
+      });
+      obs.observe(content, {childList: true, subtree: true});
+    }
   } catch (e) {}
   // "Supprimer" (.editing_delete) ouvre une boite de dialogue de
   // confirmation Moodle avant d'agir : on ne peut pas savoir a l'avance
@@ -5252,12 +5817,20 @@ function renderLeads() {
 }
 
 function deleteLead(leadid) {
-  if (!confirm('Supprimer définitivement ce lead ?')) return;
+  var lead = (_leadsData || []).find(function(l){ return l.id === leadid; });
+  var msg = 'Supprimer définitivement ce lead ?';
+  if (lead && (lead.status === 'inscrit' || lead.status === 'inscrit_attente')) {
+    msg = lead.status === 'inscrit'
+      ? '⚠ Ce lead correspond à un compte élève ACTIF (avec accès aux cours). Supprimer le lead supprimera aussi définitivement ce compte et ses inscriptions. Continuer ?'
+      : 'Ce lead a déjà un compte créé (en attente d\'activation). Supprimer le lead supprimera aussi ce compte et ses inscriptions. Continuer ?';
+  }
+  if (!confirm(msg)) return;
   apiPost({action: 'delete_lead', leadid: leadid}).then(function(d) {
     if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
     refreshLeadsNavBadge();
     renderLeads();
-    toast('Lead supprimé.');
+    renderPendingActivations();
+    toast(d.account_deleted ? 'Lead et compte associé supprimés.' : 'Lead supprimé.');
   }).catch(function() { toast('Erreur réseau.'); });
 }
 
@@ -5543,6 +6116,8 @@ document.addEventListener('DOMContentLoaded', function() {
     <p class="sub" id="ms-sub"></p>
     <label>Module</label>
     <select id="ms-course"></select>
+    <label>Formateur</label>
+    <select id="ms-formateur"></select>
     <label>Nom de la séance</label>
     <input type="text" id="ms-name" placeholder="Séance ECSR · Classe A · S12">
     <div style="display:flex;gap:12px">

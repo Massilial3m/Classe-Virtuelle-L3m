@@ -128,6 +128,14 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
     // La localisation utilise la base MaxMind si configuree
     // (Site admin > Serveur > Emplacement IP), sinon reste vide.
     require_once($GLOBALS['CFG']->dirroot . '/iplookup/lib.php');
+
+    // Positions GPS envoyees par le navigateur de l'eleve (avec son
+    // autorisation explicite, voir espace-eleve.php / geolocRequest()) —
+    // bien plus precises qu'une estimation par IP quand elles existent.
+    $geoloc_all  = json_decode(get_config('local_l3madmin', 'student_geoloc') ?: '[]', true) ?: [];
+    $geoloc_user = array_values(array_filter($geoloc_all, fn($g) => (int)($g['userid'] ?? 0) === (int)$userid));
+    $geoloc_buffer = 30 * 60; // tolerance autour du debut/fin de session
+
     foreach ($sessions as &$s) {
         $names = [];
         foreach (array_keys($s['courses']) as $cid) {
@@ -138,13 +146,29 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
         $m = floor(($s['secs'] % 3600) / 60);
         $s['duration_fmt'] = $h > 0 ? $h . 'h ' . $m . 'min' : ($m > 0 ? $m . ' min' : '< 1 min');
         $s['session_ref']  = 'SESS-' . strtoupper(substr(md5($userid . '_' . $s['start']), 0, 8));
-        $s['location']     = '';
+        $s['location']        = '';
+        $s['location_source'] = '';
         if (!empty($s['ip'])) {
             try {
                 $s['location'] = l3m_geoip_region($s['ip']);
+                $s['location_source'] = $s['location'] ? 'ip' : '';
             } catch (Exception $e) {
                 // Base GeoIP absente ou illisible : on laisse la localisation vide.
             }
+        }
+        // Une position GPS captee pendant (ou juste avant/apres) cette
+        // session prime sur l'estimation IP : on garde la plus proche du
+        // debut de session parmi celles dans la fenetre.
+        $best = null; $best_diff = null;
+        foreach ($geoloc_user as $g) {
+            $gt = (int)($g['timecreated'] ?? 0);
+            if ($gt < $s['start'] - $geoloc_buffer || $gt > $s['end'] + $geoloc_buffer) continue;
+            $diff = abs($gt - $s['start']);
+            if ($best === null || $diff < $best_diff) { $best = $g; $best_diff = $diff; }
+        }
+        if ($best && !empty($best['address'])) {
+            $s['location'] = $best['address'];
+            $s['location_source'] = 'gps';
         }
     }
     return $sessions;
@@ -194,7 +218,7 @@ if ($export === 'pdf' && $student) {
             'timestamp'    => $s['start'],
             'heure_exacte' => date('d/m/Y H:i:s', $s['start']),
             'session_ref'  => $s['session_ref'],
-            'location'     => $s['location'] ?: '—',
+            'location'     => $s['location'] ? $s['location'] . ($s['location_source'] === 'gps' ? ' (GPS)' : ' (IP)') : '—',
         ];
     }
     $filename = 'emargement_' . $student->lastname . '_' . date('Y-m-d');
@@ -228,7 +252,7 @@ if ($export === 'excel' && $student) {
             'timestamp'    => $s['start'],
             'heure_exacte' => date('d/m/Y H:i:s', $s['start']),
             'session_ref'  => $s['session_ref'],
-            'location'     => $s['location'] ?: '—',
+            'location'     => $s['location'] ? $s['location'] . ($s['location_source'] === 'gps' ? ' (GPS)' : ' (IP)') : '—',
         ];
     }
     $filename = 'emargement_' . $student->lastname . '_' . date('Y-m-d');
@@ -387,7 +411,12 @@ a{color:#2E9488;}
             <td class="time-cell" style="font-size:11px;"><?php echo date('d/m/Y H:i:s', $s['start']); ?></td>
             <td class="mod-cell" style="font-size:11px;"><?php echo $s['start']; ?></td>
             <td class="mod-cell" style="font-size:11px;"><?php echo htmlspecialchars($s['ip'] ?: '—'); ?></td>
-            <td class="mod-cell" style="font-size:11px;"><?php echo htmlspecialchars($s['location'] ?: '—'); ?></td>
+            <td class="mod-cell" style="font-size:11px;">
+              <?php if ($s['location_source'] === 'gps'): ?>
+                <span title="Position GPS (autorisée par l'élève)">📍</span>
+              <?php endif; ?>
+              <?php echo htmlspecialchars($s['location'] ?: '—'); ?>
+            </td>
             <td class="mod-cell" style="font-size:10.5px;"><?php echo htmlspecialchars($s['session_ref']); ?></td>
           </tr>
         <?php endforeach; ?>
@@ -399,17 +428,6 @@ a{color:#2E9488;}
       </tbody>
     </table>
     </div>
-    <p class="em-generated" style="margin-top:6px">
-      <?php if (empty($CFG->geoip2file) || !file_exists($CFG->geoip2file)): ?>
-        ⚠️ Localisation non disponible : base de géolocalisation IP non configurée (Site administration → Serveur → Emplacement IP).
-      <?php else: ?>
-        La « Localisation » indique la région/le pays de rattachement de l'adresse IP (niveau fiable) — pas la ville, qui n'est pas garantie par la géolocalisation IP.
-      <?php endif; ?>
-      L'« ID de session » est une référence générée par la plateforme (pas un identifiant de session Moodle — Moodle ne conserve pas d'historique des sessions passées).
-    </p>
-    <p class="em-generated">
-      Généré automatiquement le <?php echo date('d/m/Y à H:i'); ?> depuis les logs de connexion de la plateforme <?php echo $CFG->wwwroot; ?>
-    </p>
     <?php endif; ?>
   <?php endif; ?>
 </div>
