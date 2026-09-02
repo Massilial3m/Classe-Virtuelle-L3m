@@ -650,17 +650,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $teacher_roleid_ai = (int)$DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
         $existing = $DB->get_record('user', ['email' => $email, 'deleted' => 0]);
         if ($existing) {
+            // Sécurité : ne jamais réutiliser silencieusement le compte d'un
+            // élève existant pour en faire aussi un formateur — le rôle
+            // formateur contourne les restrictions d'accès (verrouillage de
+            // modules, attestations...), donc cumuler les deux rôles sur le
+            // même compte casse le parcours de cet élève. On bloque avec un
+            // message explicite plutôt que de laisser faire.
+            $student_roleid_ai = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+            $existing_is_student = $student_roleid_ai && $DB->record_exists(
+                'role_assignments', ['userid' => $existing->id, 'roleid' => $student_roleid_ai]
+            );
+            if ($existing_is_student) {
+                echo json_encode(['ok' => false,
+                    'msg' => 'Cette adresse e-mail est déjà associée à un compte élève. Veuillez utiliser une autre adresse e-mail.']);
+                exit;
+            }
             $uid = (int)$existing->id;
+            $username_ai = $existing->username;
+            $plainpw_ai  = null; // compte deja existant : mot de passe inchange, rien a afficher.
         } else {
             $base_un = clean_param(strtolower($firstname) . '.' . strtolower($lastname), PARAM_USERNAME);
             $username = $base_un; $counter = 1;
             while ($DB->record_exists('user', ['username' => $username])) { $username = $base_un . $counter++; }
+            // Mot de passe unique genere aleatoirement (respecte la politique du
+            // site — longueur/majuscule/minuscule/chiffre/caractere special),
+            // au lieu d'un mot de passe fixe identique pour tous les
+            // intervenants (risque : la fuite d'un seul compte compromettrait
+            // tous les autres crees de la meme facon). Affiche une seule fois
+            // a l'admin juste apres la creation, jamais stocke en clair ensuite.
+            $plainpw_ai = generate_password(12);
             $u = new stdClass();
             $u->username   = $username; $u->firstname = trim($firstname); $u->lastname = trim($lastname);
-            $u->email      = $email;   $u->password   = 'Formateur@L3m2026!';
+            $u->email      = $email;   $u->password   = $plainpw_ai;
             $u->confirmed  = 1; $u->auth = 'manual'; $u->mnethostid = $CFG->mnet_localhost_id;
             $u->lang = 'fr'; $u->country = 'FR';
             $uid = user_create_user($u, true, false);
+            $username_ai = $username;
         }
         // N'inscrire ce formateur que sur les cours de SON client (jamais sur
         // ceux de l'autre client, même si un site admin l'a créé pour l'autre).
@@ -680,7 +705,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             set_config('formateur_meta', json_encode($meta), 'local_l3madmin');
         }
         l3m_set_user_client($uid, $client === 'saran' ? 'saran' : 'lba');
-        echo json_encode(['ok' => true, 'userid' => $uid]);
+        echo json_encode(['ok' => true, 'userid' => $uid, 'username' => $username_ai, 'password' => $plainpw_ai]);
         exit;
     }
 
@@ -1045,7 +1070,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $base_un = clean_param(strtolower($firstname) . '.' . strtolower($lastname), PARAM_USERNAME);
             $username_cv = $base_un; $counter_cv = 1;
             while ($DB->record_exists('user', ['username' => $username_cv])) { $username_cv = $base_un . $counter_cv++; }
-            $temp_password = 'Eleve@' . random_int(1000, 9999) . 'L3m!';
+            // Mot de passe unique genere aleatoirement (respecte la politique
+            // du site), meme logique que pour les intervenants — au lieu d'un
+            // format quasi-fixe ("Eleve@XXXXL3m!", seulement 9000 valeurs
+            // possibles pour la partie variable).
+            $temp_password = generate_password(12);
             $u_cv = new stdClass();
             $u_cv->username   = $username_cv; $u_cv->firstname = $firstname; $u_cv->lastname = $lastname;
             $u_cv->email      = $email;       $u_cv->password  = $temp_password;
@@ -1411,6 +1440,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
         }
+        exit;
+    }
+
+    if ($action === 'delete_intervenant') {
+        require_once($CFG->dirroot . '/user/lib.php');
+        $uid_di = required_param('userid', PARAM_INT);
+        $user_di = $DB->get_record('user', ['id' => $uid_di, 'deleted' => 0], '*', IGNORE_MISSING);
+        // Jamais supprimer un compte hors de son propre client, ni un admin
+        // du site (meme critere de proprietaire que le reste de l'admin).
+        if (!$user_di || !l3m_admin_owns_user($uid_di, $admin_client) || is_siteadmin($uid_di)) {
+            echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
+        }
+        try {
+            delete_user($user_di); // API Moodle officielle : anonymise + marque deleted=1, gere les inscriptions/roles.
+            $meta_di = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+            unset($meta_di[$uid_di]);
+            set_config('formateur_meta', json_encode($meta_di), 'local_l3madmin');
+            echo json_encode(['ok' => true]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    if ($action === 'delete_student') {
+        require_once($CFG->dirroot . '/user/lib.php');
+        $uid_ds = required_param('userid', PARAM_INT);
+        $user_ds = $DB->get_record('user', ['id' => $uid_ds, 'deleted' => 0], '*', IGNORE_MISSING);
+        $student_roleid_ds = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        $is_student_ds = $student_roleid_ds && $DB->record_exists('role_assignments', ['userid' => $uid_ds, 'roleid' => $student_roleid_ds]);
+        // Jamais supprimer un compte hors de son propre client, ni un admin
+        // du site, ni un compte qui n'a meme pas le role eleve.
+        if (!$user_ds || !$is_student_ds || !l3m_admin_owns_user($uid_ds, $admin_client) || is_siteadmin($uid_ds)) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+        try {
+            delete_user($user_ds); // API Moodle officielle : anonymise + marque deleted=1, gere les inscriptions/roles.
+            // Nettoie les cles de config ad-hoc propres a cet eleve (memes
+            // cles que le reste de admin-lba.php/espace-formateur.php).
+            $notes_ds = json_decode(get_config('local_l3madmin', 'student_notes') ?: '{}', true) ?: [];
+            unset($notes_ds[$uid_ds]);
+            set_config('student_notes', json_encode($notes_ds), 'local_l3madmin');
+
+            $signed_ds = array_map('intval', json_decode(get_config('local_l3madmin', 'reglement_signed') ?: '[]', true) ?: []);
+            $signed_ds = array_values(array_filter($signed_ds, fn($x) => $x !== $uid_ds));
+            set_config('reglement_signed', json_encode($signed_ds), 'local_l3madmin');
+
+            $geoloc_ds = json_decode(get_config('local_l3madmin', 'student_geoloc') ?: '{}', true) ?: [];
+            unset($geoloc_ds[$uid_ds]);
+            set_config('student_geoloc', json_encode($geoloc_ds), 'local_l3madmin');
+
+            $unlocks_ds = json_decode(get_config('local_l3madmin', 'module_unlock_overrides') ?: '{}', true) ?: [];
+            unset($unlocks_ds[$uid_ds]);
+            set_config('module_unlock_overrides', json_encode($unlocks_ds), 'local_l3madmin');
+
+            echo json_encode(['ok' => true]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    // ── Testeurs bêta (voir l3m_branding.php) ──
+    if ($action === 'add_beta_tester') {
+        $identifier_bt = trim(required_param('identifier', PARAM_RAW));
+        if ($identifier_bt === '') { echo json_encode(['ok' => false, 'msg' => 'Champ requis']); exit; }
+        $user_bt = validate_email($identifier_bt)
+            ? $DB->get_record('user', ['email' => $identifier_bt, 'deleted' => 0], 'id, firstname, lastname, email', IGNORE_MISSING)
+            : $DB->get_record('user', ['username' => $identifier_bt, 'deleted' => 0], 'id, firstname, lastname, email', IGNORE_MISSING);
+        if (!$user_bt || !l3m_admin_owns_user((int)$user_bt->id, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Aucun compte trouvé avec cet identifiant/e-mail']); exit;
+        }
+        l3m_set_beta_tester((int)$user_bt->id, true);
+        echo json_encode(['ok' => true, 'id' => (int)$user_bt->id, 'nom' => $user_bt->firstname . ' ' . $user_bt->lastname, 'email' => $user_bt->email]);
+        exit;
+    }
+
+    if ($action === 'remove_beta_tester') {
+        $uid_bt = required_param('userid', PARAM_INT);
+        l3m_set_beta_tester($uid_bt, false);
+        echo json_encode(['ok' => true]);
         exit;
     }
 
@@ -2258,12 +2368,22 @@ try {
     ));
 } catch (Exception $e) {}
 
+// Testeurs beta — voir l3m_branding.php pour l'usage cote code (l3m_is_beta_tester).
+$beta_testers = [];
+foreach (l3m_get_beta_testers() as $bt_uid) {
+    $bt_user = $DB->get_record('user', ['id' => $bt_uid, 'deleted' => 0], 'id, firstname, lastname, email', IGNORE_MISSING);
+    if ($bt_user) {
+        $beta_testers[] = ['id' => (int)$bt_user->id, 'nom' => $bt_user->firstname . ' ' . $bt_user->lastname, 'email' => $bt_user->email];
+    }
+}
+
 $admin_data = json_encode([
     'is_siteadmin'        => is_siteadmin(),
     'admin_client'        => $admin_client,
     'pending_signed_docs' => $pending_signed_docs,
     'unread_messages'     => $unread_messages,
     'pending_leads'       => $pending_leads,
+    'beta_testers'        => $beta_testers,
     'kpi' => [
         'students'   => $kpi_students,
         'teachers'   => $kpi_teachers,
@@ -2727,7 +2847,7 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .pg-lab b.pg-clickable:hover { text-decoration:underline; }
 .pg-alert-actions { display:flex; gap:8px; margin-top:8px; }
 .pg-alert .btn.mini { font-size:11px; padding:5px 12px; }
-.toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--dark); color:#fff; border-radius:99px; padding:11px 22px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:99; box-shadow:0 4px 16px rgba(0,0,0,.3); white-space:nowrap; }
+.toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--dark); color:#fff; border-radius:99px; padding:11px 22px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:2000; box-shadow:0 4px 16px rgba(0,0,0,.3); max-width:92vw; white-space:normal; text-align:center; }
 .toast.on { opacity:1; }
 /* ── Admin docs view ── */
 .docs-split{display:grid;grid-template-columns:250px 1fr;gap:16px;align-items:start}
@@ -2847,6 +2967,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </style>
 </head>
 <body>
+<?php if (l3m_is_beta_tester($USER->id)): ?>
+<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace admin</div>
+<?php endif; ?>
 
 <!-- TOPBAR -->
 <div class="top">
@@ -3153,6 +3276,16 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <button class="btn ghost" onclick="paramsCancel()">Annuler</button>
     <button class="btn primary" onclick="paramsSave()">Enregistrer</button>
   </div>
+
+  <h1 style="margin-top:32px">Testeurs bêta</h1>
+  <p class="sub">Les comptes listés ici ont accès aux nouvelles fonctionnalités avant qu'elles soient activées pour tout le monde. Ajoutez un compte par son identifiant ou son e-mail.</p>
+  <div class="param-card pc-teal" style="max-width:520px">
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input type="text" id="beta-add-input" placeholder="identifiant ou e-mail…" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px" onkeydown="if(event.key==='Enter')addBetaTester()">
+      <button class="btn primary" onclick="addBetaTester()">+ Ajouter</button>
+    </div>
+    <div id="beta-testers-list"></div>
+  </div>
 </div>
 
 <!-- ===== DOCUMENTS ===== -->
@@ -3429,6 +3562,25 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
+<div class="modal-bg" id="cred-modal-bg">
+  <div class="modal" style="width:380px">
+    <h3 style="margin:0 0 6px" id="cred-title">✅ Compte créé</h3>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px">
+      Communiquez ces identifiants à la personne concernée. Le mot de passe ne sera plus affiché ensuite.
+    </p>
+    <div style="background:var(--bg);border-radius:10px;padding:14px 16px;margin-bottom:16px">
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Identifiant</div>
+      <div id="cred-username" style="font-size:15px;font-weight:700;margin-bottom:10px;word-break:break-all"></div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Mot de passe</div>
+      <div id="cred-password" style="font-size:15px;font-weight:700;word-break:break-all"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="copyCredentials()">📋 Copier</button>
+      <button class="btn primary" onclick="closeCredentialsModal()">Terminé</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-bg" id="msg-modal-bg" onclick="if(event.target===this)closeMessageModal()">
   <div class="modal msg-modal">
     <button type="button" class="msg-modal-close" onclick="closeMessageModal()" aria-label="Fermer">✕</button>
@@ -3441,6 +3593,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <span class="msg-search-ico">&#128269;</span>
         <input type="text" id="msg-search-input" placeholder="Rechercher un contact..." oninput="msgFilterList()">
       </div>
+      <button type="button" class="btn mini" id="msg-new-btn" style="margin:0 14px 8px" onclick="msgToggleDirectory()">+ Nouveau message</button>
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
@@ -3542,7 +3695,8 @@ var _msg = {
   activeConvId: 0,
   activeUserId: 0,
   pendingUserId: 0,
-  pendingName: ''
+  pendingName: '',
+  mode: 'conversations' // 'conversations' | 'directory'
 };
 var _msgAvColors = ['av-c0', 'av-c1', 'av-c2'];
 
@@ -3635,6 +3789,7 @@ function msgContactRow(c) {
 }
 
 function msgRenderContacts() {
+  if (_msg.mode === 'directory') { msgRenderDirectory(); return; }
   var box = document.getElementById('msg-contacts');
   var list = _msg.list;
   if (_msg.filter) {
@@ -3647,12 +3802,65 @@ function msgRenderContacts() {
     html += '<div class="msg-group-label">Favoris</div>' + favs.map(msgContactRow).join('');
   }
   if (others.length) {
-    html += '<div class="msg-group-label">Signalés</div>' + others.map(msgContactRow).join('');
+    html += '<div class="msg-group-label">Autres</div>' + others.map(msgContactRow).join('');
   }
   if (!favs.length && !others.length) {
     html = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun contact</div>';
   }
   box.innerHTML = html;
+}
+
+// "+ Nouveau message" : bascule vers un annuaire (tous les élèves +
+// formateurs du client, pas seulement les conversations déjà entamées),
+// pour pouvoir démarrer un échange avec quelqu'un jamais encore contacté.
+function msgToggleDirectory() {
+  _msg.mode = (_msg.mode === 'directory') ? 'conversations' : 'directory';
+  var btn = document.getElementById('msg-new-btn');
+  if (btn) btn.textContent = (_msg.mode === 'directory') ? '← Retour aux conversations' : '+ Nouveau message';
+  msgRenderContacts();
+}
+
+function msgRenderDirectory() {
+  var box = document.getElementById('msg-contacts');
+  var q = _msg.filter;
+  var students   = (DATA.students   || []).map(function(s){ return {id: s.id, nom: s.nom, sub: 'Élève' + (s.cohort_name ? ' · ' + s.cohort_name : '')}; });
+  var formateurs = (DATA.formateurs || []).map(function(f){ return {id: f.id, nom: f.nom, sub: 'Formateur' + (f.role_label ? ' · ' + f.role_label : '')}; });
+  var all = students.concat(formateurs).filter(function(p){ return p.id !== <?= (int)$USER->id ?>; });
+  if (q) all = all.filter(function(p){ return p.nom.toLowerCase().indexOf(q) !== -1; });
+  all.sort(function(a,b){ return a.nom.localeCompare(b.nom); });
+
+  if (!all.length) {
+    box.innerHTML = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun contact trouvé</div>';
+    return;
+  }
+  box.innerHTML = all.map(function(p) {
+    var initials = p.nom.split(' ').map(function(w){ return w[0] || ''; }).slice(0,2).join('').toUpperCase();
+    return '<div class="msg-contact" onclick="msgStartWith(' + p.id + ',\'' + esc(p.nom).replace(/'/g,"\\'") + '\')">' +
+      '<span class="msg-contact-avatar ' + msgAvatarClass(p.id) + '">' + esc(initials) + '</span>' +
+      '<div class="msg-contact-info">' +
+        '<div class="msg-contact-row1"><span class="msg-contact-name">' + esc(p.nom) + '</span></div>' +
+        '<div class="msg-contact-preview">' + esc(p.sub) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// Démarre (ou reprend) une conversation depuis l'annuaire, puis revient à la
+// vue "conversations" normale — si un échange existe déjà avec cette
+// personne, on le rouvre plutôt que d'en simuler un nouveau.
+function msgStartWith(uid, nom) {
+  _msg.mode = 'conversations';
+  var btn = document.getElementById('msg-new-btn');
+  if (btn) btn.textContent = '+ Nouveau message';
+  document.getElementById('msg-search-input').value = '';
+  _msg.filter = '';
+  msgRenderContacts();
+  var existing = _msg.list.find(function(c){ return c.userid === uid; });
+  if (existing) {
+    msgSelectContact(existing.convid, existing.userid, existing.name, existing.cls, existing.isonline);
+  } else {
+    msgSelectContact(0, uid, nom, '', false);
+  }
 }
 
 function msgSelectContact(convid, userid, nom, cls, isonline) {
@@ -3804,7 +4012,7 @@ function renderDash() {
   var days = ['dimanche','lundi','mardi','mercredi','jeudi','vendredi','samedi'];
   var greet = hr < 12 ? 'Bonjour' : hr < 18 ? 'Bon après-midi' : 'Bonsoir';
   document.getElementById('date-label').innerHTML = '<b>' + DATA.date_label + '</b>';
-  document.getElementById('dash-greeting').textContent = greet + ' — voici votre ' + days[now.getDay()];
+  document.getElementById('dash-greeting').textContent = greet + ', voici votre ' + days[now.getDay()];
 
   // ---- Sous-titre contextuel ----
   var today0 = new Date(); today0.setHours(0,0,0,0);
@@ -3967,6 +4175,7 @@ function renderTeam() {
           '<div class="rt">' + subtitle + '</div>' +
         '</div>' +
         '<button class="edit-btn" onclick="editFormateur(' + f.id + ')" title="Modifier">✎</button>' +
+        '<button class="edit-btn" style="color:var(--red,#C0392B)" onclick="deleteFormateur(' + f.id + ',\'' + esc(f.nom).replace(/'/g,"\\'") + '\')" title="Supprimer">🗑</button>' +
       '</div>' +
       '<div class="habs-row">' + habsHtml + '</div>' +
       '<div class="status-line">' + statusLine + '</div>' +
@@ -3993,6 +4202,64 @@ function openAddFormateur() {
   document.querySelector('input[name="fmod-client"][value="' + (DATA.admin_client || 'lba') + '"]').checked = true;
   document.getElementById('modal-form-bg').classList.add('open');
   document.getElementById('fmod-firstname').focus();
+}
+
+// Modale d'identifiants reutilisee pour tout compte fraichement cree
+// (intervenant ou eleve) — onClose permet a chaque appelant de decider de
+// la suite (rechargement complet, simple rafraichissement deja fait...).
+var _credModalOnClose = null;
+function showCredentialsModal(username, password, onClose, title) {
+  document.getElementById('cred-title').textContent = '✅ ' + (title || 'Compte créé');
+  document.getElementById('cred-username').textContent = username;
+  document.getElementById('cred-password').textContent = password;
+  document.getElementById('cred-modal-bg').classList.add('open');
+  _credModalOnClose = onClose || null;
+}
+function closeCredentialsModal() {
+  document.getElementById('cred-modal-bg').classList.remove('open');
+  var cb = _credModalOnClose; _credModalOnClose = null;
+  if (cb) cb();
+}
+
+function copyCredentials() {
+  var u = document.getElementById('cred-username').textContent;
+  var p = document.getElementById('cred-password').textContent;
+  var text = 'Identifiant : ' + u + '\nMot de passe : ' + p;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('Copié')).catch(() => toast('Impossible de copier'));
+  } else {
+    toast('Impossible de copier');
+  }
+}
+
+function deleteStudent(uid, nom) {
+  var msg = '⚠ Supprimer définitivement le compte de « ' + nom + ' » ? Cette action est irréversible : ' +
+    'son compte, sa progression, ses notes et son historique de messages seront perdus.';
+  if (!confirm(msg)) return;
+  apiPost({ action: 'delete_student', userid: uid })
+    .then(function(r) {
+      if (r.ok) {
+        DATA.students = DATA.students.filter(function(s) { return s.id !== uid; });
+        renderStudentsTable();
+        toast('Élève supprimé');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
+
+function deleteFormateur(uid, nom) {
+  var msg = '⚠ Supprimer définitivement le compte de « ' + nom + ' » ? Cette action est irréversible : ' +
+    'son compte, son historique de messages et ses corrections seront perdus.';
+  if (!confirm(msg)) return;
+  apiPost({ action: 'delete_intervenant', userid: uid })
+    .then(function(r) {
+      if (r.ok) {
+        DATA.formateurs = DATA.formateurs.filter(function(f) { return f.id !== uid; });
+        renderTeam();
+        toast('Intervenant supprimé');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
 }
 
 function editFormateur(uid) {
@@ -4085,8 +4352,19 @@ function saveFormateurModal() {
     apiPost({ action: 'add_intervenant', firstname: fn, lastname: ln, email: em, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0 })
       .then(r => {
         btn.disabled = false; btn.textContent = 'Enregistrer';
-        if (r.ok) { toast('Intervenant ajouté — rechargement…', 3000); setTimeout(() => location.reload(), 2500); }
-        else { toast('Erreur : ' + (r.msg || '?')); }
+        if (r.ok) {
+          closeFormModal();
+          if (r.password) {
+            // Nouveau compte : identifiant + mot de passe genere a afficher
+            // une seule fois (le rechargement se fait a la fermeture de
+            // cette fenetre, pas avant, pour laisser le temps de les noter).
+            showCredentialsModal(r.username, r.password, function(){ location.reload(); }, 'Intervenant créé');
+          } else {
+            // Compte deja existant reutilise : rien de nouveau a afficher.
+            toast('Intervenant ajouté — rechargement…', 2000);
+            setTimeout(() => location.reload(), 1500);
+          }
+        } else { toast('Erreur : ' + (r.msg || '?')); }
       })
       .catch(() => { btn.disabled = false; btn.textContent = 'Enregistrer'; toast('Erreur réseau'); });
   } else {
@@ -4607,6 +4885,7 @@ function renderStudentsTable() {
       ? '<button class="btn-agir" onclick="openMessageModal(' + s.id + ',\'' + esc(s.nom).replace(/'/g,"\\'") + '\')">Agir</button>'
       : '<a class="btn mini ghost" href="' + WWWROOT + '/user/view.php?id=' + s.id + '&course=1" target="_blank">Ouvrir</a>';
     var credsBtn = '<button class="btn mini ghost" title="Identifiants de connexion" onclick="openCredsModal(' + s.id + ',\'' + esc(s.nom).replace(/'/g,"\\'") + '\',\'' + esc(s.username || '').replace(/'/g,"\\'") + '\')">🔑</button>';
+    var delBtn = '<button class="btn mini ghost" style="color:var(--red,#C0392B);border-color:var(--red,#C0392B)" title="Supprimer" onclick="deleteStudent(' + s.id + ',\'' + esc(s.nom).replace(/'/g,"\\'") + '\')">🗑</button>';
 
     return '<tr' + rowCls + '>' +
       '<td>' + esc(s.nom) + inactivePill + '</td>' +
@@ -4616,7 +4895,7 @@ function renderStudentsTable() {
       '<td>' + barHtml + '</td>' +
       '<td>' + presHtml + '</td>' +
       '<td>' + noteHtml + '</td>' +
-      '<td style="display:flex;gap:6px;align-items:center">' + actionBtn + credsBtn + '</td>' +
+      '<td style="display:flex;gap:6px;align-items:center">' + actionBtn + credsBtn + delBtn + '</td>' +
       '</tr>';
   }).join('');
 }
@@ -5956,10 +6235,15 @@ function convertLead() {
         renderPendingActivations();
         refreshLeadsNavBadge();
         if (d.is_new) {
-          toast('Compte créé (id. ' + d.username + ' · mdp provisoire ' + d.temp_password + ') — accès bloqué jusqu\'à activation ("En attente d\'activation" ci-dessous).', 7000);
+          showCredentialsModal(d.username, d.temp_password, null, 'Élève inscrit');
         } else {
-          toast('Compte existant inscrit — accès bloqué jusqu\'à activation ("En attente d\'activation" ci-dessous).', 6000);
+          // Compte deja existant reutilise (meme e-mail qu'un compte deja
+          // cree) : pas de nouveau mot de passe genere, mais on affiche quand
+          // meme une carte de confirmation avec l'identifiant existant, pour
+          // que le retour reste coherent que le compte soit neuf ou non.
+          showCredentialsModal(d.username, 'Inchangé (compte existant)', null, 'Élève inscrit');
         }
+        toast('Accès bloqué jusqu\'à activation ("En attente d\'activation" ci-dessous).', 6000);
       } else {
         toast('Erreur : ' + (d.msg || '?'));
       }
@@ -6107,7 +6391,54 @@ document.addEventListener('DOMContentLoaded', function() {
   updateDocsNavBadge();
   updateLeadsNavBadge();
   updateMsgNavBadge();
+  renderBetaTesters();
 });
+
+/* ===== Testeurs bêta ===== */
+function renderBetaTesters() {
+  var box = document.getElementById('beta-testers-list');
+  var list = DATA.beta_testers || [];
+  if (!list.length) {
+    box.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">Aucun testeur pour l\'instant.</p>';
+    return;
+  }
+  box.innerHTML = list.map(function(t) {
+    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)">' +
+      '<div><b>' + esc(t.nom) + '</b> <span style="color:var(--muted);font-size:12px">' + esc(t.email) + '</span></div>' +
+      '<button class="btn mini ghost" style="color:var(--red,#C0392B);border-color:var(--red,#C0392B)" onclick="removeBetaTester(' + t.id + ')">Retirer</button>' +
+    '</div>';
+  }).join('');
+}
+
+function addBetaTester() {
+  var input = document.getElementById('beta-add-input');
+  var identifier = input.value.trim();
+  if (!identifier) return;
+  apiPost({ action: 'add_beta_tester', identifier: identifier })
+    .then(function(r) {
+      if (r.ok) {
+        if (!DATA.beta_testers.some(function(t){ return t.id === r.id; })) {
+          DATA.beta_testers.push({ id: r.id, nom: r.nom, email: r.email });
+        }
+        input.value = '';
+        renderBetaTesters();
+        toast('Testeur ajouté');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
+
+function removeBetaTester(uid) {
+  apiPost({ action: 'remove_beta_tester', userid: uid })
+    .then(function(r) {
+      if (r.ok) {
+        DATA.beta_testers = DATA.beta_testers.filter(function(t){ return t.id !== uid; });
+        renderBetaTesters();
+        toast('Testeur retiré');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
 </script>
 <!-- ===== MODAL SEANCE ===== -->
 <div id="modal-seance-bg" onclick="if(event.target===this)closeSeanceModal()">

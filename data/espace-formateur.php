@@ -1042,6 +1042,9 @@ if ($is_ped_lead) {
 
     foreach ($ped_formateurs_raw as $f) {
         if (l3m_get_user_client((int)$f->id) !== $user_client) continue;
+        // Le Responsable pedagogique ne se gere pas lui-meme dans ce tableau
+        // (il ne devrait pas pouvoir se retirer/modifier son propre acces).
+        if ((int)$f->id === (int)$USER->id) continue;
         $ped_formateurs[] = ['id' => (int)$f->id, 'nom' => $f->firstname . ' ' . $f->lastname];
         $ped_access[(int)$f->id] = $ped_access_map[(int)$f->id] ?? [];
     }
@@ -1534,6 +1537,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </style>
 </head>
 <body>
+<?php if (l3m_is_beta_tester($USER->id)): ?>
+<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace formateur</div>
+<?php endif; ?>
 
 <!-- ── TOPBAR ── -->
 <div class="top" id="topbar">
@@ -2366,6 +2372,12 @@ var _ceIframeCSS = [
   // arrive directement sur UN eleve precis (attributs stables, voir
   // mod/assign/templates/grading_navigation_user_selector.mustache).
   '[data-region="user-filters"],[data-region="user-resettable"] { display:none !important; }',
+  // Panneau d'info eleve (email + date limite) : Moodle tronque ces deux
+  // lignes avec des points de suspension dans une colonne etroite
+  // (mod/assign/templates/grading_navigation_user_info.mustache, classe
+  // "nowrap" stable). Retire la troncature pour un affichage complet, avec
+  // retour a la ligne si le texte ne tient pas.
+  '[data-region="user-info"] em.nowrap { white-space:normal !important; overflow:visible !important; text-overflow:clip !important; word-break:break-word !important; }',
   // Selecteur de fichiers Moodle : texte des onglets en noir (illisible par
   // defaut, trop clair) et couleur d'accent orange remplacee par le vert
   // de la charte (voir repository/filepicker.js, classes .fp-repo/.nav-link

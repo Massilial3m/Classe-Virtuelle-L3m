@@ -312,6 +312,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // Annuaire pour demarrer une conversation avec quelqu'un jamais encore
+    // contacte — limite a ses propres formateurs (ceux qui enseignent un
+    // cours ou cet eleve est inscrit) + l'administration, jamais les autres
+    // eleves (pas de messagerie libre entre eleves).
+    if ($action === 'msg_directory') {
+        $my_client_md = l3m_get_user_client($USER->id);
+        $teacher_roleid_md = (int)$DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
+        $view_roleid_md    = (int)$DB->get_field('role', 'id', ['shortname' => 'teacher']);
+        $manager_roleid_md = (int)$DB->get_field('role', 'id', ['shortname' => 'manager']);
+
+        $my_course_ids_md = array_keys($DB->get_records_sql(
+            "SELECT DISTINCT e.courseid, 1
+               FROM {user_enrolments} ue
+               JOIN {enrol} e ON e.id = ue.enrolid
+              WHERE ue.userid = :uid AND ue.status = 0",
+            ['uid' => $USER->id]
+        ));
+
+        $directory_md = [];
+        $role_ids_md = array_values(array_filter([$teacher_roleid_md, $view_roleid_md]));
+        if ($my_course_ids_md && $role_ids_md) {
+            list($in_courses_md, $p_courses_md) = $DB->get_in_or_equal($my_course_ids_md, SQL_PARAMS_NAMED, 'mcid');
+            list($in_roles_md, $p_roles_md) = $DB->get_in_or_equal($role_ids_md, SQL_PARAMS_NAMED, 'trole');
+            $rows_md = $DB->get_records_sql(
+                "SELECT DISTINCT u.id, u.firstname, u.lastname
+                   FROM {role_assignments} ra
+                   JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid $in_courses_md
+                   JOIN {user} u ON u.id = ra.userid AND u.deleted = 0
+                  WHERE ra.roleid $in_roles_md",
+                array_merge($p_courses_md, $p_roles_md)
+            );
+            foreach ($rows_md as $r) {
+                if (l3m_get_user_client((int)$r->id) !== $my_client_md) continue;
+                $directory_md[(int)$r->id] = ['id' => (int)$r->id, 'nom' => $r->firstname . ' ' . $r->lastname, 'role' => 'Formateur'];
+            }
+        }
+        // Administration : role manager (systeme) + site admins, meme client.
+        if ($manager_roleid_md) {
+            $ctx_sys_md = context_system::instance();
+            $rows_adm_md = $DB->get_records_sql(
+                "SELECT DISTINCT u.id, u.firstname, u.lastname
+                   FROM {role_assignments} ra
+                   JOIN {user} u ON u.id = ra.userid AND u.deleted = 0
+                  WHERE ra.roleid = :rid AND ra.contextid = :ctxid",
+                ['rid' => $manager_roleid_md, 'ctxid' => $ctx_sys_md->id]
+            );
+            foreach ($rows_adm_md as $r) {
+                if (l3m_get_user_client((int)$r->id) !== $my_client_md) continue;
+                $directory_md[(int)$r->id] = ['id' => (int)$r->id, 'nom' => $r->firstname . ' ' . $r->lastname, 'role' => 'Administration'];
+            }
+        }
+        foreach (get_admins() as $adm) {
+            if (l3m_get_user_client((int)$adm->id) !== $my_client_md) continue;
+            $directory_md[(int)$adm->id] = ['id' => (int)$adm->id, 'nom' => $adm->firstname . ' ' . $adm->lastname, 'role' => 'Administration'];
+        }
+
+        echo json_encode(['ok' => true, 'directory' => array_values($directory_md)], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'msg_thread') {
         $otherid = optional_param('otherid', 0, PARAM_INT);
         $convid  = optional_param('convid', 0, PARAM_INT);
@@ -1446,7 +1506,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 @media(prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }
 </style>
 </head>
+
 <body>
+<?php if (l3m_is_beta_tester($USER->id)): ?>
+<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace élève</div>
+<?php endif; ?>
 <div class="app">
 
 <aside>
@@ -1760,6 +1824,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <span class="msg-search-ico">&#128269;</span>
         <input type="text" id="msg-search-input" placeholder="Rechercher un contact..." oninput="msgFilterList()">
       </div>
+      <button type="button" class="btn mini" id="msg-new-btn" style="margin:0 14px 8px" onclick="msgToggleDirectory()">+ Nouveau message</button>
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
@@ -2123,7 +2188,9 @@ function msgLoadList() {
 
 function msgFilterList() {
   _msg.filter = document.getElementById('msg-search-input').value.trim().toLowerCase();
-  msgRenderContacts();
+  var btn = document.getElementById('msg-new-btn');
+  if (btn && btn.dataset.mode === 'directory') msgRenderDirectory();
+  else msgRenderContacts();
 }
 
 function msgContactRow(c) {
@@ -2168,6 +2235,67 @@ function msgRenderContacts() {
     html = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun message pour l\'instant</div>';
   }
   box.innerHTML = html;
+}
+
+// "+ Nouveau message" : bascule vers un annuaire (mes formateurs +
+// l'administration, jamais les autres élèves), pour démarrer un échange
+// avec quelqu'un jamais encore contacté.
+var _msgDirectory = null; // mis en cache apres le 1er chargement
+function msgToggleDirectory() {
+  var box = document.getElementById('msg-contacts');
+  var btn = document.getElementById('msg-new-btn');
+  var inDirectory = btn.dataset.mode === 'directory';
+  if (inDirectory) {
+    btn.dataset.mode = ''; btn.textContent = '+ Nouveau message';
+    msgRenderContacts();
+    return;
+  }
+  btn.dataset.mode = 'directory'; btn.textContent = '← Retour aux conversations';
+  if (_msgDirectory) { msgRenderDirectory(); return; }
+  box.innerHTML = '<div class="msg-thread-empty" style="padding:30px 10px"><span class="dv-spinner"></span></div>';
+  apiPost({ action: 'msg_directory' }).then(function(r) {
+    _msgDirectory = r.ok ? r.directory : [];
+    msgRenderDirectory();
+  }).catch(function() {
+    _msgDirectory = [];
+    msgRenderDirectory();
+  });
+}
+
+function msgRenderDirectory() {
+  var box = document.getElementById('msg-contacts');
+  var q = _msg.filter;
+  var list = _msgDirectory || [];
+  if (q) list = list.filter(function(p){ return p.nom.toLowerCase().indexOf(q) !== -1; });
+  list = list.slice().sort(function(a,b){ return a.nom.localeCompare(b.nom); });
+  if (!list.length) {
+    box.innerHTML = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun contact trouvé</div>';
+    return;
+  }
+  box.innerHTML = list.map(function(p) {
+    var initials = p.nom.split(' ').map(function(w){ return w[0] || ''; }).slice(0,2).join('').toUpperCase();
+    return '<div class="msg-contact" onclick="msgStartWith(' + p.id + ',\'' + esc(p.nom).replace(/'/g,"\\'") + '\')">' +
+      '<span class="msg-contact-avatar ' + msgAvatarClass(p.id) + '">' + esc(initials) + '</span>' +
+      '<div class="msg-contact-info">' +
+        '<div class="msg-contact-row1"><span class="msg-contact-name">' + esc(p.nom) + '</span></div>' +
+        '<div class="msg-contact-preview">' + esc(p.role) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function msgStartWith(uid, nom) {
+  var btn = document.getElementById('msg-new-btn');
+  btn.dataset.mode = ''; btn.textContent = '+ Nouveau message';
+  document.getElementById('msg-search-input').value = '';
+  _msg.filter = '';
+  msgRenderContacts();
+  var existing = _msg.list.find(function(c){ return c.userid === uid; });
+  if (existing) {
+    msgSelectContact(existing.convid, existing.userid, existing.name, existing.isonline);
+  } else {
+    msgSelectContact(0, uid, nom, false);
+  }
 }
 
 function msgSelectContact(convid, userid, nom, isonline) {

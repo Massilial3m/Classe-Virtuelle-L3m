@@ -163,3 +163,32 @@ function l3m_set_user_client($userid, $client) {
 function l3m_get_branding_for_user($userid) {
     return l3m_get_brand_by_client(l3m_get_user_client($userid));
 }
+
+// ============================================================
+// Testeurs bêta — permet de déployer une nouvelle fonctionnalité en
+// production sans qu'elle soit visible pour tout le monde : le code d'une
+// nouvelle fonctionnalité se protège avec
+//   if (l3m_is_beta_tester($USER->id)) { ... nouveau comportement ... }
+//   else { ... comportement actuel inchangé ... }
+// Liste d'ids stockée en config local_l3madmin (même pattern que
+// formateur_meta/module_unlock_overrides), gérée depuis Paramètres dans
+// admin-lba.php. Pas de nouvel environnement à maintenir.
+// ============================================================
+function l3m_get_beta_testers() {
+    return json_decode(get_config('local_l3madmin', 'beta_testers') ?: '[]', true) ?: [];
+}
+
+function l3m_is_beta_tester($userid) {
+    return in_array((int)$userid, l3m_get_beta_testers(), true);
+}
+
+function l3m_set_beta_tester($userid, $enabled) {
+    $list   = l3m_get_beta_testers();
+    $userid = (int)$userid;
+    if ($enabled) {
+        if (!in_array($userid, $list, true)) $list[] = $userid;
+    } else {
+        $list = array_values(array_filter($list, fn($x) => $x !== $userid));
+    }
+    set_config('beta_testers', json_encode($list), 'local_l3madmin');
+}
