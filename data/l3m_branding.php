@@ -89,6 +89,54 @@ function l3m_host_client_map() {
     ];
 }
 
+// Salle Glowbl generale deja utilisee partout ailleurs sur la plateforme
+// (Agenda, rappels de classe virtuelle...) — voir $glowbl_url dans
+// espace-eleve.php/espace-formateur.php. Centralise ici pour que
+// sequences-config.php puisse proposer le meme lien en un clic plutot que
+// de faire chercher/coller l'URL au Responsable pedagogique.
+function l3m_glowbl_url(): string {
+    return 'https://l3m.glowbl.com/l3m-ecsr';
+}
+
+// Reserve de cmid d'activites LTI "Classe virtuelle Glowbl" existantes sur
+// la plateforme (tous cours confondus), dans un ordre stable — chaque
+// activite pointe vers une salle Glowbl DISTINCTE (le contexte LTI de
+// chaque activite differe), ce qui sert a donner a chaque Sequence
+// "connexion automatique" sa propre salle plutot qu'une seule partagee par
+// toute la plateforme (question du 05/10/2026, apres qu'un premier essai a
+// tout fait pointer vers la meme salle). Jamais expose au Responsable
+// pedagogique comme un choix de cours/module — juste une case a cocher
+// "Connexion automatique" (voir sequences-config.php) ; l'assignation d'une
+// salle de cette reserve est automatique et invisible.
+function l3m_glowbl_lti_pool(): array {
+    global $DB;
+    try {
+        $rows = $DB->get_records_sql(
+            "SELECT cm.id AS cmid
+             FROM {course_modules} cm
+             JOIN {modules} m ON m.id = cm.module AND m.name = 'lti'
+             WHERE cm.visible = 1
+             ORDER BY cm.id ASC"
+        );
+        return array_values(array_map(fn($r) => (int)$r->cmid, $rows));
+    } catch (Exception $e) {
+        return [];
+    }
+}
+
+// Choisit, dans la reserve, un cmid pas deja utilise par une autre Sequence
+// (pour que chacune garde sa propre salle) — retombe sur la 1ere salle de la
+// reserve si toutes sont deja prises (plus de Sequences "automatique" que
+// de salles reellement disponibles : collision inevitable au-dela).
+function l3m_glowbl_assign_room(array $already_used_cmids): ?int {
+    $pool = l3m_glowbl_lti_pool();
+    if (!$pool) return null;
+    foreach ($pool as $cmid) {
+        if (!in_array($cmid, $already_used_cmids, true)) return $cmid;
+    }
+    return $pool[0];
+}
+
 function l3m_get_branding() {
     // Signal explicite prioritaire : le lien "Se connecter" de chaque landing
     // page pointe directement vers ?client=... (la connexion converge de
@@ -118,7 +166,7 @@ function l3m_get_or_create_client_cohort($client) {
     }
 
     $cohort = new stdClass();
-    $cohort->name              = ($client === 'saran') ? 'Client — Saran Conduite' : 'Client — La Bonne Allure';
+    $cohort->name              = ($client === 'saran') ? 'Client · Saran Conduite' : 'Client · La Bonne Allure';
     $cohort->idnumber          = $idnumber;
     $cohort->description       = '';
     $cohort->descriptionformat = FORMAT_HTML;
@@ -180,6 +228,73 @@ function l3m_get_beta_testers() {
 
 function l3m_is_beta_tester($userid) {
     return in_array((int)$userid, l3m_get_beta_testers(), true);
+}
+
+// ============================================================
+// Responsable pédagogique — meme meta "formateur_meta" (config local_l3madmin,
+// cle is_ped_lead) deja utilisee par admin-lba.php (gestion des intervenants)
+// et espace-formateur.php (acces/edition du module Pedagogie). Reutilise ici
+// pour reserver la creation/edition du referentiel et des sequences (voir
+// l3m_referentiel.php, referentiel-editor.php, sequence-editor.php) au
+// Responsable pedagogique plutot qu'a tout formateur — depuis le 16/09/2026,
+// un formateur "simple" (editingteacher/teacher sans is_ped_lead) garde un
+// acces EN LECTURE (Sequences/Programme/Resultats) mais pas d'edition.
+function l3m_is_ped_lead($userid): bool {
+    $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+    return !empty($meta[(int)$userid]['is_ped_lead']);
+}
+
+// ============================================================
+// Terminologie "classe" -> "cohorte" — generalisee a tous les comptes
+// (validee via testeurs beta, voir historique). Ne change QUE le texte
+// affiche (titres, libelles, boutons) ; les noms de classes reellement
+// stockes en base restent "Classe A/B/..." (regex d'extraction de lettre
+// et affichage dispCohName() inchanges, ils continuent de fonctionner).
+function l3m_term_classe($userid = null) {
+    return 'Cohorte';
+}
+
+function l3m_term_classe_lc($userid = null) {
+    return 'cohorte';
+}
+
+// ============================================================
+// Sequences de positionnement pedagogique (testeurs beta uniquement) — un
+// fichier de contenu JSON par module ECSR (sequence_content_mod_<id>.json,
+// meme structure fixe partout, seul le texte change — voir sequence-editor.php).
+// Un seul module a du contenu reel pour l'instant (id=2), les 10 autres sont
+// des squelettes vides a remplir. Repertorie ici pour eviter de dupliquer la
+// liste dans sequence-player.php / sequence-editor.php / sequence-select.php.
+// ============================================================
+function l3m_seq_modules() {
+    return [
+        2  => "M1 – Cadre juridique et réglementaire de la conduite",
+        3  => "M2 – Pédagogie et techniques d'animation",
+        4  => "M3 – Conception et préparation des séances de conduite",
+        5  => "M4 – Animation de séances de conduite en milieu ouvert",
+        6  => "M5 – Évaluation et suivi de la progression des apprenants",
+        7  => "Préparation à l'évaluation CCP1 – Simulations d'examen",
+        8  => "M1 – Veille réglementaire et professionnelle",
+        9  => "M2 – Accueil, conseil et relation client",
+        10 => "M3 – Développement commercial de l'école de conduite",
+        11 => "M4 – Gestion administrative et financière",
+        12 => "Préparation à l'évaluation CCP2 – Simulations d'examen",
+    ];
+}
+
+// Chemin du fichier de contenu pour un module donne (n'existe pas forcement
+// -> l'appelant doit verifier file_exists avant de lire).
+function l3m_seq_content_path($moduleid) {
+    return __DIR__ . '/sequence_content_mod_' . (int)$moduleid . '.json';
+}
+
+// Un module a du "vrai" contenu si son fichier existe et n'est pas marque
+// comme squelette vide (voir generation dans generate_multi_seq.php).
+function l3m_seq_has_content($moduleid) {
+    $path = l3m_seq_content_path($moduleid);
+    if (!file_exists($path)) return false;
+    $c = json_decode(file_get_contents($path), true);
+    return $c && empty($c['_squelette_vide']) && strpos($c['_avertissement'] ?? '', 'SQUELETTE VIDE') === false;
 }
 
 function l3m_set_beta_tester($userid, $enabled) {

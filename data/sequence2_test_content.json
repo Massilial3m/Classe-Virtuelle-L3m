@@ -1,0 +1,152 @@
+{
+  "_avertissement": "CONTENU DE TEST — PAS LE CONTENU REEL. Genere uniquement pour valider le moteur de sequence (ecrans, echo IA, QCM note avec seuil, remediation, collecte brute, export PDF) en attendant le contenu final de l'equipe pedagogique et les reponses de Gedeon. A remplacer integralement avant toute mise a disposition d'un vrai eleve.",
+  "sequence_id": "seq2_accidentalite_accidentologie",
+  "titre": "[TEST] Séquence 2 — Accidentalité / Accidentologie",
+
+  "phase0_ouverture": {
+    "titre": "[TEST] Accidentalité & Accidentologie",
+    "accroche": "[TEST] Dans cette séquence, vous allez explorer les chiffres de l'accidentalité routière puis les mécanismes de l'accidentologie.",
+    "objectifs": ["[TEST] Objectif 1 : comprendre les grandes données chiffrées.", "[TEST] Objectif 2 : comprendre les modèles du risque."]
+  },
+
+  "phase1_construction_accidentalite": {
+    "statut": "non_note",
+    "ecrans": [
+      { "id": "1.1", "type": "amorce", "question": "[TEST] À votre avis, combien de véhicules sont en circulation en France ?", "revele_a": null },
+      { "id": "1.2", "type": "texte_question", "texte": "[TEST §1 — parc automobile] Paragraphe de test sur le parc automobile français.", "revele_reponse_de": "1.1", "revele_texte": "[TEST] Environ 40 millions de véhicules.", "question": "[TEST] Combien de kilomètres compte le réseau routier français ?", "id_question": "Q2", "reponse_reference": "[TEST] Environ 1 million de km de routes." },
+      { "id": "1.3", "type": "texte_seul", "texte": "[TEST §2 — réseau routier, détail] Paragraphe de test complétant la réponse à Q2.", "revele_reponse_de_id_question": "Q2", "reponse_reference": "[TEST] Environ 1 million de km de routes." },
+      { "id": "1.4", "type": "texte_question_double", "texte": "[TEST §3 — mortalité, pic 1972, chiffre 2024] Paragraphe de test.", "questions": [
+        { "id_question": "Q3", "question": "[TEST] En quelle année la mortalité routière a-t-elle atteint son pic ?", "reponse_reference": "[TEST] 1972." },
+        { "id_question": "Q4", "question": "[TEST] Combien de morts sur la route en 2024 ?", "reponse_reference": "[TEST] Environ 3 200." }
+      ]},
+      { "id": "1.5", "type": "texte_question", "texte": "[TEST §4 — ralentissement de la baisse 2002-2012 / 2012-2019] Paragraphe de test.", "id_question": "Q5", "question": "[TEST] La baisse de la mortalité a-t-elle été constante entre 2002 et 2019 ?", "reponse_reference": "[TEST] Non, elle a ralenti après 2012." },
+      { "id": "1.6", "type": "texte_question", "texte": "[TEST §5 — répartition des victimes 2024 par mode] Paragraphe de test.", "id_question": "Q6", "question": "[TEST] Quel mode de déplacement est le plus représenté parmi les victimes ?", "reponse_reference": "[TEST] Les automobilistes." },
+      { "id": "1.7", "type": "amorce", "question": "[TEST] À votre avis, meurt-on plutôt de nuit, sous la pluie, ou sur autoroute ?", "revele_a": null },
+      { "id": "1.8", "type": "texte_question_double", "texte": "[TEST — triptyque autoroute : 1% linéaire / 28% trafic / 7% morts] Paragraphe de test.", "revele_reponse_de": "1.7", "reponse_reference": "[TEST] Plutôt de nuit, hors autoroute.", "questions": [
+        { "id_question": "Q7", "question": "[TEST] Quelle part du réseau représente l'autoroute ?", "reponse_reference": "[TEST] 1 %." },
+        { "id_question": "Q8", "question": "[TEST] Quelle part du trafic représente l'autoroute ?", "reponse_reference": "[TEST] 28 %." }
+      ]},
+      { "id": "1.9", "type": "texte_question", "texte": "[TEST — majorité hors agglomération] Paragraphe de test.", "id_question": "Q9", "question": "[TEST] Où se produisent la majorité des accidents mortels ?", "reponse_reference": "[TEST] Hors agglomération." },
+      { "id": "1.10", "type": "texte_question", "texte": "[TEST — météo] Paragraphe de test.", "id_question": "Q10", "question": "[TEST] Quelle proportion d'accidents a lieu par temps sec ?", "reponse_reference": "[TEST] La grande majorité." },
+      { "id": "1.11", "type": "texte_question", "texte": "[TEST — accidents à un seul véhicule] Paragraphe de test.", "id_question": "Q11", "question": "[TEST] Qu'est-ce qu'un accident \"à un seul véhicule\" ?", "reponse_reference": "[TEST] Un accident sans collision avec un tiers." },
+      { "id": "1.12", "type": "synthese", "texte": "[TEST §5-6 — trajets routiniers + clôture] Ce que ces chiffres ont en commun : [TEST texte de clôture]." }
+    ]
+  },
+
+  "phase2_transition": {
+    "texte": "Vous avez maintenant vu l'ensemble des données. Place à l'évaluation : 5 questions, à choix multiples, pour valider ce bloc avant de passer à Accidentologie.",
+    "bouton": "Commencer l'évaluation"
+  },
+
+  "phase3_qcm_accidentalite": {
+    "statut": "note",
+    "seuil_pct": 70,
+    "seuil_bon_sur_total": "4/5",
+    "questions": [
+      { "id": "3.1", "question": "[TEST QCM 1] Laquelle de ces affirmations est correcte ?", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." },
+        { "texte": "[TEST] Option C — correcte", "correcte": true, "explication": "[TEST] Explication C." },
+        { "texte": "[TEST] Option D — incorrecte", "correcte": false, "explication": "[TEST] Explication D." }
+      ]},
+      { "id": "3.2", "question": "[TEST QCM 2] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." }
+      ]},
+      { "id": "3.3", "question": "[TEST QCM 3] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — incorrecte", "correcte": false, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — correcte", "correcte": true, "explication": "[TEST] Explication B." }
+      ]},
+      { "id": "3.4", "question": "[TEST QCM 4] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — correcte", "correcte": true, "explication": "[TEST] Explication B." },
+        { "texte": "[TEST] Option C — incorrecte", "correcte": false, "explication": "[TEST] Explication C." }
+      ]},
+      { "id": "3.5", "question": "[TEST QCM 5] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — incorrecte", "correcte": false, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." },
+        { "texte": "[TEST] Option C — correcte", "correcte": true, "explication": "[TEST] Explication C." }
+      ]}
+    ],
+    "remediation_non_redigee": true
+  },
+
+  "phase4_construction_accidentologie": {
+    "statut": "non_note",
+    "ecrans": [
+      { "id": "4.1", "type": "amorces_multiples", "questions": [
+        { "id_question": "A1", "question": "[TEST] Pour vous, quelle est la différence entre danger et risque ?" },
+        { "id_question": "A2", "question": "[TEST] Peut-on supprimer complètement le risque ?" },
+        { "id_question": "A3", "question": "[TEST] L'expérience change-t-elle la perception du risque ?" },
+        { "id_question": "A4", "question": "[TEST] Un équipement de sécurité vous rend-il plus prudent ou moins prudent ?" }
+      ]},
+      { "id": "4.2", "type": "texte_question", "texte": "[TEST §1 — danger et risque] Paragraphe de test.", "revele_reponse_de": ["A1","A2"], "revele_texte": "[TEST] Le danger existe même sans risque si personne n'est exposé ; le risque, lui, ne peut jamais être totalement supprimé.", "id_question": "Q12", "question": "[TEST] Donnez un exemple de danger sans risque.", "reponse_reference": "[TEST] Un précipice loin de tout passage." },
+      { "id": "4.3", "type": "texte_question", "texte": "[TEST §2 — objectif/subjectif] Paragraphe de test.", "revele_reponse_de": "A3", "revele_texte": "[TEST] L'expérience modifie la perception du risque, pas le risque réel.", "id_question": "Q13", "question": "[TEST] Le risque objectif et le risque perçu sont-ils toujours identiques ?", "reponse_reference": "[TEST] Non." },
+      { "id": "4.4", "type": "texte_question", "texte": "[TEST §3 — modèle du risque zéro] Paragraphe de test.", "id_question": "Q14", "question": "[TEST] Que propose le modèle du risque zéro ?", "reponse_reference": "[TEST] Réduire le risque perçu à zéro." },
+      { "id": "4.5", "type": "texte_question", "texte": "[TEST §3 — modèle de l'évitement de la menace] Paragraphe de test.", "id_question": "Q15", "question": "[TEST] Que propose le modèle de l'évitement de la menace ?", "reponse_reference": "[TEST] Éviter activement la situation dangereuse." },
+      { "id": "4.6", "type": "texte_question", "texte": "[TEST §3 — modèle hiérarchique] Paragraphe de test.", "id_question": "Q16", "question": "[TEST] Que décrit le modèle hiérarchique du risque ?", "reponse_reference": "[TEST] Une hiérarchie de décisions du général au particulier." },
+      { "id": "4.7", "type": "texte_question", "texte": "[TEST §3 — modèle de l'homéostasie du risque] Paragraphe de test.", "revele_reponse_de": "A4", "revele_texte": "[TEST] Un équipement de sécurité peut inciter à prendre plus de risques (compensation du risque).", "id_question": "Q17", "question": "[TEST] Que dit le modèle de l'homéostasie du risque ?", "reponse_reference": "[TEST] Le comportement s'ajuste pour maintenir un niveau de risque perçu constant." }
+    ]
+  },
+
+  "phase4_8_collecte": {
+    "id": "4.8",
+    "type": "collecte_brute",
+    "statut": "collecte_sans_correction",
+    "note_technique": "AUCUNE correction ni classement IA sur cet ecran. Stockage tel quel, reaffichage intact en Sequence 3.",
+    "champs": [
+      { "id_champ": "C1", "consigne": "[TEST] Racontez une situation où vous avez perçu un danger sans risque réel." },
+      { "id_champ": "C2", "consigne": "[TEST] Racontez une situation où un équipement de sécurité vous a rendu plus confiant." },
+      { "id_champ": "C3", "consigne": "[TEST] Racontez un trajet routinier où votre vigilance a baissé." }
+    ]
+  },
+
+  "phase5_transition": {
+    "texte": "Vous avez maintenant vu l'ensemble des données sur l'accidentologie. Place à l'évaluation : 6 questions, à choix multiples.",
+    "bouton": "Commencer l'évaluation"
+  },
+
+  "phase6_qcm_accidentologie": {
+    "statut": "note",
+    "seuil_pct": 70,
+    "seuil_bon_sur_total": "5/6",
+    "questions": [
+      { "id": "6.1", "question": "[TEST QCM 1] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." }
+      ]},
+      { "id": "6.2", "question": "[TEST QCM 2] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — incorrecte", "correcte": false, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — correcte", "correcte": true, "explication": "[TEST] Explication B." }
+      ]},
+      { "id": "6.3", "question": "[TEST QCM 3] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — correcte", "correcte": true, "explication": "[TEST] Explication B." },
+        { "texte": "[TEST] Option C — incorrecte", "correcte": false, "explication": "[TEST] Explication C." }
+      ]},
+      { "id": "6.4", "question": "[TEST QCM 4] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — incorrecte", "correcte": false, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." },
+        { "texte": "[TEST] Option C — correcte", "correcte": true, "explication": "[TEST] Explication C." }
+      ]},
+      { "id": "6.5", "question": "[TEST QCM 5] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — correcte", "correcte": true, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — incorrecte", "correcte": false, "explication": "[TEST] Explication B." }
+      ]},
+      { "id": "6.6", "question": "[TEST QCM 6] Question de test.", "type": "multi_select", "options": [
+        { "texte": "[TEST] Option A — incorrecte", "correcte": false, "explication": "[TEST] Explication A." },
+        { "texte": "[TEST] Option B — correcte", "correcte": true, "explication": "[TEST] Explication B." }
+      ]}
+    ],
+    "remediation_non_redigee": true
+  },
+
+  "phase7_cloture": {
+    "texte": "Vous avez terminé cette séquence. Demain, en direct, vous allez construire ensemble le système H.E.V.O à partir des exemples que vous venez d'apporter, et l'appliquer à un cas réel.",
+    "export_pdf": {
+      "nb_reponses": 17,
+      "questions_incluses": ["Q2","Q3","Q4","Q5","Q6","Q7","Q8","Q9","Q10","Q11","Q12","Q13","Q14","Q15","Q16","Q17"],
+      "note": "Numerotees 1 a 17 dans le PDF final."
+    }
+  }
+}

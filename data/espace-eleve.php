@@ -5,6 +5,7 @@
 require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
+require_once(__DIR__ . '/l3m_referentiel.php');
 require_login();
 
 // Appel a l'API Gemini (offre gratuite Google) pour la remediation de quiz
@@ -43,6 +44,12 @@ function l3m_call_gemini($prompt) {
             CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
             CURLOPT_POSTFIELDS     => $body,
             CURLOPT_TIMEOUT        => 30,
+            // Le conteneur n'a pas de connectivite IPv6 ("Network is
+            // unreachable") ; sans forcer l'IPv4, curl peut rester bloque a
+            // tenter les adresses IPv6 renvoyees par le DNS de Google avant
+            // meme d'essayer l'IPv4 qui fonctionne, provoquant un timeout
+            // complet malgre une connectivite reseau normale par ailleurs.
+            CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
         ]);
         $response = curl_exec($ch);
         $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -372,6 +379,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // "Contacter votre coordinateur" (action rapide de l'accueil eleve) —
+    // resout QUI est le coordinateur plutot que d'ouvrir la messagerie a
+    // vide en laissant l'eleve chercher : priorite au Responsable
+    // pedagogique (is_ped_lead, voir l3m_branding.php) parmi SES propres
+    // formateurs, puis n'importe quel Responsable pedagogique du meme
+    // client, puis a defaut le premier contact "Administration".
+    if ($action === 'msg_get_coordinateur') {
+        $my_client_co = l3m_get_user_client($USER->id);
+        $teacher_roleid_co = (int)$DB->get_field('role', 'id', ['shortname' => 'editingteacher']);
+        $view_roleid_co    = (int)$DB->get_field('role', 'id', ['shortname' => 'teacher']);
+        $manager_roleid_co = (int)$DB->get_field('role', 'id', ['shortname' => 'manager']);
+        $meta_co = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+
+        $my_course_ids_co = array_keys($DB->get_records_sql(
+            "SELECT DISTINCT e.courseid, 1
+               FROM {user_enrolments} ue
+               JOIN {enrol} e ON e.id = ue.enrolid
+              WHERE ue.userid = :uid AND ue.status = 0",
+            ['uid' => $USER->id]
+        ));
+
+        $found = null;
+        $role_ids_co = array_values(array_filter([$teacher_roleid_co, $view_roleid_co]));
+        if ($my_course_ids_co && $role_ids_co) {
+            list($in_courses_co, $p_courses_co) = $DB->get_in_or_equal($my_course_ids_co, SQL_PARAMS_NAMED, 'mcid');
+            list($in_roles_co, $p_roles_co) = $DB->get_in_or_equal($role_ids_co, SQL_PARAMS_NAMED, 'trole');
+            $rows_co = $DB->get_records_sql(
+                "SELECT DISTINCT u.id, u.firstname, u.lastname
+                   FROM {role_assignments} ra
+                   JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid $in_courses_co
+                   JOIN {user} u ON u.id = ra.userid AND u.deleted = 0
+                  WHERE ra.roleid $in_roles_co",
+                array_merge($p_courses_co, $p_roles_co)
+            );
+            foreach ($rows_co as $r) {
+                if (l3m_get_user_client((int)$r->id) !== $my_client_co) continue;
+                if (!empty($meta_co[(int)$r->id]['is_ped_lead'])) { $found = $r; break; }
+            }
+        }
+        // A defaut parmi ses propres formateurs, n'importe quel Responsable
+        // pedagogique du meme client.
+        if (!$found && $manager_roleid_co) {
+            foreach (array_keys($meta_co) as $uid_co) {
+                if (empty($meta_co[$uid_co]['is_ped_lead'])) continue;
+                if (l3m_get_user_client((int)$uid_co) !== $my_client_co) continue;
+                $u_co = $DB->get_record('user', ['id' => (int)$uid_co, 'deleted' => 0]);
+                if ($u_co) { $found = $u_co; break; }
+            }
+        }
+        // Dernier recours : premier contact Administration (memes regles que
+        // msg_directory ci-dessus).
+        if (!$found) {
+            foreach (get_admins() as $adm) {
+                if (l3m_get_user_client((int)$adm->id) !== $my_client_co) continue;
+                $found = $adm; break;
+            }
+        }
+
+        if (!$found) { echo json_encode(['ok' => false]); exit; }
+        echo json_encode(['ok' => true, 'uid' => (int)$found->id, 'nom' => $found->firstname . ' ' . $found->lastname], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'msg_thread') {
         $otherid = optional_param('otherid', 0, PARAM_INT);
         $convid  = optional_param('convid', 0, PARAM_INT);
@@ -410,6 +480,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 \core_message\api::MESSAGE_CONVERSATION_TYPE_INDIVIDUAL, [$USER->id, $otherid]
             );
             $convid = (int)$newconv->id;
+        }
+        // Moodle refuse un message si le destinataire n'a pas mis sa messagerie
+        // en "accessible a tous" ET n'a pas de cours partage avec l'expediteur
+        // (ex : un admin/manager n'est inscrit dans aucun cours) — echoue alors
+        // silencieusement avec une exception "cannot send a message to
+        // conversation", meme si l'annuaire de CETTE plateforme a deja fait le
+        // tri de qui peut contacter qui. On etablit donc la relation "contact"
+        // Moodle (unidirectionnelle suffisante, is_contact() teste les 2 sens)
+        // avant l'envoi, pour que le message natif passe toujours.
+        if (!\core_message\api::is_contact($USER->id, $otherid)) {
+            \core_message\api::add_contact($USER->id, $otherid);
         }
         $sent      = \core_message\api::send_message_to_conversation($USER->id, $convid, $text, FORMAT_MOODLE);
         $formatted = \core_message\api::get_most_recent_conversation_message($convid, $USER->id);
@@ -553,6 +634,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // ── Chat IA "Demander a Lia" — questions libres sur le contenu d'un
+    // module, historique conserve par eleve+cours. Generalise a tous les
+    // comptes (etait reserve aux testeurs beta). ──
+    if ($action === 'lia_chat_history' || $action === 'lia_chat_send') {
+        $courseid_chat = optional_param('courseid', 0, PARAM_INT);
+        // Securite : l'eleve doit reellement etre inscrit a ce cours.
+        $enrolled_chat = $courseid_chat && is_enrolled(context_course::instance($courseid_chat, IGNORE_MISSING), $USER->id);
+        if (!$enrolled_chat) {
+            echo json_encode(['ok' => false, 'msg' => 'Cours introuvable ou acces non autorise']);
+            exit;
+        }
+
+        if ($action === 'lia_chat_history') {
+            $rows_chat = $DB->get_records_select(
+                'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
+                [$USER->id, $courseid_chat], 'timecreated ASC', 'id, role, content', 0, 50
+            );
+            $out_chat = array_map(fn($r) => ['role' => $r->role, 'content' => $r->content], array_values($rows_chat));
+            echo json_encode(['ok' => true, 'messages' => $out_chat], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        // lia_chat_send
+        $message_chat = trim(optional_param('message', '', PARAM_TEXT));
+        if ($message_chat === '') { echo json_encode(['ok' => false, 'msg' => 'Message vide']); exit; }
+        if (mb_strlen($message_chat) > 1000) $message_chat = mb_substr($message_chat, 0, 1000);
+
+        // Meme extraction de contenu que lia_remediate (toutes les pages de
+        // cours du module), pour ancrer les reponses sur le vrai contenu.
+        $minfo_chat = get_fast_modinfo($courseid_chat);
+        $ctx_chat = '';
+        foreach ($minfo_chat->get_cms() as $cm_chat) {
+            if ($cm_chat->modname !== 'page') continue;
+            $page_chat = $DB->get_record('page', ['id' => $cm_chat->instance]);
+            if ($page_chat && $page_chat->content) {
+                $ctx_chat .= "\n\n" . trim(strip_tags($page_chat->content));
+            }
+        }
+        $ctx_chat = trim(preg_replace('/\s+/u', ' ', $ctx_chat));
+        if (mb_strlen($ctx_chat) > 6000) $ctx_chat = mb_substr($ctx_chat, 0, 6000);
+
+        // Historique recent (5 derniers echanges) pour garder le fil de la
+        // conversation sans faire grossir le prompt indefiniment.
+        $hist_rows_chat = $DB->get_records_select(
+            'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
+            [$USER->id, $courseid_chat], 'timecreated DESC', 'role, content', 0, 10
+        );
+        $hist_rows_chat = array_reverse(array_values($hist_rows_chat));
+        $hist_txt_chat = '';
+        foreach ($hist_rows_chat as $h) {
+            $hist_txt_chat .= ($h->role === 'user' ? 'Eleve : ' : 'Lia : ') . $h->content . "\n";
+        }
+
+        $prompt_chat = "Tu es Lia, l'assistante pedagogique d'une formation professionnelle (ECSR, moniteur auto-ecole). "
+            . "Un eleve te pose une question sur le module qu'il est en train de suivre. Voici le contenu du module concerne :\n\n"
+            . ($ctx_chat !== '' ? $ctx_chat : '(pas de contenu texte disponible pour ce module)')
+            . ($hist_txt_chat !== '' ? "\n\nDerniers echanges de la conversation :\n" . $hist_txt_chat : '')
+            . "\n\nNouvelle question de l'eleve : " . $message_chat
+            . "\n\nReponds de facon claire et concise (quelques phrases), en tutoyant l'eleve, en t'appuyant sur le contenu "
+            . "du module ci-dessus. Si la question sort du cadre du module, dis-le simplement et recentre poliment sur le "
+            . "contenu du cours.\n\nReponds UNIQUEMENT avec un objet JSON valide de cette forme exacte : {\"reply\": \"...\"}";
+
+        $result_chat = l3m_call_gemini($prompt_chat);
+        $reply_chat = $result_chat['ok'] && !empty($result_chat['data']['reply'])
+            ? (string)$result_chat['data']['reply']
+            : "Je n'ai pas pu repondre, reessaie dans un instant.";
+
+        $now_chat = time();
+        $DB->insert_record('local_l3madmin_chat_messages', (object)[
+            'userid' => $USER->id, 'courseid' => $courseid_chat, 'role' => 'user',
+            'content' => $message_chat, 'timecreated' => $now_chat,
+        ]);
+        $DB->insert_record('local_l3madmin_chat_messages', (object)[
+            'userid' => $USER->id, 'courseid' => $courseid_chat, 'role' => 'assistant',
+            'content' => $reply_chat, 'timecreated' => $now_chat + 1,
+        ]);
+
+        echo json_encode(['ok' => true, 'reply' => $reply_chat], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     // AJAX : remediation IA sur un quiz rate — reformule le cours + genere
     // 3 nouvelles questions d'entrainement (voir l3m_call_gemini en tete de
     // fichier). Ne touche jamais au moteur de quiz Moodle : aucune note,
@@ -668,6 +830,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // ── "Mon profil" (Réglages) : prénom, nom et email modifiables par
+    // l'élève lui-même. Mot de passe actuel obligatoire pour confirmer.
+    // Note : le prénom/nom peuvent déjà figurer sur des attestations
+    // générées — un changement après coup ne les met pas à jour
+    // rétroactivement, c'est un choix assumé (demande explicite). ──
+    if ($action === 'update_profile') {
+        $new_firstname = trim(optional_param('firstname', '', PARAM_TEXT));
+        $new_lastname  = trim(optional_param('lastname', '', PARAM_TEXT));
+        $new_email     = trim(optional_param('email', '', PARAM_RAW_TRIMMED));
+        $pw_check      = optional_param('password', '', PARAM_RAW);
+
+        if ($new_firstname === '' || $new_lastname === '') {
+            echo json_encode(['ok' => false, 'msg' => 'Prenom et nom sont obligatoires']);
+            exit;
+        }
+        if (mb_strlen($new_firstname) > 100) $new_firstname = mb_substr($new_firstname, 0, 100);
+        if (mb_strlen($new_lastname) > 100) $new_lastname = mb_substr($new_lastname, 0, 100);
+        if ($new_email === '' || !validate_email($new_email)) {
+            echo json_encode(['ok' => false, 'msg' => 'Adresse email invalide']);
+            exit;
+        }
+        if ($pw_check === '') {
+            echo json_encode(['ok' => false, 'msg' => 'Mot de passe requis']);
+            exit;
+        }
+
+        // Recharge l'utilisateur complet depuis la base : $USER (session) ne
+        // porte pas forcement le hash du mot de passe ni l'auth, necessaires
+        // a validate_internal_user_password().
+        $fulluser = $DB->get_record('user', ['id' => $USER->id], '*', MUST_EXIST);
+        if ($fulluser->auth !== 'manual' && $fulluser->auth !== 'email') {
+            echo json_encode(['ok' => false, 'msg' => "Ce compte ne gere pas son mot de passe ici"]);
+            exit;
+        }
+        if (!validate_internal_user_password($fulluser, $pw_check)) {
+            echo json_encode(['ok' => false, 'msg' => 'Mot de passe incorrect']);
+            exit;
+        }
+
+        if (mb_strtolower($new_email) !== mb_strtolower($fulluser->email)) {
+            $taken = $DB->record_exists_sql(
+                "SELECT 1 FROM {user} WHERE LOWER(email) = LOWER(?) AND id != ? AND deleted = 0 AND mnethostid = ?",
+                [$new_email, $USER->id, $CFG->mnethostid]
+            );
+            if ($taken) {
+                echo json_encode(['ok' => false, 'msg' => 'Cette adresse email est deja utilisee par un autre compte']);
+                exit;
+            }
+        }
+
+        $DB->set_field('user', 'firstname', $new_firstname, ['id' => $USER->id]);
+        $DB->set_field('user', 'lastname', $new_lastname, ['id' => $USER->id]);
+        $DB->set_field('user', 'email', $new_email, ['id' => $USER->id]);
+        // Reflete immediatement dans la session en cours (utile si la page
+        // n'est pas rechargee juste apres, ex. appel API direct).
+        $USER->firstname = $new_firstname;
+        $USER->lastname  = $new_lastname;
+        $USER->email     = $new_email;
+
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     echo json_encode(['ok' => false, 'msg' => 'Action inconnue']);
     exit;
 }
@@ -718,8 +943,12 @@ try {
 // Cours + completion
 $my_courses = [];
 $course_ids = [];
-$global_pct = 0;
-$last_course = null;
+// Progression globale basee sur l'avancement reel dans Sequences (Etapes
+// terminees / total des Unites du referentiel) — remplace l'ancienne
+// progression basee sur les 11 cours Moodle depuis le retrait de "Mes
+// modules" (question du 01/10/2026). Independant de l'inscription aux
+// cours Moodle, calcule hors du try/catch ci-dessous.
+$global_pct = l3m_progseq_global_pct($USER->id);
 try {
     $courses_raw = $DB->get_records_sql(
         "SELECT DISTINCT c.id, c.fullname, c.shortname
@@ -747,27 +976,11 @@ try {
             array_merge(['uid' => $USER->id], $par_c)
         );
         $comp_map = [];
-        $tot_all = 0;
-        $don_all = 0;
         foreach ($comp_raw as $cd) {
             $p = (int)$cd->total_mods > 0 ? min(100, (int)round($cd->done_mods / $cd->total_mods * 100)) : 0;
             $comp_map[(int)$cd->course] = ['total' => (int)$cd->total_mods, 'done' => (int)$cd->done_mods, 'pct' => $p];
-            $tot_all += (int)$cd->total_mods;
-            $don_all += (int)$cd->done_mods;
         }
-        $global_pct = $tot_all > 0 ? min(100, (int)round($don_all / $tot_all * 100)) : 0;
 
-        list($in_la, $par_la) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'lacid');
-        $last_raw = $DB->get_record_sql(
-            "SELECT ul.courseid, c.fullname, c.shortname
-             FROM {user_lastaccess} ul JOIN {course} c ON c.id = ul.courseid
-             WHERE ul.userid = :uid AND ul.courseid $in_la
-             ORDER BY ul.timeaccess DESC LIMIT 1",
-            array_merge(['uid' => $USER->id], $par_la)
-        );
-        if ($last_raw) {
-            $last_course = ['id' => (int)$last_raw->courseid, 'fullname' => $last_raw->fullname, 'shortname' => $last_raw->shortname];
-        }
         // Deblocages ponctuels accordes par le Responsable pedagogique (voir
         // espace-formateur.php, section Pedagogie) — un module dans cette
         // liste reste ouvert meme si la chaine est cassee avant lui.
@@ -912,12 +1125,29 @@ if ($my_cohort_data) {
     if ($ts) $current_week_rel = max(1, min($formation_total_weeks, (int)floor(($now - $ts) / (7 * 86400)) + 1));
 }
 
+// "Sequences" de la section "Mes modules" — repertoire de modules du
+// referentiel choisis par le Responsable pedagogique (voir
+// sequences-config.php / l3m_progseq_for_display() dans l3m_referentiel.php).
+$prog_sequences = l3m_progseq_for_display($USER->id);
+
+// Progression par Sous-matiere (cle "sm-<mid>-<sid>", meme format que les
+// ids de noeuds de Programme) : utilisee par Parcours pour afficher un
+// pourcentage base sur le referentiel au lieu de l'ancien pourcentage
+// d'avancement Moodle (question du 06/10/2026).
+$ref_sm_pct = [];
+foreach (l3m_referentiel_matieres() as $mid => $matiere) {
+    foreach ($matiere['sous_matieres'] as $sid => $sm) {
+        $ref_sm_pct["sm-$mid-$sid"] = l3m_progseq_sm_stats((int)$mid, (int)$sid, $USER->id);
+    }
+}
+
 $eleve_data = json_encode([
     'student'         => $student_info,
     'cohort'          => $my_cohort_data,
     'courses'         => $my_courses,
+    'prog_sequences'  => $prog_sequences,
+    'ref_sm_pct'      => $ref_sm_pct,
     'global_pct'      => $global_pct,
-    'last_course'     => $last_course,
     'pending_assigns' => $pending_assigns,
     'events'          => $my_events,
     'glowbl_lti_map'  => $glowbl_lti_map,
@@ -935,7 +1165,8 @@ $glowbl_url    = 'https://l3m.glowbl.com/l3m-ecsr';
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mon Espace — <?= s($brand['name']) ?></title>
+<title>Mon Espace · <?= s($brand['name']) ?></title>
+<link rel="icon" type="image/png" href="<?= s($brand['logo']) ?>">
 <style>
 :root {
   --teal:<?= $brand['teal'] ?>; --teal-d:<?= $brand['teal_d'] ?>; --teal-t:<?= $brand['teal_t'] ?>;
@@ -1002,7 +1233,12 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 .msg-modal-close { position:absolute; top:12px; right:12px; z-index:5; border:none; background:var(--ink); width:32px; height:32px; border-radius:50%; font-size:15px; color:#fff; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
-.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
+/* position:static + z-index:auto : ".msg-list-pane" est un <aside>, comme le
+   menu principal — sans ce reset il herite du "aside { position:sticky;
+   z-index:50 }" plus haut (regle generique sur la balise, pas la classe),
+   ce qui le fait passer AU-DESSUS du bouton de fermeture (z-index:5) de la
+   messagerie et le rend invisible/inaccessible. */
+.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); position:static; z-index:auto; }
 .msg-list-head { padding:20px 20px 4px; }
 .msg-list-head h2 { margin:0; font-size:19px; font-weight:800; }
 .msg-list-sub { font-size:12px; color:var(--muted); margin-top:2px; }
@@ -1026,7 +1262,15 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 .msg-contact.unread .msg-contact-preview { color:var(--ink); font-weight:600; }
 .msg-contact-time { font-size:10.5px; color:var(--muted); white-space:nowrap; margin-left:auto; }
 .msg-contact-unread-badge { position:absolute; right:10px; bottom:9px; background:var(--teal); color:#fff; font-size:9.5px; font-weight:800; border-radius:99px; min-width:16px; height:16px; display:flex; align-items:center; justify-content:center; padding:0 4px; }
-.msg-contact-fav-star { border:none; background:none; cursor:pointer; font-size:14px; color:var(--sand); flex-shrink:0; }
+/* display:inline-flex + width:auto : ".msg-list-pane" est un <aside> (voir
+   plus haut) — sans ce reset la regle generique "aside button { width:100%;
+   display:flex }" du menu lateral s'applique aussi a cette etoile, qui
+   s'etire alors sur quasi toute la largeur de la ligne (jusqu'a ~260px) et
+   avale silencieusement les clics destines a selectionner le contact
+   (event.stopPropagation() empeche alors msgSelectContact() de se
+   declencher) — d'ou l'impression qu'il faut plusieurs clics pour ouvrir
+   une conversation. */
+.msg-contact-fav-star { border:none; background:none; cursor:pointer; font-size:14px; color:var(--sand); flex-shrink:0; display:inline-flex; width:auto; align-items:center; justify-content:center; }
 .msg-contact-fav-star.on { color:var(--orange); }
 
 .av-c0 { background:var(--violet-t); color:var(--violet-d); }
@@ -1082,6 +1326,14 @@ main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
 h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
 .eyebrow { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:0 0 4px; }
+/* Sous-sections de "Mes modules" (Programme / Modules) — voir v-cours.
+   Question du 21/09/2026 : les deux blocs se melangeaient sous un seul
+   titre "Mes modules", on les separe visuellement avec un titre propre a
+   chacun et un separateur entre les deux. */
+.section-title { font-size:16px; font-weight:800; margin:18px 0 10px; display:flex; align-items:center; gap:8px; }
+.section-title:first-of-type { margin-top:6px; }
+.section-divider { height:1px; background:var(--line); margin:28px 0 6px; }
+.prog-embed-box { border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:8px; background:#fff; }
 
 /* Panel */
 .panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
@@ -1093,6 +1345,10 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
 .btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
 .btn.mini { padding:5px 12px; font-size:11px; }
+/* La regle globale "aside button:hover" (menu lateral sombre) matchait aussi
+   nos boutons ghost places dans .msg-list-pane (qui est un <aside> clair),
+   rendant le texte quasi blanc sur fond clair = invisible au survol. */
+.msg-list-pane .btn.ghost:hover { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); }
 .btn.orange-btn { background:var(--orange); color:#fff; }
 .btn.violet-btn { background:var(--violet); color:#fff; }
 
@@ -1176,10 +1432,25 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .parc-legend { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-bottom:12px; align-items:center; }
 .psw { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:3px; vertical-align:-1px; }
 
-/* Cours cards */
-.cours-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
-
-.cours-card { background:var(--card); border:1px solid var(--line); border-radius:13px; padding:16px; display:flex; flex-direction:column; gap:8px; transition:box-shadow .15s; }
+/* Sequences (repertoire de modules du referentiel, voir sequences-config.php)
+   — meme visuel que Programme (grille de cartes, voir .card/.grid dans
+   programme.php) au lieu d'un accordeon empile (question du 25/09/2026). */
+.seqp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:16px; }
+.seqp-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; display:flex; flex-direction:column; min-height:150px; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; position:relative; }
+.seqp-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
+.seqp-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:8px; }
+.seqp-title { font-size:16px; font-weight:700; line-height:1.35; margin:0 0 14px; flex-grow:1; color:var(--ink); }
+.seqp-bar-track { height:5px; background:var(--line); border-radius:99px; overflow:hidden; margin-bottom:8px; }
+.seqp-bar-fill { height:100%; background:linear-gradient(90deg,var(--teal),var(--teal-d)); border-radius:99px; }
+.seqp-meta { font-size:13px; color:var(--muted); }
+.seqp-chevron { position:absolute; top:20px; right:18px; color:var(--line); font-size:18px; }
+.seqp-back { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); padding:8px 14px; border-radius:99px; font-size:13px; font-weight:600; cursor:pointer; font-family:inherit; margin-bottom:14px; }
+.seqp-back:hover { border-color:var(--teal); }
+.seqp-detail-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:4px; }
+.seqp-detail-title { font-size:20px; margin:0 0 14px; color:var(--ink); }
+.seqp-mod-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+.seqp-mod-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; display:flex; align-items:center; min-height:64px; font-size:14px; font-weight:700; color:var(--ink); line-height:1.35; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; }
+.seqp-mod-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
 /* ─── vue detail (contenu cours dynamique) ─── */
 #v-detail.on{display:flex!important;flex-direction:column;margin:-24px -28px -80px;height:100vh;overflow:hidden;background:var(--bg)}
 .dv-topbar{padding:18px 24px 0;background:var(--bg);flex-shrink:0}
@@ -1235,6 +1506,23 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .lia-modal-close{position:absolute;top:12px;right:12px;border:none;background:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;color:#fff;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
 .lia-modal h2{margin:0 0 4px;font-size:17px;color:var(--ink)}
 .lia-modal .lia-sub{font-size:12px;color:var(--muted);margin-bottom:16px}
+/* ── Chat IA "Demander a Lia" (testeurs beta) ── */
+.lia-chat-fab{position:absolute;bottom:20px;right:20px;z-index:10;background:#5B4FCF;color:#fff;border:none;border-radius:99px;padding:10px 18px;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.2);display:flex;align-items:center;gap:6px}
+.lia-chat-fab:hover{background:#4A3FA3}
+.lia-chat-modal{width:480px;max-width:94vw;height:640px;max-height:88vh;background:var(--card);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);position:relative;display:flex;flex-direction:column;overflow:hidden}
+.lia-chat-head{padding:16px 50px 16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.lia-chat-head b{font-size:14px}
+.lia-chat-head .sub{font-size:11.5px;color:var(--muted)}
+.lia-chat-close{position:absolute;top:12px;right:12px;border:none;background:var(--ink);width:30px;height:30px;border-radius:50%;font-size:14px;color:#fff;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
+.lia-chat-body{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.lia-chat-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
+.lia-chat-bubble.user{align-self:flex-end;background:var(--teal);color:#fff;border-radius:14px 14px 4px 14px}
+.lia-chat-bubble.assistant{align-self:flex-start;background:var(--bg);color:var(--ink);border-radius:14px 14px 14px 4px}
+.lia-chat-empty{text-align:center;color:var(--muted);font-size:13px;padding:30px 10px}
+.lia-chat-input-row{display:flex;gap:10px;padding:14px 20px;border-top:1px solid var(--line);flex-shrink:0}
+.lia-chat-input-row textarea{flex:1;border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-family:inherit;font-size:13px;resize:none;max-height:80px}
+.lia-chat-send{background:var(--orange);color:#fff;border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;flex-shrink:0;font-size:14px}
+.lia-chat-send:disabled{opacity:.5;cursor:default}
 .lia-explication{background:var(--teal-t);border-radius:10px;padding:14px 16px;font-size:14px;line-height:1.55;color:var(--ink);margin-bottom:18px}
 .lia-q{margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--line)}
 .lia-q:last-child{border-bottom:none}
@@ -1265,6 +1553,12 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
   .dv-mobile-back{display:flex;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid #E4E1D6;background:#fff;font-weight:700;font-size:13px;color:var(--ink);cursor:pointer;flex-shrink:0}
   .dv-body.dv-mob-content .dv-left{display:none}
   .dv-body.dv-mob-content .dv-right{display:flex}
+  /* Bouton "Demander a Lia" en pastille icone seule sur mobile : la version
+     large (texte + icone) chevauche les boutons de fin d'activite (ex.
+     "Terminer le test" d'un quiz) qui defilent en bas de l'iframe — la
+     pastille reduit fortement la zone de recouvrement. */
+  .lia-chat-fab{padding:13px;border-radius:50%;bottom:16px;right:16px}
+  .lia-chat-fab .lia-fab-label{display:none}
 }
 /* Apercu instantane (objectifs + WhatsApp) affiche a la fermeture d'une activite,
    sans recharger toute la page de cours Moodle dans l'iframe (beaucoup plus lent). */
@@ -1279,16 +1573,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .dv-overview-whatsapp:hover{background:#1ebe57}
 .dv-overview-empty{color:var(--muted);font-size:13px;font-style:italic;text-align:center;padding:60px 0}
 @media (max-width:640px){.dv-overview .l3m-obj-grid{grid-template-columns:1fr}}
-.cours-card:hover { box-shadow:0 4px 16px rgba(36,51,60,.08); }
-.cours-shortname { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); }
-.cours-fullname { font-size:13.5px; font-weight:700; color:var(--ink); line-height:1.35; min-height:calc(13.5px * 1.35 * 2); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.cours-pct { font-size:12px; color:var(--muted); }
 .pbar { height:6px; border-radius:3px; background:var(--line); }
 .pbar i { display:block; height:100%; border-radius:3px; background:var(--teal); }
-.cours-card .btn.mini.primary { margin-top:auto !important; align-self:flex-start; }
-.cours-card.cours-locked { opacity:.6; cursor:not-allowed; }
-.cours-card.cours-locked .cours-fullname,.cours-card.cours-locked .cours-shortname { color:var(--muted); }
-.cours-lock-btn { margin-top:auto !important; align-self:flex-start; background:var(--line) !important; color:var(--muted) !important; cursor:not-allowed !important; }
 
 /* Agenda */
 .cal-wrap{display:flex;flex-direction:column;height:calc(100vh - 40px);margin:-24px -28px -80px;overflow:hidden;background:var(--bg)}
@@ -1417,6 +1703,16 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .param-row .lbl { color:var(--muted); }
 .param-row .val { font-weight:700; text-align:right; }
 
+/* Édition email (Mon profil) */
+.prof-edit-link { border:none; background:none; padding:2px 6px; font-size:10px; font-weight:700; color:var(--teal-d); cursor:pointer; text-decoration:underline; font-family:inherit; }
+.prof-edit-form { margin-top:10px; padding-top:12px; border-top:1px solid var(--line); }
+.prof-edit-form label { display:block; font-size:11px; font-weight:700; color:var(--muted); margin-bottom:4px; }
+.prof-edit-form .fld { margin-bottom:10px; }
+.prof-edit-form input { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12.5px; background:var(--bg); color:var(--ink); font-family:inherit; box-sizing:border-box; }
+.prof-edit-form input:focus { outline:none; border-color:var(--teal); }
+.prof-edit-form .actions { display:flex; gap:8px; justify-content:flex-end; }
+.prof-edit-err { color:var(--red,#D64545); font-size:11px; margin:-4px 0 10px; display:none; }
+
 /* Veh card */
 .veh-card { border-radius:10px; overflow:hidden; margin-bottom:8px; }
 .veh-header { background:var(--orange); color:#fff; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; padding:7px 13px; }
@@ -1502,15 +1798,40 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .tl-bot-item.here b { color:var(--violet); }
 
 button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
-@media(max-width:760px) { aside { flex-basis:52px; } main { padding:16px 14px 60px; } .cols2 { grid-template-columns:1fr; } }
+@media(max-width:760px) {
+  /* Meme correctif que espace-formateur.php : le texte du libelle est un
+     noeud brut juste apres <span class="nav-ico">, sans span dedie a
+     cacher — font-size:0 sur le bouton le fait disparaitre, .nav-ico
+     garde sa propre taille (regle de base) et reste visible. Sans ca,
+     l'aside restait a ~90px malgre flex-basis:52px (min-content size par
+     defaut d'un flex item), resserrant tout le contenu principal.
+  */
+  aside { flex-basis:52px; }
+  aside button { font-size:0; }
+  /* Meme souci en haut de l'aside : le badge "Cohorte ..." fait jusqu'a
+     60px (max-width) + son propre padding, plus large que les 52px vises
+     — il forcait lui aussi l'aside a s'elargir. Coherent avec le menu
+     reduit aux icones : on masque le libelle "Eleve" et le badge. */
+  aside .nb-label, aside .cls-chip { display:none; }
+  /* Dernier contributeur : le logo a un style en ligne width:60px (plus
+     large que les 52px vises) — !important necessaire pour passer devant
+     l'inline style. */
+  aside .nav-brand img { width:28px !important; }
+  main { padding:16px 14px 60px; }
+  .cols2 { grid-template-columns:1fr; }
+  /* .cal-wrap (calendrier) annule le padding de "main" via une marge
+     negative fixe (-24px -28px -80px), calquee sur le padding desktop de
+     "main" (24px 28px 80px) — mais la regle mobile ci-dessus reduit ce
+     padding a 16px 14px 60px sans que la marge negative suive, ce qui fait
+     deborder le calendrier de 14px de chaque cote (colonnes LUN/DIM
+     coupees, confirme par mesure directe). On aligne les deux valeurs. */
+  .cal-wrap { margin:-16px -14px -60px; }
+}
 @media(prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }
 </style>
 </head>
 
 <body>
-<?php if (l3m_is_beta_tester($USER->id)): ?>
-<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace élève</div>
-<?php endif; ?>
 <div class="app">
 
 <aside>
@@ -1576,7 +1897,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <h2 class="hero-greeting" id="acc-greeting">Bonjour !</h2>
       <p class="hero-desc" id="hero-desc">Chargement&hellip;</p>
       <div class="hero-ctas">
-        <a class="btn primary" id="hero-resume-btn" href="#" target="_blank" rel="noopener">Reprendre le cours &#8594;</a>
+        <button class="btn primary" onclick="navTo('cours')">Voir mes séquences</button>
         <button class="btn ghost" onclick="navTo('parcours')">Voir mon parcours</button>
       </div>
     </div>
@@ -1657,9 +1978,39 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- VUE MODULES -->
 <div class="view" id="v-cours">
   <p class="eyebrow">Mes formations</p>
-  <h1>Mes modules</h1>
-  <p class="sub" id="cours-sub">Chargement…</p>
-  <div class="cours-grid" id="cours-grid"></div>
+
+  <!-- Restructuration Matiere > Sous-matiere > Unite / sequences multi-etapes
+       generalisee a tous les eleves le 17/09/2026 (etait reservee aux
+       testeurs beta Latifa pendant le chantier). Cote eleve, seul
+       "Programme" est expose : "Faire l'etape" y lance deja directement le
+       lecteur de sequence, donc une 2e carte "Sequences de positionnement"
+       ferait doublon. La page sequence-select.php reste fonctionnelle
+       (formateurs, acces direct) — juste pas de lien d'entree ici.
+       Depuis le 21/09/2026 : la page Programme elle-meme est integree ici en
+       iframe (embed=1, voir programme.php) a la place de l'ancienne carte
+       "Ouvrir" — hauteur ajustee dynamiquement via postMessage a chaque
+       navigation dans l'arborescence (voir listener plus bas). Section
+       separee de "Mes modules" ci-dessous (question du 21/09 : les deux se
+       melangeaient sous un seul titre, on les distingue maintenant
+       clairement — Programme = bibliotheque de supports, Modules = les 11
+       cours Moodle, deux choses differentes). -->
+  <div class="prog-embed-box">
+    <iframe id="prog-iframe" src="<?= $CFG->wwwroot ?>/programme.php?embed=1" style="width:100%;border:none;display:block;min-height:220px" title="Programme"></iframe>
+  </div>
+  <script>
+  window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'l3m-prog-height') {
+      var ifr = document.getElementById('prog-iframe');
+      if (ifr) ifr.style.height = e.data.height + 'px';
+    }
+  });
+  </script>
+
+  <div class="section-divider"></div>
+
+  <h2 class="section-title">▶ Séquences</h2>
+  <p class="sub" id="seq-sub">Chargement…</p>
+  <div class="seq-list" id="seq-list"></div>
 </div>
 
 <!-- VUE DETAIL -->
@@ -1703,6 +2054,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="dv-loading" id="dv-loading" style="display:none"><span class="dv-spinner"></span></div>
       <iframe id="dv-iframe" src="" title="Contenu du module" allowfullscreen style="display:none"></iframe>
       <div class="dv-overview" id="dv-overview" style="display:none"></div>
+      <button type="button" class="lia-chat-fab" id="lia-chat-fab" style="display:none" onclick="openLiaChat()"><span class="lia-fab-ico">💬</span><span class="lia-fab-label"> Demander à Lia</span></button>
     </div>
 
   </div>
@@ -1768,13 +2120,39 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <p class="sub">Profil et informations de parcours.</p>
   <div class="params-grid">
     <div class="set-card">
-      <div class="sc-head"><div class="ico ico-teal">◉</div><div class="text"><h3>Mon profil</h3><p>Donnees Moodle — lecture seule</p></div></div>
-      <div class="param-row"><span class="lbl">Prenom</span><span class="val"><?= s($USER->firstname) ?></span></div>
-      <div class="param-row"><span class="lbl">Nom</span><span class="val"><?= s($USER->lastname) ?></span></div>
-      <div class="param-row"><span class="lbl">Email</span><span class="val" style="font-size:12px"><?= s($USER->email) ?></span></div>
+      <div class="sc-head"><div class="ico ico-teal">◉</div><div class="text"><h3>Mon profil</h3><p>Informations de connexion</p></div></div>
+      <div class="param-row"><span class="lbl">Prenom</span><span class="val" id="prof-firstname-display"><?= s($USER->firstname) ?></span></div>
+      <div class="param-row"><span class="lbl">Nom</span><span class="val" id="prof-lastname-display"><?= s($USER->lastname) ?></span></div>
+      <div class="param-row"><span class="lbl">Email</span><span class="val" id="prof-email-display" style="font-size:12px"><?= s($USER->email) ?></span></div>
+      <div id="prof-edit-trigger-row" style="text-align:right;margin-top:8px">
+        <button type="button" class="prof-edit-link" id="prof-edit-btn" onclick="profEditToggle(true)">Modifier mes informations</button>
+      </div>
+      <div class="prof-edit-form" id="prof-edit-form" style="display:none">
+        <div class="prof-edit-err" id="prof-edit-err"></div>
+        <div class="fld">
+          <label>Prenom</label>
+          <input type="text" id="prof-firstname-input">
+        </div>
+        <div class="fld">
+          <label>Nom</label>
+          <input type="text" id="prof-lastname-input">
+        </div>
+        <div class="fld">
+          <label>Email</label>
+          <input type="email" id="prof-email-input" placeholder="nouvelle-adresse@exemple.fr">
+        </div>
+        <div class="fld">
+          <label>Mot de passe actuel <small style="font-weight:400">(pour confirmer)</small></label>
+          <input type="password" id="prof-edit-pw" placeholder="Votre mot de passe" autocomplete="current-password">
+        </div>
+        <div class="actions">
+          <button type="button" class="btn mini ghost" onclick="profEditToggle(false)">Annuler</button>
+          <button type="button" class="btn mini primary" id="prof-edit-save-btn" onclick="profEditSave()">Enregistrer</button>
+        </div>
+      </div>
     </div>
     <div class="set-card">
-      <div class="sc-head"><div class="ico ico-orange">⚑</div><div class="text"><h3>Ma classe</h3><p>Cohorte et sous-groupe</p></div></div>
+      <div class="sc-head"><div class="ico ico-orange">⚑</div><div class="text"><h3>Ma <?= l3m_term_classe_lc($USER->id) ?></h3><p><?= l3m_term_classe($USER->id) ?> et sous-groupe</p></div></div>
       <div id="params-classe">—</div>
     </div>
     <div class="set-card">
@@ -1812,6 +2190,21 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
+<div class="util-modal-bg" id="lia-chat-bg" onclick="if(event.target===this)closeLiaChat()">
+  <div class="lia-chat-modal">
+    <button type="button" class="lia-chat-close" onclick="closeLiaChat()" aria-label="Fermer">✕</button>
+    <div class="lia-chat-head">
+      <span style="font-size:20px">💬</span>
+      <div><b>Demander à Lia</b><div class="sub" id="lia-chat-course"></div></div>
+    </div>
+    <div class="lia-chat-body" id="lia-chat-body"></div>
+    <div class="lia-chat-input-row">
+      <textarea id="lia-chat-input" placeholder="Pose ta question sur ce module…" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();liaChatSend();}"></textarea>
+      <button type="button" class="lia-chat-send" id="lia-chat-send-btn" onclick="liaChatSend()">➤</button>
+    </div>
+  </div>
+</div>
+
 <div class="util-modal-bg" id="msg-modal-bg" onclick="if(event.target===this)closeMessageModal()">
   <div class="msg-modal">
     <button type="button" class="msg-modal-close" onclick="closeMessageModal()" aria-label="Fermer">✕</button>
@@ -1824,7 +2217,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <span class="msg-search-ico">&#128269;</span>
         <input type="text" id="msg-search-input" placeholder="Rechercher un contact..." oninput="msgFilterList()">
       </div>
-      <button type="button" class="btn mini" id="msg-new-btn" style="margin:0 14px 8px" onclick="msgToggleDirectory()">+ Nouveau message</button>
+      <button type="button" class="btn mini ghost" id="msg-new-btn" style="margin:0 16px 8px;width:calc(100% - 32px);justify-content:center" onclick="msgToggleDirectory()">+ Nouveau message</button>
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
@@ -1850,6 +2243,22 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 <script>
 var DATA    = <?= $eleve_data ?>;
+// Terminologie beta "classe" -> "cohorte" (l3m_branding.php) — texte affiche
+// uniquement, les noms reels de classe restent inchanges en base.
+var TERM_CLASSE = <?= json_encode(l3m_term_classe($USER->id)) ?>;
+var TERM_CLASSE_LC = <?= json_encode(l3m_term_classe_lc($USER->id)) ?>;
+// Reecrit l'affichage d'un nom de classe stocke tel quel en base
+// ("Classe X ...") en "<terme> X ..." cote testeur beta, sans jamais
+// toucher la donnee reelle (utile pour ne pas casser le filtrage/regex).
+function dispCohName(name) {
+  if (!name) return name;
+  name = name.replace(/^Classe\b/, TERM_CLASSE);
+  // Retire le tiret separateur entre la lettre et la date ("Cohorte B - Juillet
+  // 2026" / "Cohorte B- Septembre 2026" -> "Cohorte B Juillet 2026") — la donnee
+  // brute en base n'est jamais touchee (regex d'extraction de lettre ailleurs).
+  name = name.replace(/^(Cohorte\s+\S+)\s*[-–—]\s*/, '$1 ');
+  return name;
+}
 var WWWROOT = '<?= $CFG->wwwroot ?>';
 var GLOWBL  = '<?= s($glowbl_url) ?>';
 
@@ -2153,11 +2562,27 @@ function msgDayLabel(ts) {
   return d.getDate() + ' ' + M[d.getMonth()];
 }
 
-function openMessageModal() {
+// uid/nom optionnels : ouvre directement le fil de cette personne au lieu
+// de laisser l'eleve la rechercher (voir _msgPendingTarget, msgLoadList()).
+function openMessageModal(uid, nom) {
   document.getElementById('msg-modal-bg').classList.add('on');
   var modal = document.querySelector('.msg-modal');
   if (modal) modal.classList.remove('msg-mob-thread'); // repartir sur la liste des contacts en mobile
+  _msgPendingTarget = uid ? { uid: uid, nom: nom } : null;
   msgLoadList();
+}
+// "Contacter votre coordinateur" (action rapide accueil) : le contact n'est
+// pas connu a l'avance cote client, on le resout serveur (Responsable
+// pedagogique, voir action msg_get_coordinateur) puis on ouvre directement
+// son fil — evite de laisser l'eleve chercher qui contacter.
+function openCoordinateurMessage() {
+  document.getElementById('msg-modal-bg').classList.add('on');
+  var modal = document.querySelector('.msg-modal');
+  if (modal) modal.classList.remove('msg-mob-thread');
+  apiPost({ action: 'msg_get_coordinateur' }).then(function(r) {
+    _msgPendingTarget = (r.ok && r.uid) ? { uid: r.uid, nom: r.nom } : null;
+    msgLoadList();
+  }).catch(function() { msgLoadList(); });
 }
 function closeMessageModal() {
   document.getElementById('msg-modal-bg').classList.remove('on');
@@ -2168,6 +2593,10 @@ function msgMobileBack() {
   if (modal) modal.classList.remove('msg-mob-thread');
 }
 
+// Cible a ouvrir directement des que la liste des conversations est chargee
+// (evite de laisser l'eleve rechercher un contact deja connu — voir
+// openMessageModal(uid, nom) et openCoordinateurMessage()).
+var _msgPendingTarget = null;
 function msgLoadList() {
   apiPost({ action: 'msg_list' }).then(function(r) {
     if (!r.ok) return;
@@ -2179,7 +2608,10 @@ function msgLoadList() {
       : 'Aucune conversation';
     msgRenderContacts();
 
-    if (!_msg.activeUserId && _msg.list.length) {
+    if (_msgPendingTarget) {
+      var t = _msgPendingTarget; _msgPendingTarget = null;
+      msgStartWith(t.uid, t.nom);
+    } else if (!_msg.activeUserId && _msg.list.length) {
       var first = _msg.list[0];
       msgSelectContact(first.convid, first.userid, first.name, first.isonline);
     }
@@ -2430,7 +2862,7 @@ function go(v) {
   _rendered[v] = true;
   if      (v === 'accueil')  renderAccueil();
   else if (v === 'parcours') renderParcours();
-  else if (v === 'cours')    renderCours();
+  else if (v === 'cours')    { renderProgSequences(); }
   else if (v === 'detail')   renderDetail();
   else if (v === 'agenda')   renderAgenda();
   else if (v === 'docs')     renderDocs();
@@ -2561,6 +2993,13 @@ function navTo(v) {
   if (btn) nav(btn);
 }
 
+// Boutons Reprendre/Revoir de Parcours -> Sequences/Programme (on n'a plus
+// de cours Moodle a ouvrir directement, voir openInProgramme plus haut).
+function parcoursOpenRef(ref) {
+  navTo('cours');
+  if (ref) setTimeout(function() { openInProgramme(ref, ''); }, 30);
+}
+
 function renderAccueil() {
   var d   = DATA;
   var pct = d.global_pct || 0;
@@ -2581,37 +3020,12 @@ function renderAccueil() {
   var greet = hr < 12 ? 'Bonjour' : hr < 18 ? 'Bon après-midi' : 'Bonsoir';
   document.getElementById('acc-greeting').textContent = greet + ', ' + d.student.firstname + ' !';
 
-  // Description
+  // Description — ne reference plus un cours Moodle precis (retire du
+  // parcours eleve, voir Sequences/Programme a la place), question du
+  // 06/10/2026.
   var mood = pct >= 70 ? "en excellente progression sur l'e-learning" : pct >= 40 ? "a bonne allure sur l'e-learning" : pct >= 15 ? "en progression sur l'e-learning" : "au debut de l'e-learning";
   var descEl = document.getElementById('hero-desc');
-  var lc = d.last_course || (d.courses.length ? d.courses[0] : null);
-  if (lc && !lc.pct && d.courses.length) {
-    var lcFull = d.courses.find(function(c){ return c.id === lc.id; });
-    if (lcFull) lc = lcFull;
-  }
-  // Cible unique de reprise : toujours le dernier cours reellement consulte
-  // (memes regles pour la banniere et "Mes actions"), sans filtrer par progression.
-  var resumeCourse = lc;
-  if (resumeCourse) {
-    descEl.innerHTML = 'Vous êtes <b>' + mood + '</b>. Reprenez là où vous en étiez : <b>' + esc(resumeCourse.fullname) + '</b>.';
-  } else {
-    descEl.textContent = 'Bienvenue dans votre espace de formation. Acces rapide a vos modules et planning.';
-  }
-
-  // Resume button → ouvre le detail du cours dans espace-eleve
-  var resumeBtn = document.getElementById('hero-resume-btn');
-  if (resumeCourse) {
-    resumeBtn.removeAttribute('href');
-    resumeBtn.removeAttribute('target');
-    resumeBtn.removeAttribute('rel');
-    resumeBtn.style.cursor = 'pointer';
-    resumeBtn.onclick = function(e) {
-      e.preventDefault();
-      openDetail(resumeCourse.id, resumeCourse.fullname, resumeCourse.pct || 0);
-    };
-  } else {
-    resumeBtn.style.display = 'none';
-  }
+  descEl.innerHTML = 'Vous êtes <b>' + mood + '</b>.';
 
   // Ring
   var circ = 2 * Math.PI * 62;
@@ -2725,15 +3139,11 @@ function renderAccueil() {
     }).join('');
   }
 
-  // Mes actions
+  // Mes actions — ne propose plus de reprendre un cours Moodle precis
+  // (retire du parcours eleve, voir Sequences/Programme a la place),
+  // question du 06/10/2026.
   var actEl = document.getElementById('acc-actions');
   var actions = [];
-  var nextCourse = resumeCourse;
-  if (nextCourse) {
-    actions.push({ico: '\u25B6', icoStyle: 'background:var(--teal-t);color:var(--teal-d)',
-      title: nextCourse.fullname, sub: nextCourse.pct + '% complété \xb7 e-learning',
-      courseId: nextCourse.id, coursePct: nextCourse.pct || 0});
-  }
   if (d.pending_assigns && d.pending_assigns.length) {
     var pa = d.pending_assigns[0];
     actions.push({ico: '\u270F', icoStyle: 'background:var(--orange-t);color:var(--orange-d)',
@@ -2753,7 +3163,7 @@ function renderAccueil() {
       '</div>';
     }
     if (a.msgOpen) {
-      return '<div class="action-item" style="cursor:pointer" onclick="openMessageModal()">' +
+      return '<div class="action-item" style="cursor:pointer" onclick="openCoordinateurMessage()">' +
         '<div class="ai-ico" style="' + a.icoStyle + '">' + a.ico + '</div>' +
         '<div class="ai-body"><div class="ai-title">' + esc(a.title) + '</div><div class="ai-sub">' + esc(a.sub) + '</div></div>' +
         '<span class="ai-arr">›</span>' +
@@ -2918,13 +3328,13 @@ function renderAccueil() {
 /* ── PARCOURS ── */
 /* Extended blocs: m = modalities (el/visio/pres) */
 var LIA_BLOCS_EX = [
-  {n:'Politique de la sécurité routière',    m:['el']},
-  {n:'Cadre de l\'activite ECSR',            m:['el']},
-  {n:'L\'automobile',                        m:['el','visio']},
-  {n:'Analyse de la tache de conduite',      m:['el']},
-  {n:'Physiologie du conducteur',            m:['el']},
-  {n:'Psychologie du conducteur',            m:['el','visio']},
-  {n:'Notions pédagogiques',                 m:['el','visio']},
+  {n:'Politique de la sécurité routière',    m:['el'], ref:'sm-1-1'},
+  {n:'Cadre de l\'activite ECSR',            m:['el'], ref:'sm-1-2'},
+  {n:'L\'automobile',                        m:['el','visio'], ref:'sm-1-3'},
+  {n:'Analyse de la tache de conduite',      m:['el'], ref:'sm-1-4'},
+  {n:'Physiologie du conducteur',            m:['el'], ref:'sm-1-5'},
+  {n:'Psychologie du conducteur',            m:['el','visio'], ref:'sm-1-6'},
+  {n:'Notions pédagogiques',                 m:['el','visio'], ref:'sm-1-8'},
   {n:'Ingénierie et construction de séance', m:['el','visio']},
   {n:'Techniques d\'animation',              m:['el','visio']},
   {n:'Gestion des conflits',                 m:['visio']},
@@ -2991,7 +3401,7 @@ function renderParcours() {
   var cohort = d.cohort;
 
   document.getElementById('parc-sub').textContent = ACTIVE_FORMATION.subtitle +
-    (cohort ? ' · ' + cohort.name : '');
+    (cohort ? ' · ' + dispCohName(cohort.name) : '');
 
   // ─── Frise de la formation ───
   var barsHtml = '', labsHtml = '';
@@ -3054,10 +3464,11 @@ function renderParcours() {
             '<span class="parc-wrange">S' + firstW + ' → S' + phase.e + '</span></div>';
 
     phase.blocs.forEach(function(bIdx) {
-      var b      = ACTIVE_FORMATION.blocsEx[bIdx];
-      var status = blocStatus(bIdx);
-      var course = sortedC[bIdx] || null;
-      var pct    = course ? course.pct : 0;
+      var b       = ACTIVE_FORMATION.blocsEx[bIdx];
+      var status  = blocStatus(bIdx);
+      var course  = sortedC[bIdx] || null;
+      var refStat = b.ref ? (d.ref_sm_pct || {})[b.ref] : null;
+      var pct     = refStat ? refStat.pct : (course ? course.pct : 0);
 
       var icoHtml;
       if (status === 'done') {
@@ -3075,22 +3486,26 @@ function renderParcours() {
         return '';
       }).join('');
 
+      var refArg = b.ref ? "'" + b.ref + "'" : 'null';
+      var hasTarget = !!(refStat || course);
       var rightHtml = '';
-      if (status === 'cur' && course) {
+      if (status === 'cur' && hasTarget) {
         var pctClr = pct >= 80 ? 'var(--teal)' : pct >= 40 ? 'var(--violet)' : 'var(--orange)';
         rightHtml = '<div class="parc-right">' +
           '<div class="pbar" style="width:90px"><i style="width:' + pct + '%;background:' + pctClr + '"></i></div>' +
           '<span style="font-size:12px;font-weight:700;color:' + pctClr + ';white-space:nowrap">' + pct + ' %</span>' +
-          '<button type="button" class="btn mini primary" onclick="openDetail(' + course.id + ',\'' + esc(b.n).replace(/'/g,"\\'") + '\',' + pct + ')">Reprendre</button>' +
+          '<button type="button" class="btn mini primary" onclick="parcoursOpenRef(' + refArg + ')">Reprendre</button>' +
           '</div>';
-      } else if (status === 'done' && course) {
+      } else if (status === 'done' && hasTarget) {
         rightHtml = '<div class="parc-right">' +
-          '<button type="button" class="btn mini ghost" onclick="openDetail(' + course.id + ',\'' + esc(b.n).replace(/'/g,"\\'") + '\',' + pct + ')">Revoir</button>' +
+          '<button type="button" class="btn mini ghost" onclick="parcoursOpenRef(' + refArg + ')">Revoir</button>' +
           '</div>';
       }
 
       var subHtml = '';
-      if (status === 'cur' && course && course.total_mods > 0) {
+      if (status === 'cur' && refStat && refStat.total > 0) {
+        subHtml = '<div class="parc-sub-lbl">bloc en cours · ' + refStat.done + '/' + refStat.total + ' unités disponibles</div>';
+      } else if (status === 'cur' && !refStat && course && course.total_mods > 0) {
         subHtml = '<div class="parc-sub-lbl">bloc en cours · ' + course.done_mods + '/' + course.total_mods + ' activités</div>';
       }
 
@@ -3120,41 +3535,88 @@ function renderParcours() {
   document.getElementById('parc-phases').innerHTML = html;
 }
 
-/* ── COURS ── */
-function renderCours() {
-  var d = DATA;
-  document.getElementById('cours-sub').textContent = d.courses.length + ' cours assigné' + (d.courses.length > 1 ? 's' : '');
-  var grid = document.getElementById('cours-grid');
-  if (!d.courses.length) {
-    grid.innerHTML = '<p style="color:var(--muted);font-size:13px">Aucun cours assigné.</p>';
+/* ── SEQUENCES (repertoire de modules du referentiel) — meme visuel/
+   navigation que Programme : grille de cartes, clic = drill-down (au lieu
+   d'un accordeon empile), voir .seqp-* ci-dessus et .card/.grid dans
+   programme.php (question du 25/09/2026). Une Sequence porte AU PLUS UNE
+   Etape (voir sequences-config.php) -> un seul bouton "Faire l'etape" par
+   Sequence, affiche a cote de son titre ; les modules sont de simples
+   cartes informatives, sans action propre (question du 01/10/2026 : plus un
+   bouton par module). ── */
+var _progSeqOpen = null;
+var PROG_IS_STUDENT = true;
+var PLAYERURL_PROG = WWWROOT + '/sequence-player.php';
+
+function progSeqOpen(seqid) {
+  _progSeqOpen = seqid;
+  renderProgSequences();
+}
+
+// Clic sur un module -> renvoie vers lui dans Programme (plus haut sur la
+// page) : on fait naviguer l'iframe jusqu'au bon noeud et on scrolle jusqu'a
+// elle, la carte visee y est mise en valeur (voir OPEN_TARGET/HIGHLIGHT_ID
+// et .card-highlight dans programme.php). Question du 06/10/2026.
+function openInProgramme(target, highlight) {
+  var ifr = document.getElementById('prog-iframe');
+  if (!ifr) return;
+  ifr.src = WWWROOT + '/programme.php?embed=1&open=' + encodeURIComponent(target) + '&highlight=' + encodeURIComponent(highlight);
+  ifr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderProgSequences() {
+  var seqs = DATA.prog_sequences || [];
+  var sub = document.getElementById('seq-sub');
+  var list = document.getElementById('seq-list');
+  list.className = 'seqp-grid';
+  if (!seqs.length) {
+    sub.textContent = 'Aucune séquence pour l\'instant.';
+    list.innerHTML = '';
     return;
   }
-  var lcId = d.last_course ? d.last_course.id : null;
-  grid.innerHTML = d.courses.map(function(c) {
-    var link = WWWROOT + '/course/view.php?id=' + c.id;
-    var isLast = (c.id === lcId);
-    var pctClr = c.pct >= 80 ? 'var(--teal)' : c.pct >= 40 ? 'var(--violet)' : 'var(--orange)';
-    if (c.locked) {
-      return '<div class="cours-card cours-locked" title="Terminez le module précédent pour débloquer celui-ci">' +
-        '<div class="cours-shortname">' + esc(c.shortname) + '</div>' +
-        '<div class="cours-fullname">' + esc(c.fullname) + '</div>' +
-        '<div class="pbar"><i style="width:' + c.pct + '%;background:var(--muted)"></i></div>' +
-        '<div class="cours-pct">' + c.pct + '% complété · ' + c.done_mods + '/' + c.total_mods + ' activités</div>' +
-        '<span class="btn mini cours-lock-btn">🔒 Verrouillé</span>' +
-      '</div>';
+
+  var open = _progSeqOpen !== null ? seqs.filter(function(s) { return s.id === _progSeqOpen; })[0] : null;
+
+  if (open) {
+    sub.textContent = '';
+    var mods = open.modules || [];
+    var modsHtml = mods.length
+      ? mods.map(function(m) {
+          return '<div class="seqp-mod-card" onclick="openInProgramme(\'' + m.target + '\',\'' + m.highlight + '\')">' + esc(m.nom) + '</div>';
+        }).join('')
+      : '<p class="sub" style="margin:0">Aucun module pour l\'instant.</p>';
+    var actionHtml = '';
+    if (open.action && open.action.kind === 'cv') {
+      actionHtml = '<a class="btn mini primary" href="' + esc(open.action.url) + '" target="_blank" rel="noopener">🔴 Rejoindre la classe virtuelle</a>';
+    } else if (PROG_IS_STUDENT && open.action && open.action.kind === 'etape') {
+      actionHtml = open.action.completed
+        ? '<a class="btn mini ghost" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">✓ Étape terminée · Revoir</a>'
+        : '<a class="btn mini primary" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">Commencer la séquence</a>';
     }
-    return '<div class="cours-card" style="cursor:pointer;' + (isLast ? 'border-color:var(--teal);box-shadow:0 0 0 2px var(--teal-t)' : '') + '" data-cid="' + c.id + '" data-pct="' + c.pct + '" onclick="openDetail(+this.dataset.cid,this.querySelector(\'.cours-fullname\').textContent,+this.dataset.pct)">' +
-      (isLast ? '<div style="font-size:10px;font-weight:700;color:var(--teal-d);margin-bottom:2px">Dernier cours ouvert</div>' : '') +
-      '<div class="cours-shortname">' + esc(c.shortname) + '</div>' +
-      '<div class="cours-fullname">' + esc(c.fullname) + '</div>' +
-      '<div class="pbar"><i style="width:' + c.pct + '%;background:' + pctClr + '"></i></div>' +
-      '<div class="cours-pct">' + c.pct + '% complété · ' + c.done_mods + '/' + c.total_mods + ' activités</div>' +
-      '<span class="btn mini primary" style="display:inline-block">' +
-        (isLast ? 'Reprendre' : 'Ouvrir') + ' \u2192' +
-      '</span>' +
+    list.className = '';
+    list.innerHTML =
+      '<button type="button" class="seqp-back" onclick="progSeqOpen(null)">&larr; Retour aux séquences</button>' +
+      '<div class="seqp-detail-id">Séquence ' + open.order + '</div>' +
+      '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px">' +
+        '<h3 class="seqp-detail-title" style="margin:0">' + esc(open.titre) + '</h3>' +
+        actionHtml +
+      '</div>' +
+      '<div class="seqp-mod-grid">' + modsHtml + '</div>';
+    return;
+  }
+
+  sub.textContent = seqs.length + ' séquence' + (seqs.length > 1 ? 's' : '');
+  list.innerHTML = seqs.map(function(seq) {
+    var mods = seq.modules || [];
+    return '<div class="seqp-card" onclick="progSeqOpen(' + seq.id + ')">' +
+      '<div class="seqp-chevron">›</div>' +
+      '<div class="seqp-id">Séquence ' + seq.order + '</div>' +
+      '<div class="seqp-title">' + esc(seq.titre) + '</div>' +
+      '<div class="seqp-bar-track"><div class="seqp-bar-fill" style="width:0%"></div></div>' +
+      '<div class="seqp-meta">' + mods.length + ' module' + (mods.length > 1 ? 's' : '') + '</div>' +
     '</div>';
   }).join('');
 }
+
 
 /* ── DETAIL ── */
 var _dv = {id:0, name:'', pct:0, sections:[]};
@@ -3169,6 +3631,8 @@ function openDetail(courseId, courseName, coursePct) {
     return;
   }
   _dv.id = courseId; _dv.name = courseName; _dv.pct = coursePct; _dv.sections = [];
+  var liaFab = document.getElementById('lia-chat-fab');
+  if (liaFab) liaFab.style.display = courseId ? 'flex' : 'none';
   _rendered['detail'] = false;
   var dvBody = document.querySelector('.dv-body');
   if (dvBody) dvBody.classList.remove('dv-mob-content'); // repartir sur la liste des sections en mobile
@@ -3253,7 +3717,7 @@ function dvRenderSections(sections) {
       html += '<div class="det-mod-name">' + esc(m.name);
       if (m.locked && m.lockinfo) html += '<div class="det-mod-lockinfo">' + esc(m.lockinfo) + '</div>';
       else if (m.failed) {
-        html += '<div class="det-mod-lockinfo det-mod-failed-info">Non réussi — à recommencer pour valider</div>';
+        html += '<div class="det-mod-lockinfo det-mod-failed-info">Non réussi, à recommencer pour valider</div>';
         if (m.modtype === 'quiz') {
           html += '<button type="button" class="lia-remediate-btn" onclick="event.stopPropagation();openLiaRemediation(' + m.cmid + ',\'' + esc(m.name).replace(/'/g,"\\'") + '\')">🔄 Réviser avec Lia</button>';
         }
@@ -3333,6 +3797,75 @@ function closeLiaRemediation() {
   document.getElementById('lia-modal-bg').classList.remove('on');
 }
 
+// ── Chat IA "Demander a Lia" : questions libres sur le module en cours,
+// ancrees sur son contenu reel, historique conserve par eleve+module. ──
+var _liaChat = { messages: [], loaded: false, courseid: 0 };
+
+function openLiaChat() {
+  if (!_dv.id) return;
+  document.getElementById('lia-chat-course').textContent = _dv.name || '';
+  document.getElementById('lia-chat-bg').classList.add('on');
+  if (!_liaChat.loaded || _liaChat.courseid !== _dv.id) {
+    _liaChat.messages = []; _liaChat.loaded = false; _liaChat.courseid = _dv.id;
+    document.getElementById('lia-chat-body').innerHTML = '<div class="lia-chat-empty"><span class="dv-spinner"></span></div>';
+    apiPost({ action: 'lia_chat_history', courseid: _dv.id }).then(function(r) {
+      _liaChat.messages = (r.ok && r.messages) ? r.messages : [];
+      _liaChat.loaded = true;
+      liaChatRender();
+    }).catch(function() {
+      _liaChat.messages = []; _liaChat.loaded = true;
+      liaChatRender();
+    });
+  } else {
+    liaChatRender();
+  }
+  setTimeout(function(){ document.getElementById('lia-chat-input').focus(); }, 100);
+}
+
+function closeLiaChat() {
+  document.getElementById('lia-chat-bg').classList.remove('on');
+}
+
+function liaChatRender() {
+  var box = document.getElementById('lia-chat-body');
+  if (!_liaChat.messages.length) {
+    box.innerHTML = '<div class="lia-chat-empty">Pose une question sur ce module. Lia répond en s\'appuyant sur son contenu.</div>';
+  } else {
+    box.innerHTML = _liaChat.messages.map(function(m) {
+      return '<div class="lia-chat-bubble ' + (m.role === 'user' ? 'user' : 'assistant') + '">' + esc(m.content) + '</div>';
+    }).join('');
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function liaChatSend() {
+  var ta = document.getElementById('lia-chat-input');
+  var text = ta.value.trim();
+  if (!text) return;
+  var courseid = _dv.id;
+  ta.value = '';
+  ta.disabled = true;
+  document.getElementById('lia-chat-send-btn').disabled = true;
+  _liaChat.messages.push({ role: 'user', content: text });
+  _liaChat.messages.push({ role: 'assistant', content: '…', pending: true });
+  liaChatRender();
+
+  apiPost({ action: 'lia_chat_send', courseid: courseid, message: text }).then(function(r) {
+    ta.disabled = false;
+    document.getElementById('lia-chat-send-btn').disabled = false;
+    _liaChat.messages.pop();
+    _liaChat.messages.push({ role: 'assistant', content: (r.ok && r.reply) ? r.reply : 'Erreur, réessaie.' });
+    liaChatRender();
+    ta.focus();
+  }).catch(function() {
+    ta.disabled = false;
+    document.getElementById('lia-chat-send-btn').disabled = false;
+    _liaChat.messages.pop();
+    _liaChat.messages.push({ role: 'assistant', content: 'Erreur réseau, réessaie.' });
+    liaChatRender();
+  });
+}
+
 // Ferme la modale Lia et charge le quiz dans l'iframe habillee (dvSelectMod),
 // pour rester dans l'interface LBA plutot que de naviguer vers Moodle brut.
 function liaGoToQuiz(cmid) {
@@ -3357,6 +3890,11 @@ var _dvIframeCSS = [
   '.secondary-navigation,.tertiary-navigation,.activity-navigation{display:none!important}',
   /* zone de bloc "Bottom" du theme mb2nl, vide mais rendue en bandeau sombre */
   '#bottom{display:none!important}',
+  /* Bouton rond fixe "Ouvrir le panneau lateral" du theme mb2nl (.tgsdb_btn,
+     TOC native du cours) : flotte en position fixe par-dessus le contenu
+     (ex. sur une activite Video) — sans utilite ici puisque la plateforme a
+     deja sa propre TOC (colonne de gauche "Contenu du module"). */
+  '.tgsdb_btn{display:none!important}',
   /* tiroir de messagerie natif Moodle, reste visible malgre sa classe "hidden" */
   '[data-region="right-hand-drawer"]{display:none!important}',
   /* layout */
@@ -4016,9 +4554,9 @@ function renderParams() {
   var classEl = document.getElementById('params-classe');
   if (cohort) {
     classEl.innerHTML =
-      '<div class="param-row"><span class="lbl">Classe</span><span class="val">' + esc(cohort.name) + '</span></div>' +
+      '<div class="param-row"><span class="lbl">' + TERM_CLASSE + '</span><span class="val">' + esc(dispCohName(cohort.name)) + '</span></div>' +
       '<div class="param-row"><span class="lbl">Sous-groupe</span><span class="val">' + esc(cohort.subgroup_label) + '</span></div>' +
-      '<div class="param-row"><span class="lbl">Effectif classe</span><span class="val">' + cohort.nb_members + ' élèves</span></div>' +
+      '<div class="param-row"><span class="lbl">Effectif ' + TERM_CLASSE_LC + '</span><span class="val">' + cohort.nb_members + ' élèves</span></div>' +
       '<div class="param-row"><span class="lbl">Rentrée</span><span class="val">' + esc(cohort.startdate) + '</span></div>';
   } else {
     classEl.innerHTML = '<p style="color:var(--muted);font-size:13px">Aucune cohorte assignee.</p>';
@@ -4029,6 +4567,69 @@ function renderParams() {
     '<div class="param-row"><span class="lbl">E-learning complété</span><span class="val">' + d.global_pct + '%</span></div>' +
     '<div class="param-row"><span class="lbl">Semaine LIA</span><span class="val">S ' + d.current_week + '/' + ACTIVE_FORMATION.totalWeeks + '</span></div>' +
     '<div class="param-row"><span class="lbl">Devoirs en attente</span><span class="val">' + d.pending_assigns.length + '</span></div>';
+}
+
+// ── Édition de l'email (Mon profil) — seul champ modifiable par l'élève,
+// confirmation par mot de passe obligatoire (voir action AJAX
+// 'update_profile' côté serveur). Rechargement de page apres succes : le
+// prenom/nom apparaissent a plusieurs autres endroits deja rendus depuis le
+// chargement initial (initiales de l'avatar, "Bonjour <prenom>"...) — plus
+// simple et plus sur de tout re-render via un reload que de patcher chaque
+// affichage individuellement. ──
+function profEditToggle(show) {
+  document.getElementById('prof-edit-form').style.display = show ? 'block' : 'none';
+  document.getElementById('prof-edit-trigger-row').style.display = show ? 'none' : '';
+  document.getElementById('prof-edit-err').style.display = 'none';
+  if (show) {
+    var fnInput = document.getElementById('prof-firstname-input');
+    fnInput.value = document.getElementById('prof-firstname-display').textContent.trim();
+    document.getElementById('prof-lastname-input').value = document.getElementById('prof-lastname-display').textContent.trim();
+    document.getElementById('prof-email-input').value = document.getElementById('prof-email-display').textContent.trim();
+    document.getElementById('prof-edit-pw').value = '';
+    setTimeout(function(){ fnInput.focus(); fnInput.select(); }, 50);
+  }
+}
+
+function profEditSave() {
+  var firstname = document.getElementById('prof-firstname-input').value.trim();
+  var lastname  = document.getElementById('prof-lastname-input').value.trim();
+  var email     = document.getElementById('prof-email-input').value.trim();
+  var pw        = document.getElementById('prof-edit-pw').value;
+  var errEl     = document.getElementById('prof-edit-err');
+  errEl.style.display = 'none';
+
+  if (!firstname || !lastname) {
+    errEl.textContent = 'Prénom et nom sont obligatoires.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!email || email.indexOf('@') === -1) {
+    errEl.textContent = 'Adresse email invalide.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!pw) {
+    errEl.textContent = 'Merci de saisir votre mot de passe pour confirmer.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  var btn = document.getElementById('prof-edit-save-btn');
+  btn.disabled = true;
+  apiPost({ action: 'update_profile', firstname: firstname, lastname: lastname, email: email, password: pw }).then(function(r) {
+    if (r.ok) {
+      toast('Profil mis à jour');
+      setTimeout(function(){ location.reload(); }, 600);
+    } else {
+      btn.disabled = false;
+      errEl.textContent = r.msg || 'Erreur, réessaie.';
+      errEl.style.display = 'block';
+    }
+  }).catch(function() {
+    btn.disabled = false;
+    errEl.textContent = 'Erreur réseau, réessaie.';
+    errEl.style.display = 'block';
+  });
 }
 
 // Init — navigation par hash (liens depuis la sidebar Moodle)

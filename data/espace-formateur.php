@@ -6,7 +6,84 @@
 require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
+require_once(__DIR__ . '/l3m_referentiel.php');
 require_login();
+
+// Appel a l'API Gemini (offre gratuite Google) — meme fonction que cote
+// espace-eleve.php (action AJAX 'lia_chat_send' plus bas, chat "Demander a
+// Lia"). Dupliquee ici plutot que factorisee dans lia_engine.php, comme le
+// reste des fonctionnalites de ce chat (memes conventions que la messagerie,
+// le mobile, etc. dupliquees par fichier tout au long de ce chantier) — evite
+// de toucher a espace-eleve.php (deja valide) pour cette nouvelle partie.
+function l3m_call_gemini($prompt) {
+    $apikey = getenv('GEMINI_API_KEY');
+    if (!$apikey) {
+        return ['ok' => false, 'msg' => "Cle API Gemini non configuree sur le serveur"];
+    }
+    // "flash-lite" plutot que "flash" : le modele flash complet (gemini-3.6-flash
+    // derriere l'alias gemini-flash-latest) s'est revele limite a 20 requetes/JOUR
+    // sur l'offre gratuite (quota "GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+    // largement insuffisant. Les variantes "lite" ont un quota gratuit plus genereux.
+    $url  = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=' . $apikey;
+    $body = json_encode([
+        'contents'         => [['parts' => [['text' => $prompt]]]],
+        'generationConfig' => ['responseMimeType' => 'application/json'],
+    ]);
+
+    // L'offre gratuite Gemini a un quota de requetes/minute assez bas : un
+    // 429 (quota atteint) ou 503 (surcharge cote Google) est transitoire et
+    // se resout en general en quelques secondes — on retente automatiquement
+    // avant de renvoyer une erreur.
+    $max_tries = 3;
+    $httpcode  = 0;
+    $response  = false;
+    $curlerr   = '';
+    for ($try = 1; $try <= $max_tries; $try++) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS     => $body,
+            CURLOPT_TIMEOUT        => 30,
+            // Le conteneur n'a pas de connectivite IPv6 ("Network is
+            // unreachable") ; sans forcer l'IPv4, curl peut rester bloque a
+            // tenter les adresses IPv6 renvoyees par le DNS de Google avant
+            // meme d'essayer l'IPv4 qui fonctionne, provoquant un timeout
+            // complet malgre une connectivite reseau normale par ailleurs.
+            CURLOPT_IPRESOLVE      => CURL_IPRESOLVE_V4,
+        ]);
+        $response = curl_exec($ch);
+        $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlerr  = curl_error($ch);
+        curl_close($ch);
+
+        if ($response !== false && in_array($httpcode, [429, 503], true) === false) {
+            break; // succes, ou echec definitif (pas de retry utile) : on sort de la boucle
+        }
+        if ($try < $max_tries) {
+            sleep($try * 2); // 2s puis 4s avant les tentatives suivantes
+        }
+    }
+
+    if ($response === false) {
+        return ['ok' => false, 'msg' => 'Erreur reseau vers Gemini : ' . $curlerr];
+    }
+    $decoded = json_decode($response, true);
+    if ($httpcode !== 200 || !$decoded) {
+        if (in_array($httpcode, [429, 503], true)) {
+            return ['ok' => false, 'msg' => "Lia est momentanement surchargee (beaucoup de demandes en meme temps). Reessaie dans une minute."];
+        }
+        return ['ok' => false, 'msg' => 'Erreur API Gemini (HTTP ' . $httpcode . ')'];
+    }
+    $text = $decoded['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    $data = json_decode($text, true);
+    if (!$data) {
+        return ['ok' => false, 'msg' => 'Reponse IA illisible'];
+    }
+    return ['ok' => true, 'data' => $data];
+}
+
 $user_client = l3m_get_user_client($USER->id);
 $brand = l3m_get_brand_by_client($user_client);
 
@@ -31,102 +108,6 @@ try {
       UNIQUE KEY `course_cm` (`courseid`,`cmid`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 } catch (Exception $e) {}
-
-// ── AJAX : contenu détaillé d'un cours (sections + activités), pour l'aperçu
-//    "Ajouter du contenu" — même logique que espace-eleve.php pour un rendu identique ──
-if (isset($_GET['action']) && $_GET['action'] === 'course_detail') {
-    header('Content-Type: application/json');
-    $cid = (int)($_GET['courseid'] ?? 0);
-    if (!$cid) { echo json_encode(['ok'=>false,'msg'=>'id manquant']); exit; }
-    try {
-        $course = $DB->get_record('course', ['id' => $cid], '*', MUST_EXIST);
-        $minfo  = get_fast_modinfo($course);
-        $all_cms = array_keys($minfo->get_cms());
-        $comps   = [];
-        if ($all_cms) {
-            list($insql, $inparams) = $DB->get_in_or_equal($all_cms);
-            $rows = $DB->get_records_select('course_modules_completion',
-                "userid = ? AND coursemoduleid $insql",
-                array_merge([$USER->id], $inparams));
-            foreach ($rows as $r) { $comps[$r->coursemoduleid] = (int)$r->completionstate; }
-        }
-        $sections = [];
-        $visible_cmids = [];
-        foreach ($minfo->get_section_info_all() as $snum => $sinfo) {
-            if ($snum == 0 || !$sinfo->visible) continue;
-            $cmids = $sinfo->sequence ? explode(',', $sinfo->sequence) : [];
-            $mods  = [];
-            foreach ($cmids as $cmid) {
-                $cmid = (int)$cmid;
-                if (!isset($minfo->cms[$cmid])) continue;
-                $cm = $minfo->cms[$cmid];
-                if (!$cm->visible) continue;
-                $done = isset($comps[$cmid]) && $comps[$cmid] > 0;
-                $mods[] = ['cmid'=>$cmid,'name'=>$cm->name,'modtype'=>$cm->modname,'done'=>$done];
-                $visible_cmids[] = $cmid;
-            }
-            $total = count($mods);
-            $done_n = count(array_filter($mods, function($m){ return $m['done']; }));
-            $sections[] = ['num'=>$snum,'name'=>$sinfo->name ?: ('Section '.$snum),
-                           'mods'=>$mods,'total'=>$total,'done_n'=>$done_n];
-        }
-
-        // ── Détection de nouveau contenu → notifie les élèves inscrits à ce cours ──
-        $seen_cmids = $DB->get_fieldset_select('l3m_seen_modules', 'cmid', 'courseid = ?', [$cid]);
-        if (!$seen_cmids) {
-            // Premier passage sur ce cours : on enregistre l'état actuel sans notifier
-            // (sinon tout le contenu existant serait notifié d'un coup au premier chargement).
-            foreach ($visible_cmids as $cmid) {
-                $DB->insert_record('l3m_seen_modules', (object)['courseid'=>$cid,'cmid'=>$cmid,'timecreated'=>$now]);
-            }
-        } else {
-            $new_cmids = array_diff($visible_cmids, $seen_cmids);
-            if ($new_cmids) {
-                $course_studentroleid = $DB->get_field('role', 'id', ['shortname' => 'student']);
-                $enrolled = $course_studentroleid ? $DB->get_records_sql(
-                    "SELECT DISTINCT ra.userid
-                     FROM {role_assignments} ra
-                     JOIN {context} cx ON cx.id = ra.contextid AND cx.contextlevel = 50
-                     WHERE cx.instanceid = :cid AND ra.roleid = :rid",
-                    ['cid' => $cid, 'rid' => $course_studentroleid]
-                ) : [];
-                foreach ($new_cmids as $cmid) {
-                    $modname = $minfo->cms[$cmid]->name;
-                    foreach ($enrolled as $stu) {
-                        l3m_send_notification(
-                            $USER->id, (int)$stu->userid, 'Nouvelle séance ajoutée',
-                            'Votre formateur a ajouté une nouvelle séance cette semaine : ' . $modname . ' (' . $course->fullname . ')',
-                            $CFG->wwwroot . '/espace-eleve.php#cours', 'Voir mes modules'
-                        );
-                    }
-                    $DB->insert_record('l3m_seen_modules', (object)['courseid'=>$cid,'cmid'=>$cmid,'timecreated'=>$now]);
-                }
-            }
-        }
-
-        // Fil d'ariane (catégorie racine → sous-catégories → cours) — masqué
-        // par le CSS qui nettoie l'iframe (breadcrumb natif Moodle caché),
-        // reconstruit ici pour le panneau de gauche du viewer.
-        $breadcrumb = [];
-        $catid_bc = (int)$course->category;
-        $safety_bc = 0;
-        while ($catid_bc && $safety_bc < 10) {
-            $cat_bc = $DB->get_record('course_categories', ['id' => $catid_bc], 'id,name,parent');
-            if (!$cat_bc) break;
-            array_unshift($breadcrumb, $cat_bc->name);
-            $catid_bc = (int)$cat_bc->parent;
-            $safety_bc++;
-        }
-        $breadcrumb[] = $course->fullname;
-
-        echo json_encode(['ok'=>true,'sections'=>$sections,
-                          'coursename'=>$course->fullname,'courseid'=>$cid,
-                          'contextid'=>context_course::instance($cid)->id,'breadcrumb'=>$breadcrumb]);
-    } catch (Exception $e) {
-        echo json_encode(['ok'=>false,'msg'=>$e->getMessage()]);
-    }
-    exit;
-}
 
 // ── TABLE l3m_dispos (auto-create) ──
 try {
@@ -506,6 +487,143 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // ── Chat IA "Demander a Lia" — questions libres sur le contenu d'une
+    // Sequence de "Mes modules" (l3m_modules_sequences.json), historique
+    // conserve par formateur+sequence. Rebranche le 06/10/2026 sur les
+    // Sequences du referentiel (voir l3m_progseq_contexte_ia() dans
+    // l3m_referentiel.php) a la place de l'ancien contenu Moodle d'un cours,
+    // en meme temps que la suppression de "Corrections en attente" et de la
+    // visionneuse de cours ("on a plus les cours moodle") — la colonne
+    // "courseid" de local_l3madmin_chat_messages stocke desormais l'id de
+    // Sequence (meme reutilisation de colonne existante que l3m_seq_db_id()
+    // pour sequenceid, aucune migration de schema necessaire). ──
+    if ($action === 'lia_chat_history' || $action === 'lia_chat_send') {
+        $seqid_chat = optional_param('seqid', 0, PARAM_INT);
+        $ctxinfo_chat = $seqid_chat ? l3m_progseq_contexte_ia($seqid_chat) : null;
+        if (!$ctxinfo_chat) {
+            echo json_encode(['ok' => false, 'msg' => 'Séquence introuvable']);
+            exit;
+        }
+
+        if ($action === 'lia_chat_history') {
+            $rows_chat = $DB->get_records_select(
+                'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
+                [$USER->id, $seqid_chat], 'timecreated ASC', 'id, role, content', 0, 50
+            );
+            $out_chat = array_map(fn($r) => ['role' => $r->role, 'content' => $r->content], array_values($rows_chat));
+            echo json_encode(['ok' => true, 'messages' => $out_chat], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        // lia_chat_send
+        $message_chat = trim(optional_param('message', '', PARAM_TEXT));
+        if ($message_chat === '') { echo json_encode(['ok' => false, 'msg' => 'Message vide']); exit; }
+        if (mb_strlen($message_chat) > 1000) $message_chat = mb_substr($message_chat, 0, 1000);
+
+        $ctx_chat = $ctxinfo_chat['texte'];
+
+        // Historique recent (5 derniers echanges) pour garder le fil de la
+        // conversation sans faire grossir le prompt indefiniment.
+        $hist_rows_chat = $DB->get_records_select(
+            'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
+            [$USER->id, $seqid_chat], 'timecreated DESC', 'role, content', 0, 10
+        );
+        $hist_rows_chat = array_reverse(array_values($hist_rows_chat));
+        $hist_txt_chat = '';
+        foreach ($hist_rows_chat as $h) {
+            $hist_txt_chat .= ($h->role === 'user' ? 'Formateur : ' : 'Lia : ') . $h->content . "\n";
+        }
+
+        $prompt_chat = "Tu es Lia, l'assistante pedagogique d'une formation professionnelle (ECSR, moniteur auto-ecole). "
+            . "Un formateur te pose une question sur la Sequence \"" . $ctxinfo_chat['titre'] . "\" qu'il enseigne/edite. "
+            . "Voici ce qu'on sait sur cette sequence :\n\n"
+            . ($ctx_chat !== '' ? $ctx_chat : '(pas de contenu texte disponible pour cette sequence)')
+            . ($hist_txt_chat !== '' ? "\n\nDerniers echanges de la conversation :\n" . $hist_txt_chat : '')
+            . "\n\nNouvelle question du formateur : " . $message_chat
+            . "\n\nReponds de facon claire et concise (quelques phrases), en tutoyant le formateur, en t'appuyant sur le "
+            . "contenu ci-dessus. Tu peux l'aider aussi bien sur le fond pedagogique (comment expliquer une "
+            . "notion, quels points cles retenir) que sur des questions pratiques liees a cette sequence. Si la question sort "
+            . "du cadre de la sequence, dis-le simplement et recentre poliment.\n\nReponds UNIQUEMENT "
+            . "avec un objet JSON valide de cette forme exacte : {\"reply\": \"...\"}";
+
+        $result_chat = l3m_call_gemini($prompt_chat);
+        $reply_chat = $result_chat['ok'] && !empty($result_chat['data']['reply'])
+            ? (string)$result_chat['data']['reply']
+            : "Je n'ai pas pu repondre, reessaie dans un instant.";
+
+        $now_chat = time();
+        $DB->insert_record('local_l3madmin_chat_messages', (object)[
+            'userid' => $USER->id, 'courseid' => $seqid_chat, 'role' => 'user',
+            'content' => $message_chat, 'timecreated' => $now_chat,
+        ]);
+        $DB->insert_record('local_l3madmin_chat_messages', (object)[
+            'userid' => $USER->id, 'courseid' => $seqid_chat, 'role' => 'assistant',
+            'content' => $reply_chat, 'timecreated' => $now_chat + 1,
+        ]);
+
+        echo json_encode(['ok' => true, 'reply' => $reply_chat], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // ── "Mon profil" (Réglages) : prénom, nom et email modifiables par le
+    // formateur lui-même. Mot de passe actuel obligatoire pour confirmer —
+    // même mécanisme que espace-eleve.php. ──
+    if ($action === 'update_profile') {
+        $new_firstname = trim(optional_param('firstname', '', PARAM_TEXT));
+        $new_lastname  = trim(optional_param('lastname', '', PARAM_TEXT));
+        $new_email     = trim(optional_param('email', '', PARAM_RAW_TRIMMED));
+        $pw_check      = optional_param('password', '', PARAM_RAW);
+
+        if ($new_firstname === '' || $new_lastname === '') {
+            echo json_encode(['ok' => false, 'msg' => 'Prenom et nom sont obligatoires']);
+            exit;
+        }
+        if (mb_strlen($new_firstname) > 100) $new_firstname = mb_substr($new_firstname, 0, 100);
+        if (mb_strlen($new_lastname) > 100) $new_lastname = mb_substr($new_lastname, 0, 100);
+        if ($new_email === '' || !validate_email($new_email)) {
+            echo json_encode(['ok' => false, 'msg' => 'Adresse email invalide']);
+            exit;
+        }
+        if ($pw_check === '') {
+            echo json_encode(['ok' => false, 'msg' => 'Mot de passe requis']);
+            exit;
+        }
+
+        // Recharge l'utilisateur complet depuis la base : $USER (session) ne
+        // porte pas forcement le hash du mot de passe ni l'auth, necessaires
+        // a validate_internal_user_password().
+        $fulluser = $DB->get_record('user', ['id' => $USER->id], '*', MUST_EXIST);
+        if ($fulluser->auth !== 'manual' && $fulluser->auth !== 'email') {
+            echo json_encode(['ok' => false, 'msg' => "Ce compte ne gere pas son mot de passe ici"]);
+            exit;
+        }
+        if (!validate_internal_user_password($fulluser, $pw_check)) {
+            echo json_encode(['ok' => false, 'msg' => 'Mot de passe incorrect']);
+            exit;
+        }
+
+        if (mb_strtolower($new_email) !== mb_strtolower($fulluser->email)) {
+            $taken = $DB->record_exists_sql(
+                "SELECT 1 FROM {user} WHERE LOWER(email) = LOWER(?) AND id != ? AND deleted = 0 AND mnethostid = ?",
+                [$new_email, $USER->id, $CFG->mnethostid]
+            );
+            if ($taken) {
+                echo json_encode(['ok' => false, 'msg' => 'Cette adresse email est deja utilisee par un autre compte']);
+                exit;
+            }
+        }
+
+        $DB->set_field('user', 'firstname', $new_firstname, ['id' => $USER->id]);
+        $DB->set_field('user', 'lastname', $new_lastname, ['id' => $USER->id]);
+        $DB->set_field('user', 'email', $new_email, ['id' => $USER->id]);
+        $USER->firstname = $new_firstname;
+        $USER->lastname  = $new_lastname;
+        $USER->email     = $new_email;
+
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     echo json_encode(['ok' => false, 'msg' => 'Action inconnue']);
     exit;
 }
@@ -676,47 +794,6 @@ $sunday = $monday + 7 * 86400;
 // ── Cohortes du formateur (source Planning & Lia) ──
 // Les séances sont calculées en JS depuis startdate + LIA_BLOCS
 $formateur_cohorts = []; // rempli dans la section Planning ci-dessous
-
-// ── Corrections en attente ──
-$corrections = [];
-if ($course_ids) {
-    try {
-        list($in_sql_corr, $in_params_corr) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'corrcid');
-        // cm.id (course_modules.id) est requis par mod/assign/view.php?id=... ,
-        // pas a.id (l'id de l'instance assign) : ce sont deux ids distincts
-        // dans Moodle, d'ou l'erreur "ID de module de cours non valide" si on
-        // confond les deux.
-        $corr_raw = $DB->get_records_sql(
-            "SELECT s.id, s.userid, u.firstname, u.lastname, a.name AS assign_name, a.course,
-                    s.timemodified, a.id AS assignid, cm.id AS cmid
-             FROM {assign_submission} s
-             JOIN {assign} a ON a.id = s.assignment
-             JOIN {user} u ON u.id = s.userid
-             JOIN {modules} md ON md.name = 'assign'
-             JOIN {course_modules} cm ON cm.instance = a.id AND cm.module = md.id
-             LEFT JOIN {assign_grades} g ON g.assignment = s.assignment AND g.userid = s.userid AND g.grade >= 0
-             WHERE a.course $in_sql_corr AND s.status = 'submitted' AND g.id IS NULL
-             ORDER BY s.timemodified ASC LIMIT 20",
-            $in_params_corr
-        );
-        foreach ($corr_raw as $c) {
-            $corrections[] = [
-                'id'           => (int)$c->id,
-                'userid'       => (int)$c->userid,
-                'firstname'    => $c->firstname,
-                'lastname'     => $c->lastname,
-                'assign_name'  => $c->assign_name,
-                'course'       => (int)$c->course,
-                'assignid'     => (int)$c->assignid,
-                'cmid'         => (int)$c->cmid,
-                'timemodified' => (int)$c->timemodified,
-                'date_label'   => userdate($c->timemodified, '%d/%m/%Y'),
-            ];
-        }
-    } catch (Exception $e) {
-        $corrections = [];
-    }
-}
 
 // ── Élèves (rôle student) dans les cours du formateur ──
 $student_roleid = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
@@ -1082,8 +1159,8 @@ $formateur_data = json_encode([
     'courses'      => array_values(array_map(function($c) {
         return ['id' => (int)$c->id, 'fullname' => $c->fullname, 'shortname' => $c->shortname];
     }, (array)$my_courses)),
+    'prog_sequences' => l3m_progseq_for_display($USER->id),
     'cohorts'      => $formateur_cohorts,
-    'corrections'  => $corrections,
     'students'     => $students,
     'signal_lia'   => $signal_lia,
     'hours_week'   => $hours_this_week,
@@ -1112,7 +1189,8 @@ $glowbl_url    = 'https://l3m.glowbl.com/l3m-ecsr';
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Espace Formateur — <?= s($brand['name']) ?></title>
+<title>Espace Formateur · <?= s($brand['name']) ?></title>
+<link rel="icon" type="image/png" href="<?= s($brand['logo']) ?>">
 <style>
 :root {
   --teal:<?= $brand['teal'] ?>; --teal-d:<?= $brand['teal_d'] ?>; --teal-t:<?= $brand['teal_t'] ?>;
@@ -1206,6 +1284,12 @@ main { flex:1; padding:26px 30px 80px; min-width:0; overflow-x:hidden; }
 /* ── Typography ── */
 h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
+/* Section Programme integree dans "Mes modules" (meme traitement que
+   espace-eleve.php, voir v-cours) — titre de sous-section + separateur
+   avant la grille des modules Moodle. */
+.section-title { font-size:16px; font-weight:800; margin:18px 0 10px; display:flex; align-items:center; gap:8px; }
+.section-divider { height:1px; background:var(--line); margin:28px 0 6px; }
+.prog-embed-box { border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:8px; background:#fff; }
 
 /* ── KPIs ── */
 .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:20px; }
@@ -1251,6 +1335,9 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .btn:hover { filter:brightness(.92); }
 .btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
 .btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
+/* La regle globale "aside button:hover" (menu lateral) matchait aussi nos
+   boutons ghost places dans .msg-list-pane (qui est un <aside>). */
+.msg-list-pane .btn.ghost:hover { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); }
 .btn.mini { padding:5px 12px; font-size:11px; }
 .btn.orange-btn { background:var(--orange); color:#fff; }
 
@@ -1314,6 +1401,29 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .filter-btn { border:1.5px solid var(--line); background:var(--card); border-radius:99px; padding:5px 13px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; color:var(--muted); transition:all .12s; }
 .filter-btn.on { border-color:var(--teal); background:var(--teal-t); color:var(--teal-d); }
 .twrap { overflow-x:auto; border:1px solid var(--line); border-radius:14px; margin-bottom:14px; }
+
+/* Sequences (repertoire de modules du referentiel, voir sequences-config.php)
+   — meme visuel que Programme (grille de cartes, voir .card/.grid dans
+   programme.php) au lieu d'un accordeon empile (question du 25/09/2026),
+   meme habillage que espace-eleve.php. */
+.seqp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:16px; margin-bottom:14px; }
+.seqp-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; display:flex; flex-direction:column; min-height:150px; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; position:relative; }
+.seqp-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
+.seqp-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:8px; }
+.seqp-title { font-size:16px; font-weight:700; line-height:1.35; margin:0 0 14px; flex-grow:1; color:var(--ink); }
+.seqp-bar-track { height:5px; background:var(--line); border-radius:99px; overflow:hidden; margin-bottom:8px; }
+.seqp-bar-fill { height:100%; background:linear-gradient(90deg,var(--teal),var(--teal-d)); border-radius:99px; }
+.seqp-meta { font-size:13px; color:var(--muted); }
+.seqp-chevron { position:absolute; top:20px; right:18px; color:var(--line); font-size:18px; }
+.seqp-back { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); padding:8px 14px; border-radius:99px; font-size:13px; font-weight:600; cursor:pointer; font-family:inherit; margin-bottom:14px; }
+.seqp-back:hover { border-color:var(--teal); }
+.seqp-detail-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:4px; }
+.seqp-detail-title { font-size:20px; margin:0 0 14px; color:var(--ink); }
+.seqp-mod-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+.seqp-mod-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; display:flex; align-items:center; min-height:64px; font-size:14px; font-weight:700; color:var(--ink); line-height:1.35; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; }
+.seqp-mod-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
+.seqp-ovr-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; display:block; margin-bottom:4px; }
+.seqp-ovr-select { border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:12.5px; font-family:inherit; background:#fff; color:var(--ink); }
 table { border-collapse:collapse; width:100%; font-size:12.5px; background:var(--card); }
 th, td { padding:9px 11px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
 th { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); background:var(--bg); font-weight:700; }
@@ -1349,6 +1459,16 @@ tr.row-highlight td { background:var(--teal-t,#E3F2EF) !important; transition:ba
 .param-row:last-child { border:none; }
 .param-row .lbl { color:var(--muted); }
 .param-row .val { font-weight:700; }
+
+/* Édition email (Mon profil) */
+.prof-edit-link { border:none; background:none; padding:2px 6px; font-size:10px; font-weight:700; color:var(--teal-d); cursor:pointer; text-decoration:underline; font-family:inherit; }
+.prof-edit-form { margin-top:10px; padding-top:12px; border-top:1px solid var(--line); }
+.prof-edit-form label { display:block; font-size:11px; font-weight:700; color:var(--muted); margin-bottom:4px; }
+.prof-edit-form .fld { margin-bottom:10px; }
+.prof-edit-form input { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12.5px; background:var(--bg); color:var(--ink); font-family:inherit; box-sizing:border-box; }
+.prof-edit-form input:focus { outline:none; border-color:var(--teal); }
+.prof-edit-form .actions { display:flex; gap:8px; justify-content:flex-end; }
+.prof-edit-err { color:var(--red,#D64545); font-size:11px; margin:-4px 0 10px; display:none; }
 .hab-tag { display:inline-flex; align-items:center; font-size:11px; font-weight:700; border-radius:8px; padding:3px 9px; white-space:nowrap; line-height:1.4; margin:2px; }
 .fld { margin-bottom:14px; }
 .fld label { display:block; font-size:11.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:5px; }
@@ -1384,78 +1504,32 @@ input:checked + .slider::before { transform:translateX(16px); }
 .modal-bg.on { display:flex; }
 .modal { background:var(--card); border-radius:18px; box-shadow:0 20px 60px rgba(0,0,0,.25); }
 .msg-modal { width:960px; max-width:96vw; height:94vh; max-height:920px; display:flex; flex-direction:row; overflow:hidden; padding:0; position:relative; }
-.course-modal { width:1200px; max-width:97vw; height:94vh; max-height:960px; display:flex; flex-direction:column; overflow:hidden; padding:0; }
-.course-modal-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); flex-shrink:0; }
-.course-modal-head h2 { margin:0; font-size:15px; }
-.course-modal-head-actions { display:flex; align-items:center; gap:10px; }
-.course-modal-close { border:none; background:none; font-size:16px; color:var(--muted); cursor:pointer; padding:4px; line-height:1; }
-.course-modal-close:hover { color:var(--ink); }
-.course-modal-body { display:flex; flex:1; overflow:hidden; }
-
-/* Panneau gauche : arbre du cours (même look que espace-eleve.php) */
-.dv-left{width:300px;flex-shrink:0;background:#fff;border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
-.dv-left-head{padding:16px 18px 10px;border-bottom:1px solid var(--line);flex-shrink:0}
-.dv-breadcrumb{font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:8px;word-break:break-word}
-.dv-breadcrumb .dv-crumb-sep{margin:0 4px;color:var(--muted)}
-.dv-breadcrumb .dv-crumb-current{color:var(--ink);font-weight:700}
-.dv-left-title-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.dv-left-title{font-size:16px;font-weight:800;color:var(--ink)}
-.dv-unfold{font-size:11px;color:var(--teal);cursor:pointer;text-decoration:none;font-weight:600}
-.dv-search{display:flex;align-items:center;gap:8px;background:var(--bg);border-radius:8px;padding:7px 12px}
-.dv-search input{border:none;background:none;font-size:13px;color:var(--ink);outline:none;width:100%;font-family:inherit}
-.dv-sections{flex:1;overflow-y:auto}
-.det-sec{border-bottom:1px solid var(--line)}
-.det-sec-head{display:flex;align-items:center;gap:12px;padding:12px 18px;cursor:pointer;transition:background .1s}
-.det-sec-head:hover{background:var(--bg)}
-.det-sec-num{width:32px;height:32px;border-radius:50%;border:2px solid var(--teal);color:var(--teal);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;transition:background .15s}
-.det-sec-num.done{background:var(--teal);color:#fff}
-.det-sec-info{flex:1;min-width:0}
-.det-sec-name{font-size:13px;font-weight:700;color:var(--ink);line-height:1.3}
-.det-sec-count{font-size:11px;color:var(--muted);margin-top:1px}
-.det-sec-arrow{color:var(--muted);font-size:11px;flex-shrink:0;transition:transform .15s}
-.det-sec-arrow.open{transform:rotate(90deg)}
-.det-mods{display:none;padding:0 18px 8px 62px}
-.det-mods.open{display:block}
-.det-mod{display:flex;align-items:flex-start;gap:8px;padding:7px 0;cursor:pointer;font-size:13px;color:var(--ink);border-left:2px solid transparent;transition:color .12s}
-.det-mod:hover .det-mod-name{color:var(--teal)}
-.det-mod.active .det-mod-name{color:var(--orange);font-weight:700}
-.det-mod-dot{width:10px;height:10px;border-radius:50%;background:var(--sand);flex-shrink:0;margin-top:3px}
-.det-mod-dot.done{background:var(--teal)}
-.det-mod-dot.active-dot{background:var(--orange)}
-.det-mod-name{line-height:1.35;flex:1}
-/* .dv-left a un fond blanc fixe (pas var(--card)) : ses textes doivent rester
-   sombres meme quand --ink/--muted passent en clair pour Saran. Exception :
-   .dv-search a lui-meme un fond sombre pour Saran (var(--bg)), donc son texte
-   doit rester var(--ink) (clair sur Saran, sombre sur LBA) — pas hardcode. */
-.dv-left .dv-left-title,.dv-left .det-sec-name,.dv-left .det-mod,.dv-left .dv-crumb-current{color:#24333C}
-.dv-left .det-sec-count,.dv-left .dv-sections p,.dv-left .dv-breadcrumb,.dv-left .dv-crumb-sep{color:#68767E}
-
-/* Panneau droite : activité sélectionnée */
-.dv-right{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
-.dv-empty{display:flex;align-items:center;justify-content:center;flex:1;color:var(--muted);font-size:13px;font-style:italic}
-#ce-iframe { flex:1; width:100%; border:none; opacity:1; transition:opacity .15s; }
-.dv-loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; background:var(--bg); }
+/* ── Chat IA "Demander a Lia" (meme visuel que cote espace-eleve.php) ── */
+.lia-chat-modal{width:480px;max-width:94vw;height:640px;max-height:88vh;position:relative;display:flex;flex-direction:column;overflow:hidden}
+.lia-chat-head{padding:16px 50px 16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.lia-chat-head b{font-size:14px}
+.lia-chat-head .sub{font-size:11.5px;color:var(--muted)}
+.lia-chat-close{position:absolute;top:12px;right:12px;border:none;background:var(--ink);width:30px;height:30px;border-radius:50%;font-size:14px;color:#fff;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center}
+.lia-chat-body{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.lia-chat-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:13.5px;line-height:1.5;white-space:pre-wrap}
+.lia-chat-bubble.user{align-self:flex-end;background:var(--teal);color:#fff;border-radius:14px 14px 4px 14px}
+.lia-chat-bubble.assistant{align-self:flex-start;background:var(--bg);color:var(--ink);border-radius:14px 14px 14px 4px}
+.lia-chat-empty{text-align:center;color:var(--muted);font-size:13px;padding:30px 10px}
+.lia-chat-input-row{display:flex;gap:10px;padding:14px 20px;border-top:1px solid var(--line);flex-shrink:0}
+.lia-chat-input-row textarea{flex:1;border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-family:inherit;font-size:13px;resize:none;max-height:80px}
+.lia-chat-send{background:var(--orange);color:#fff;border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;flex-shrink:0;font-size:14px}
+.lia-chat-send:disabled{opacity:.5;cursor:default}
 .dv-spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--teal); animation:dvspin .7s linear infinite; }
 @keyframes dvspin { to { transform:rotate(360deg); } }
-.dv-mobile-back{display:none}
-@media(max-width:760px){
-  /* Meme probleme et meme correctif que "Modules" cote eleve : la liste des
-     sections (300px fixes) et l'apercu de l'activite se partagent la
-     largeur de la modale, ce qui ecrase l'apercu sur mobile. On passe en
-     plein ecran avec bouton retour. */
-  /* width:100% (pas 100vw) : 100vw inclut la barre de defilement et pousse
-     le bord droit hors zone visible (bug confirme par rendu reel). */
-  .course-modal { width:100%; max-width:100%; height:100vh; max-height:100vh; border-radius:0; }
-  .dv-left { width:100%; }
-  .dv-right { display:none; }
-  .course-modal-body.mob-content .dv-left { display:none; }
-  .course-modal-body.mob-content .dv-right { display:flex; }
-  .dv-mobile-back { display:flex; align-items:center; gap:6px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fff; font-weight:700; font-size:13px; color:var(--ink); cursor:pointer; flex-shrink:0; }
-}
 .msg-modal-close { position:absolute; top:14px; right:16px; z-index:5; border:1px solid var(--line); background:var(--card); width:30px; height:30px; border-radius:50%; font-size:14px; color:var(--ink); cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.14); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
-.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
+/* position:static + z-index:auto : ".msg-list-pane" est un <aside>, comme le
+   menu principal — sans ce reset il herite du "aside { position:sticky;
+   z-index:50 }" plus haut (regle generique sur la balise, pas la classe),
+   ce qui le fait passer AU-DESSUS du bouton de fermeture (z-index:5) de la
+   messagerie et le rend invisible/inaccessible. */
+.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); position:static; z-index:auto; }
 .msg-list-head { padding:20px 20px 4px; }
 .msg-list-head h2 { margin:0; font-size:19px; font-weight:800; }
 .msg-list-sub { font-size:12px; color:var(--muted); margin-top:2px; }
@@ -1531,15 +1605,35 @@ input:checked + .slider::before { transform:translateX(16px); }
   .msg-modal.msg-mob-thread .msg-modal-close { display:none; }
 }
 
-@media(max-width:760px) { aside { flex-basis:54px; } aside button .nav-ico { font-size:13px; } }
+@media(max-width:760px) {
+  /* aside button contient le texte du libelle en noeud brut (pas de span
+     dedie) juste apres <span class="nav-ico">...</span> — passer le
+     bouton en font-size:0 fait disparaitre ce texte (il occupe alors 0px),
+     tandis que .nav-ico garde sa propre taille explicite (regle de base
+     plus haut) et reste visible. Sans ca, malgre flex-basis:54px et
+     flex-shrink:0, le texte visible forcait quand meme l'aside a ~90px de
+     large (min-content size par defaut d'un flex item) — resserrant tout
+     le contenu principal a cote, cause des soucis de mise en page
+     mobile remontes sur plusieurs pages.
+  */
+  aside { flex-basis:54px; }
+  aside button { font-size:0; }
+  aside button .nav-ico { font-size:13px; }
+  /* Meme souci en haut de l'aside : le badge "Cohorte ..." fait jusqu'a
+     62px (max-width) + son propre padding, plus large que les 54px vises
+     — il forcait lui aussi l'aside a s'elargir. Coherent avec le menu
+     reduit aux icones : on masque le libelle "Formateur" et le badge. */
+  aside .nb-label, aside .cls-chip { display:none; }
+  /* Dernier contributeur : le logo a un style en ligne width:60px (plus
+     large que les 54px vises) — #important necessaire pour passer devant
+     l'inline style. */
+  aside .nav-brand img { width:28px !important; }
+}
 button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }
 </style>
 </head>
 <body>
-<?php if (l3m_is_beta_tester($USER->id)): ?>
-<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace formateur</div>
-<?php endif; ?>
 
 <!-- ── TOPBAR ── -->
 <div class="top" id="topbar">
@@ -1582,7 +1676,6 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
   <button class="on" data-v="jour"   onclick="nav(this)"><span class="nav-ico">🏠</span>Aujourd'hui</button>
   <button data-v="plan"   onclick="nav(this)"><span class="nav-ico">📅</span>Planning</button>
-  <button data-v="corr"   onclick="nav(this)" id="nav-corr-btn"><span class="nav-ico">✓</span>Corrections</button>
   <button data-v="elev"   onclick="nav(this)"><span class="nav-ico">👥</span>Élèves</button>
   <button data-v="dispo"  onclick="nav(this)"><span class="nav-ico">🕒</span>Dispos</button>
   <button data-v="cours"  onclick="nav(this)"><span class="nav-ico">🎓</span>Mes modules</button>
@@ -1661,22 +1754,13 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </div>
 
 <!-- ═══════════════════════════════════════
-     VUE CORRECTIONS
-═══════════════════════════════════════ -->
-<div class="view" id="v-corr">
-  <h1>Corrections en attente</h1>
-  <p class="sub" id="corr-sub"></p>
-  <div id="corr-list"></div>
-</div>
-
-<!-- ═══════════════════════════════════════
      VUE ÉLÈVES
 ═══════════════════════════════════════ -->
 <div class="view" id="v-elev">
   <h1>Mes élèves</h1>
   <p class="sub">Apprenants de vos cours. Lignes en rouge clair = inactifs depuis plus de 7 jours.</p>
   <div class="filter-bar">
-    <span class="filter-lbl">Classe :</span>
+    <span class="filter-lbl"><?= l3m_term_classe($USER->id) ?> :</span>
     <button class="filter-btn on" data-coh="all" onclick="filterElev(this)">Tous</button>
     <div id="elev-filter-btns" style="display:contents"></div>
   </div>
@@ -1685,7 +1769,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <thead>
         <tr>
           <th>Élève</th>
-          <th>Classe</th>
+          <th><?= l3m_term_classe($USER->id) ?></th>
           <th>Complétion</th>
           <th>Dernier accès</th>
           <th></th>
@@ -1751,19 +1835,62 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 ═══════════════════════════════════════ -->
 <div class="view" id="v-cours">
   <h1>Mes modules</h1>
-  <p class="sub">Ajoutez le contenu (sections, activités) directement sur Moodle.</p>
-  <div class="twrap">
-    <table class="mm-table">
-      <thead>
-        <tr>
-          <th>Module</th>
-          <th>Nom court</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="mescours-tbody"></tbody>
-    </table>
+  <!-- Restructuration Matiere > Sous-matiere > Unite / sequences multi-etapes
+       generalisee a tous les formateurs le 17/09/2026 (etait reservee aux
+       testeurs beta Latifa pendant le chantier). Page reorganisee en 3
+       sections clairement separees le 21/09/2026 (Sequences / Programme /
+       Modules Moodle) — auparavant tout s'enchainait sans repere visuel. -->
+  <!-- Style harmonise avec Programme/Modules ci-dessous (panneau blanc,
+       meme famille que .panel) — remplace l'ancien encart violet qui
+       tranchait avec le reste de la page (question du 21/09/2026). -->
+  <div class="panel" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <span style="font-size:20px">✏️</span>
+    <div style="flex:1;min-width:180px">
+      <b style="font-size:13px">Séquences de positionnement</b>
+      <p style="margin:2px 0 0;font-size:12px;color:var(--muted)">Éditez le contenu et consultez les résultats de vos élèves.</p>
+    </div>
+    <a href="<?= $CFG->wwwroot ?>/sequence-select.php" class="btn mini ghost">Ouvrir</a>
   </div>
+
+  <div class="section-divider"></div>
+
+  <!-- Depuis le 21/09/2026 : meme traitement que espace-eleve.php — la page
+       Programme est integree ici en iframe (embed=1) a la place de
+       l'ancienne carte "Ouvrir", hauteur ajustee dynamiquement via
+       postMessage. Fonctionnement de Programme inchange (droits
+       Responsable pedagogique, etc.) — uniquement l'habillage change.
+       Le lien "Éditer le programme" vivait dans la barre de nav propre a
+       programme.php, masquee en mode embed=1 (evite le doublon avec celle
+       de cette page) — sans le remettre ici, le Responsable pedagogique
+       n'avait plus aucun moyen d'atteindre referentiel-editor.php (bug
+       trouve le 22/09/2026). -->
+  <?php if (l3m_is_ped_lead($USER->id) || is_siteadmin()): ?>
+  <div style="text-align:right;margin-bottom:6px">
+    <a href="<?= $CFG->wwwroot ?>/referentiel-editor.php" style="font-size:12.5px;font-weight:800;color:var(--<?= $brand['button_accent'] ?>-d);text-decoration:none">✏️ Éditer le programme</a>
+  </div>
+  <?php endif; ?>
+  <div class="prog-embed-box">
+    <iframe id="prog-iframe" src="<?= $CFG->wwwroot ?>/programme.php?embed=1" style="width:100%;border:none;display:block;min-height:220px" title="Programme"></iframe>
+  </div>
+  <script>
+  window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'l3m-prog-height') {
+      var ifr = document.getElementById('prog-iframe');
+      if (ifr) ifr.style.height = e.data.height + 'px';
+    }
+  });
+  </script>
+
+  <div class="section-divider"></div>
+
+  <?php if (l3m_is_ped_lead($USER->id) || is_siteadmin()): ?>
+  <div style="text-align:right;margin-bottom:6px">
+    <a href="<?= $CFG->wwwroot ?>/sequences-config.php" style="font-size:12.5px;font-weight:800;color:var(--<?= $brand['button_accent'] ?>-d);text-decoration:none">✏️ Gérer les séquences</a>
+  </div>
+  <?php endif; ?>
+  <h2 class="section-title">▶ Séquences</h2>
+  <p class="sub" id="seq-sub">Chargement…</p>
+  <div class="seq-list" id="seq-list"></div>
 </div>
 
 <?php if (!empty($my_meta['is_ped_lead'])): ?>
@@ -1774,7 +1901,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <h1>Pédagogie</h1>
   <p class="sub">Cliquez une case pour faire défiler les 3 états :</p>
   <ul class="peda-legend">
-    <li>— aucun accès</li>
+    <li>Aucun accès</li>
     <li>👁 Accès (rôle "Formateur non-éditeur" : peut consulter/enseigner, pas modifier)</li>
     <li>✏️ Édition (rôle "Formateur"/éditeur :accès complet)</li>
   </ul>
@@ -1790,7 +1917,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <div class="fld" style="max-width:360px">
     <label>Élève</label>
     <select id="peda-student-select" onchange="pedaLoadStudentModules()">
-      <option value="">— Choisir un élève —</option>
+      <option value="">Choisir un élève</option>
       <?php foreach ($ped_students as $s): ?>
         <option value="<?= (int)$s['id'] ?>"><?= s($s['nom']) ?></option>
       <?php endforeach; ?>
@@ -1814,10 +1941,36 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <div class="params-grid">
 
     <div class="set-card pc-teal">
-      <div class="sc-head"><div class="ico">◉</div><div class="text"><h3>Mon profil</h3><p>Données Moodle — lecture seule</p></div></div>
-      <div class="param-row"><span class="lbl">Prénom</span><span class="val"><?= s($USER->firstname) ?></span></div>
-      <div class="param-row"><span class="lbl">Nom</span><span class="val"><?= s($USER->lastname) ?></span></div>
-      <div class="param-row"><span class="lbl">Email</span><span class="val" style="font-size:12px"><?= s($USER->email) ?></span></div>
+      <div class="sc-head"><div class="ico">◉</div><div class="text"><h3>Mon profil</h3><p>Informations de connexion</p></div></div>
+      <div class="param-row"><span class="lbl">Prénom</span><span class="val" id="prof-firstname-display"><?= s($USER->firstname) ?></span></div>
+      <div class="param-row"><span class="lbl">Nom</span><span class="val" id="prof-lastname-display"><?= s($USER->lastname) ?></span></div>
+      <div class="param-row"><span class="lbl">Email</span><span class="val" id="prof-email-display" style="font-size:12px"><?= s($USER->email) ?></span></div>
+      <div id="prof-edit-trigger-row" style="text-align:right;margin-top:8px">
+        <button type="button" class="prof-edit-link" id="prof-edit-btn" onclick="profEditToggle(true)">Modifier mes informations</button>
+      </div>
+      <div class="prof-edit-form" id="prof-edit-form" style="display:none">
+        <div class="prof-edit-err" id="prof-edit-err"></div>
+        <div class="fld">
+          <label>Prénom</label>
+          <input type="text" id="prof-firstname-input">
+        </div>
+        <div class="fld">
+          <label>Nom</label>
+          <input type="text" id="prof-lastname-input">
+        </div>
+        <div class="fld">
+          <label>Email</label>
+          <input type="email" id="prof-email-input" placeholder="nouvelle-adresse@exemple.fr">
+        </div>
+        <div class="fld">
+          <label>Mot de passe actuel <small style="font-weight:400">(pour confirmer)</small></label>
+          <input type="password" id="prof-edit-pw" placeholder="Votre mot de passe" autocomplete="current-password">
+        </div>
+        <div class="actions">
+          <button type="button" class="btn mini ghost" onclick="profEditToggle(false)">Annuler</button>
+          <button type="button" class="btn mini primary" id="prof-edit-save-btn" onclick="profEditSave()">Enregistrer</button>
+        </div>
+      </div>
       <div class="param-row"><span class="lbl">Rôle</span><span class="val" id="params-role">—</span></div>
     </div>
 
@@ -1853,6 +2006,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <span class="msg-search-ico">&#128269;</span>
         <input type="text" id="msg-search-input" placeholder="Rechercher un contact..." oninput="msgFilterList()">
       </div>
+      <button type="button" class="btn mini ghost" id="msg-new-btn" style="margin:0 16px 8px;width:calc(100% - 32px);justify-content:center" onclick="msgToggleDirectory()">+ Nouveau message</button>
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
@@ -1879,41 +2033,17 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
-<div class="modal-bg" id="course-modal-bg" onclick="if(event.target===this)closeCourseIframe()">
-  <div class="modal course-modal">
-    <div class="course-modal-head">
-      <h2 id="course-modal-title">Module</h2>
-      <div class="course-modal-head-actions">
-        <button type="button" id="ce-edit-link" class="btn mini ghost" onclick="ceOpenEditMode()">Activer le mode édition</button>
-        <button type="button" class="course-modal-close" onclick="closeCourseIframe()" aria-label="Fermer">✕</button>
-      </div>
+<div class="modal-bg" id="lia-chat-bg" onclick="if(event.target===this)closeLiaChat()">
+  <div class="modal lia-chat-modal">
+    <button type="button" class="lia-chat-close" onclick="closeLiaChat()" aria-label="Fermer">✕</button>
+    <div class="lia-chat-head">
+      <span style="font-size:20px">💬</span>
+      <div><b>Demander à Lia</b><div class="sub" id="lia-chat-course"></div></div>
     </div>
-    <div class="course-modal-body">
-      <div class="dv-left">
-        <div class="dv-left-head">
-          <div class="dv-breadcrumb" id="ce-breadcrumb"></div>
-          <div class="dv-left-title-row">
-            <span class="dv-left-title">Contenu du cours</span>
-            <a class="dv-unfold" onclick="ceUnfoldAll()">Tout déplier</a>
-          </div>
-          <div class="dv-search">
-            <span>&#128269;</span>
-            <input type="text" id="ce-search-inp" placeholder="Rechercher" oninput="ceFilter(this.value)">
-          </div>
-        </div>
-        <div class="dv-sections" id="ce-sections"></div>
-      </div>
-      <div class="dv-right">
-        <div class="dv-mobile-back" onclick="ceMobileBack()">&#8592; Retour aux sections</div>
-        <div class="dv-empty" id="ce-empty">Sélectionnez une activité dans le menu à gauche.</div>
-        <div class="dv-loading" id="ce-loading" style="display:none"><span class="dv-spinner"></span></div>
-        <iframe id="ce-iframe" src="" style="display:none"></iframe>
-        <!-- Iframe cachee : precharge le mode edition en arriere-plan dès
-             l'ouverture du cours, pour un affichage quasi instantane si
-             l'utilisateur clique sur "Activer le mode edition" (voir
-             cePrefetchEditMode / ceOpenEditMode). -->
-        <iframe id="ce-prefetch-iframe" src="" style="display:none" aria-hidden="true" tabindex="-1"></iframe>
-      </div>
+    <div class="lia-chat-body" id="lia-chat-body"></div>
+    <div class="lia-chat-input-row">
+      <textarea id="lia-chat-input" placeholder="Pose ta question sur ce module…" rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();liaChatSend();}"></textarea>
+      <button type="button" class="lia-chat-send" id="lia-chat-send-btn" onclick="liaChatSend()">➤</button>
     </div>
   </div>
 </div>
@@ -1921,6 +2051,22 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <script>
 // ── Données PHP injectées ──
 var DATA    = <?= $formateur_data ?>;
+// Terminologie beta "classe" -> "cohorte" (l3m_branding.php) — texte affiche
+// uniquement, les noms reels de classe restent inchanges en base.
+var TERM_CLASSE = <?= json_encode(l3m_term_classe($USER->id)) ?>;
+var TERM_CLASSE_LC = <?= json_encode(l3m_term_classe_lc($USER->id)) ?>;
+// Reecrit l'affichage d'un nom de classe stocke tel quel en base
+// ("Classe X ...") en "<terme> X ..." cote testeur beta, sans jamais
+// toucher la donnee reelle (utile pour ne pas casser le filtrage/regex).
+function dispCohName(name) {
+  if (!name) return name;
+  name = name.replace(/^Classe\b/, TERM_CLASSE);
+  // Retire le tiret separateur entre la lettre et la date ("Cohorte B - Juillet
+  // 2026" / "Cohorte B- Septembre 2026" -> "Cohorte B Juillet 2026") — la donnee
+  // brute en base n'est jamais touchee (regex d'extraction de lettre ailleurs).
+  name = name.replace(/^(Cohorte\s+\S+)\s*[-–—]\s*/, '$1 ');
+  return name;
+}
 var WWWROOT = '<?= $CFG->wwwroot ?>';
 var GLOWBL  = '<?= s($glowbl_url) ?>';
 
@@ -2076,6 +2222,7 @@ function msgContactRow(c) {
 }
 
 function msgRenderContacts() {
+  if (_msg.mode === 'directory') { msgRenderDirectory(); return; }
   var box = document.getElementById('msg-contacts');
   var list = _msg.list;
   if (_msg.filter) {
@@ -2088,12 +2235,68 @@ function msgRenderContacts() {
     html += '<div class="msg-group-label">Favoris</div>' + favs.map(msgContactRow).join('');
   }
   if (others.length) {
-    html += '<div class="msg-group-label">Signalés</div>' + others.map(msgContactRow).join('');
+    html += '<div class="msg-group-label">Autres</div>' + others.map(msgContactRow).join('');
   }
   if (!favs.length && !others.length) {
     html = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun contact</div>';
   }
   box.innerHTML = html;
+}
+
+// "+ Nouveau message" : bascule vers un annuaire (mes eleves + l'administration,
+// pas seulement les conversations deja entamees), pour demarrer un echange
+// avec quelqu'un jamais encore contacte. Reutilise DATA.students/DATA.my_admins
+// deja disponibles cote client (meme principe que admin-lba.php).
+function msgToggleDirectory() {
+  _msg.mode = (_msg.mode === 'directory') ? 'conversations' : 'directory';
+  var btn = document.getElementById('msg-new-btn');
+  if (btn) btn.textContent = (_msg.mode === 'directory') ? '← Retour aux conversations' : '+ Nouveau message';
+  msgRenderContacts();
+}
+
+function msgRenderDirectory() {
+  var box = document.getElementById('msg-contacts');
+  var q = _msg.filter;
+  var students = (DATA.students || []).map(function(s){
+    return { id: s.id, nom: (s.firstname + ' ' + s.lastname).trim(), sub: 'Élève' + (s.cohort_name ? ' · ' + dispCohName(s.cohort_name) : '') };
+  });
+  var admins = (DATA.my_admins || []).map(function(a){ return { id: a.id, nom: a.nom, sub: 'Administration' }; });
+  var all = students.concat(admins);
+  if (q) all = all.filter(function(p){ return p.nom.toLowerCase().indexOf(q) !== -1; });
+  all.sort(function(a,b){ return a.nom.localeCompare(b.nom); });
+
+  if (!all.length) {
+    box.innerHTML = '<div class="msg-thread-empty" style="padding:30px 10px">Aucun contact trouvé</div>';
+    return;
+  }
+  box.innerHTML = all.map(function(p) {
+    var initials = p.nom.split(' ').map(function(w){ return w[0] || ''; }).slice(0,2).join('').toUpperCase();
+    return '<div class="msg-contact" onclick="msgStartWith(' + p.id + ',\'' + esc(p.nom).replace(/'/g,"\\'") + '\')">' +
+      '<span class="msg-contact-avatar ' + msgAvatarClass(p.id) + '">' + esc(initials) + '</span>' +
+      '<div class="msg-contact-info">' +
+        '<div class="msg-contact-row1"><span class="msg-contact-name">' + esc(p.nom) + '</span></div>' +
+        '<div class="msg-contact-preview">' + esc(p.sub) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// Demarre (ou reprend) une conversation depuis l'annuaire, puis revient a la
+// vue "conversations" normale — si un echange existe deja avec cette
+// personne, on le rouvre plutot que d'en simuler un nouveau.
+function msgStartWith(uid, nom) {
+  _msg.mode = 'conversations';
+  var btn = document.getElementById('msg-new-btn');
+  if (btn) btn.textContent = '+ Nouveau message';
+  document.getElementById('msg-search-input').value = '';
+  _msg.filter = '';
+  msgRenderContacts();
+  var existing = _msg.list.find(function(c){ return c.userid === uid; });
+  if (existing) {
+    msgSelectContact(existing.convid, existing.userid, existing.name, existing.cls, existing.isonline);
+  } else {
+    msgSelectContact(0, uid, nom, '', false);
+  }
 }
 
 function msgSelectContact(convid, userid, nom, cls, isonline) {
@@ -2115,7 +2318,7 @@ function msgSelectContact(convid, userid, nom, cls, isonline) {
   document.getElementById('msg-thread-name').textContent = nom;
   document.getElementById('msg-thread-sub').innerHTML =
     '<span class="dot' + (isonline?' online':'') + '"></span>' + (isonline ? 'En ligne' : 'Hors ligne') +
-    (cls ? ' · Classe ' + esc(cls) : '');
+    (cls ? ' · ' + TERM_CLASSE + ' ' + esc(cls) : '');
 
   var entry = _msg.list.find(function(c){ return c.userid === userid; });
   msgSetTraiteBtn(entry ? entry.traite : false);
@@ -2202,695 +2405,139 @@ function msgGoFiche() {
   if (uid) goToStudent(uid);
 }
 
-/* ===== "AJOUTER DU CONTENU" (modal, même look que espace-eleve.php, reste sur espace-formateur.php) ===== */
-var _ce = { id: 0, name: '', sections: [], contextid: 0 };
-var _ceRefreshTimer = null;
-// Moodle retient l'activation du mode edition pour toute la session
-// (preference $USER->editing) : inutile de repasser par editmode.php (un
-// aller-retour serveur en plus) une fois que c'est deja fait une premiere
-// fois dans cette session.
-var _ceEditingActivated = false;
+// ── Chat IA "Demander a Lia" : questions libres sur une Sequence de "Mes
+// modules" (titre + modules + contenu de l'etape liee), historique conserve
+// par formateur+sequence — voir l3m_progseq_contexte_ia() dans
+// l3m_referentiel.php. Declenche depuis le bouton "Demander a Lia" de la vue
+// detaillee d'une Sequence (renderProgSequences), plus depuis la visionneuse
+// de cours Moodle (supprimee le 06/10/2026 avec "Corrections en attente"). ──
+var _liaChat = { messages: [], loaded: false, seqid: 0 };
 
-var _ceIframeCSS = [
-  '#page-header,#main-header,.navbar,#page-footer,.main-footer,footer,',
-  '.breadcrumb-nav,.breadcrumb,#nav-drawer,.drawer-toggle,.skiplinks,',
-  '.secondary-navigation,.tertiary-navigation,.activity-navigation,.section-navigation,#fsmod-header { display:none !important; }',
-  // Zone "blocs visibles seulement par les admins" du theme mb2nl (voir
-  // theme/mb2nl/layout/parts/region_adminblock.php) : ne devrait pas
-  // s'afficher pour un formateur (guarde sur moodle/site:config), mais on
-  // la masque par precaution au cas ou ce role l'obtiendrait par ailleurs.
-  '#adminblock-region { display:none !important; }',
-  // Zone de bloc "Bottom" du theme mb2nl (theme/mb2nl/layout/parts/region_bottom.php) :
-  // s'affiche meme vide, en style sombre (classe "dark1") — bandeau noir
-  // sans contenu ni utilite ici.
-  '#bottom { display:none !important; }',
-  // Tiroir de messagerie natif Moodle (data-region="right-hand-drawer") :
-  // reste visible malgre sa classe "hidden" (conflit de priorite avec le
-  // theme) — sans interet ici puisque la plateforme a sa propre messagerie.
-  '[data-region="right-hand-drawer"] { display:none !important; }',
-  // Menu ⋮ d'une activite : ne garder que Parametres / Cacher / Dupliquer /
-  // Supprimer. Classes stables de Moodle (course/lib.php,
-  // course_get_cm_edit_actions + controlmenu.php), pas du texte devine.
-  '.editing_movecm,.editing_moveright,.editing_moveleft,.editing_assign,.editing_groupmode { display:none !important; }',
-  // Bouton "+ Ajouter un bloc" (selecteur stable, template core/add_block_button).
-  '[data-region="add-block-button"] { display:none !important; }',
-  // Fenetre "Ajouter une activite ou ressource" : ne garder que les types
-  // reellement utilises sur cette plateforme (attribut data-internal stable,
-  // voir course/format/templates/local/activitychooser/item.mustache).
-  '[data-region="chooser-option-container"]:not([data-internal="page"]):not([data-internal="resource"]):not([data-internal="url"]):not([data-internal="lti"]):not([data-internal="quiz"]):not([data-internal="assign"]) { display:none !important; }',
-  // Formulaire "Parametres" d'une activite : ne garder que Apparence /
-  // Reglages courants / Conditions d'achevement + la case notification.
-  // Retire Restriction d'acces / Tags / Competences (noms d'elements de
-  // formulaire stables, voir course/moodleform_mod.php et admin/tool/lp/lib.php).
-  '#id_availabilityconditionsheadercontainer,#id_tagshdrcontainer,#id_competenciessectioncontainer,',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_availabilityconditionsheadercontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_tagshdrcontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_competenciessectioncontainer"])',
-  '{ display:none !important; }',
-  // Formulaire "Parametres" d'un Quiz : ne garder que Temps / Note /
-  // Feedback global. Retire Mise en page / Comportement des questions /
-  // Options de relecture / Apparence / Restrictions sur les tentatives /
-  // Safe Exam Browser (noms d'elements stables, voir mod/quiz/mod_form.php
-  // et mod/quiz/accessrule/seb/classes/settings_provider.php).
-  // Scope a "body.path-mod-quiz" : #id_displaycontainer est un id generique
-  // (mod_form.php, header "display") reutilise TEL QUEL par d'autres
-  // modules (ex. Fichier/resource, meme id) — sans ce filtre, masquer
-  // "Apparence" sur un Quiz masquait aussi le meme bloc chez un Fichier,
-  // empechant de choisir "Integrer" pour afficher la description avant le
-  // PDF (elle etait injoignable, cachee par erreur).
-  'body.path-mod-quiz #id_layouthdrcontainer,body.path-mod-quiz #id_interactionhdrcontainer,',
-  'body.path-mod-quiz #id_reviewoptionshdrcontainer,body.path-mod-quiz #id_displaycontainer,',
-  'body.path-mod-quiz #id_securitycontainer,body.path-mod-quiz #id_sebcontainer,',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_layouthdrcontainer"]),',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_interactionhdrcontainer"]),',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_reviewoptionshdrcontainer"]),',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_displaycontainer"]),',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_securitycontainer"]),',
-  'body.path-mod-quiz .d-flex.align-items-center.mb-2:has(a[aria-controls="id_sebcontainer"])',
-  '{ display:none !important; }',
-  // Formulaire "Parametres" d'un Devoir : ne garder que Instructions de
-  // l'activite / Fichiers supplementaires / Types de remise / Note.
-  // Retire Types de feedback / Reglages de la remise des travaux / Reglages
-  // de remises en groupe / Notifications (noms d'elements stables, voir
-  // mod/assign/mod_form.php et mod/assign/locallib.php).
-  '#id_feedbacktypescontainer,#id_submissionsettingscontainer,',
-  '#id_groupsubmissionsettingscontainer,#id_notificationscontainer,',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_feedbacktypescontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_submissionsettingscontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_groupsubmissionsettingscontainer"]),',
-  '.d-flex.align-items-center.mb-2:has(a[aria-controls="id_notificationscontainer"])',
-  '{ display:none !important; }',
-  // Formulaire "Question a choix multiple" (question/type/multichoice/
-  // edit_multichoice_form.php) : ne garder que Nom / Texte de la question /
-  // Note par defaut / Une seule reponse / les Choix (texte + note de chaque
-  // reponse). Retire Feedback general, Melanger les reponses, Numeroter les
-  // choix, Identifiant de la question, Feedback combine, Reglages tentatives
-  // multiples (penalite + indices), Tags, et le commentaire de chaque
-  // reponse (formateur remplit juste question + reponses, sans ces options
-  // techniques secondaires).
-  '#id_combinedfeedbackhdr,#id_multitriesheader,#id_tagsheader,#id_coursetagsheader,',
-  '#fitem_id_generalfeedback,#fitem_id_answernumbering,',
-  '#fitem_id_idnumber,[id^="fitem_id_feedback_"]',
-  '{ display:none !important; }',
-  // "Melanger les reponses" : cette ligne (advcheckbox) n'a pas d'id propre
-  // sur son conteneur (particularite de ce template Moodle) — on cible via
-  // :has() la ligne qui contient la case a cocher #id_shuffleanswers.
-  '.row.fitem:has(#id_shuffleanswers) { display:none !important; }',
-  'html, body { background:#fff !important; }',
-  '#page,#page.container-fluid,#region-main,#region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
-  '.btn-secondary,.btn.btn-secondary { background:#fff !important; border-color:#2E9488 !important; color:#2E9488 !important; }',
-  '.btn-primary,.btn.btn-primary { background:#2E9488 !important; border-color:#1C5F58 !important; color:#fff !important; }',
-  // Survol des boutons : sans ces regles, l'etat :hover retombe sur l'accent
-  // dore par defaut du theme (memes couleurs de base que ci-dessus, juste
-  // plus foncees, pour garder un retour visuel au survol).
-  // Catch-all large : le theme colore beaucoup de boutons via des
-  // selecteurs varies (.addresourcemodchooser a, data-action="add", etc.)
-  // qui ne portent pas forcement .btn-primary/.btn-secondary. Le simple
-  // !important suffit a gagner face aux regles du theme (non-!important).
-  '.btn:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
-  '.btn-primary:hover,.btn.btn-primary:hover { background:#1C5F58 !important; border-color:#1C5F58 !important; color:#fff !important; }',
-  '.btn-secondary:hover,.btn.btn-secondary:hover { background:#EAF6F4 !important; border-color:#1C5F58 !important; color:#1C5F58 !important; }',
-  // Liens de contenu (ex. fichier joint a un devoir) : couleur d'accent
-  // doree par defaut du theme, remplacee par le teal de la charte (meme
-  // regle deja en place cote lecteur eleve, _dvIframeCSS).
-  'a { color:#2E9488 !important; }',
-  'html { scrollbar-color: #2E9488 #f0f0f0 !important; }',
-  '::-webkit-scrollbar { width: 10px; }',
-  '::-webkit-scrollbar-track { background: #f0f0f0; }',
-  '::-webkit-scrollbar-thumb { background: #2E9488 !important; border-radius: 6px; }',
-  '::-webkit-scrollbar-thumb:hover { background: #1C5F58 !important; }',
-  // Titre et description d'une activite (ex. nom du fichier + texte saisi
-  // en "Apparence > Afficher la description") : par defaut en noir brut,
-  // sans rapport avec la charte du reste de l'interface. On applique la
-  // couleur/typo d'accent automatiquement, sans que le formateur ait besoin
-  // d'ajouter du style HTML lui-meme a chaque fois.
-  '.activity-name { color:#1C5F58 !important; font-weight:800 !important; }',
-  '.activity-description { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
-  '.activity-description strong { color:#1C5F58 !important; }',
-  // Contenu d'une Page/Etiquette : classe differente (.box.generalbox, pas
-  // .activity-description), meme logique de style automatique.
-  '.box.generalbox { background:#E3F2EF !important; border-radius:10px; padding:14px 18px; }',
-  '.box.generalbox strong { color:#1C5F58 !important; }',
-  // Boutons "+" d\'insertion d\'activite entre deux activites existantes —
-  // tres discrets par defaut (icone minuscule dans un dropdown Bootstrap).
-  // Cible specifiquement id="dropdownMenuButton-XXX" (le declencheur du menu
-  // "Ajouter une activite ou une ressource"), pas les autres dropdowns
-  // (menus d\'action par activite, etc.) pour ne pas les denaturer.
-  '[id^="dropdownMenuButton-"] { display:inline-flex !important; align-items:center !important; justify-content:center !important;',
-  'width:30px !important; height:30px !important; min-width:30px !important; background:#2E9488 !important; color:#fff !important;',
-  'border-radius:50% !important; opacity:1 !important; visibility:visible !important; margin:3px !important; box-shadow:0 1px 4px rgba(0,0,0,.25) !important; }',
-  '[id^="dropdownMenuButton-"]:hover { background:#267d73 !important; }',
-  '[id^="dropdownMenuButton-"] i,[id^="dropdownMenuButton-"] .icon { color:#fff !important; font-size:15px !important; }',
-  // Neutralise l\'ancienne UI theme_mb2nl (TOC "a droite", voir
-  // l3m_toc_scroll.js + theme_mb2nl customcss) qui masque .course-content et
-  // affiche un message tant qu\'elle n\'a pas cree son propre
-  // #l3m-activity-iframe-container — ce qui n\'arrive jamais quand
-  // course/view.php est charge dans NOTRE iframe imbriquee. On force donc le
-  // vrai contenu du cours a rester visible ici, sans toucher a cette
-  // fonctionnalite ailleurs (visite directe hors de notre viewer).
-  // Meme liste de selecteurs que la regle a neutraliser (specificite egale,
-  // le nôtre gagne car injecte apres, a source-order egale) + doublement de
-  // l\'ID pour le ::before (specificite superieure a leur selecteur compose
-  // de :not()/:has()), plutot qu\'un simple override qui perdait face a une
-  // regle plus specifique malgre le !important des deux cotes.
-  '.path-course-view #region-main .course-content,',
-  '.course-view-topics #region-main .course-content,',
-  'body[class*="course-view"] #region-main .course-content { display:block !important; }',
-  '#page-content#page-content::before { content:none !important; display:none !important; }',
-  // Lien "Decouvrir plus d'activites sur Place du marche Moodle" (fenetre
-  // "Ajouter une activite ou ressource") — renvoie vers un service externe
-  // (marketplace.moodle.com), pas pertinent pour nos formateurs/admins.
-  'div:has(> a[href*="marketplace.moodle.com"]) { display:none !important; }',
-  // Zone de blocs (ex. "side-pre") : hors edition, elle est deja vide et
-  // invisible, mais en mode edition Moodle affiche un encadre pointille avec
-  // le nom brut de la zone ("SIDE-PRE") pour inviter a y glisser un bloc —
-  // pas pertinent dans notre visualiseur (attribut stable, voir
-  // lib/classes/output/core_renderer.php, methode blocks()).
-  '[data-blockregion] { display:none !important; }',
-  // Vue de correction d'un devoir (mod/assign, action=grader) : le filtre de
-  // liste et "Reinitialiser les preferences" n'ont pas de sens quand on
-  // arrive directement sur UN eleve precis (attributs stables, voir
-  // mod/assign/templates/grading_navigation_user_selector.mustache).
-  '[data-region="user-filters"],[data-region="user-resettable"] { display:none !important; }',
-  // Panneau d'info eleve (email + date limite) : Moodle tronque ces deux
-  // lignes avec des points de suspension dans une colonne etroite
-  // (mod/assign/templates/grading_navigation_user_info.mustache, classe
-  // "nowrap" stable). Retire la troncature pour un affichage complet, avec
-  // retour a la ligne si le texte ne tient pas.
-  '[data-region="user-info"] em.nowrap { white-space:normal !important; overflow:visible !important; text-overflow:clip !important; word-break:break-word !important; }',
-  // Selecteur de fichiers Moodle : texte des onglets en noir (illisible par
-  // defaut, trop clair) et couleur d'accent orange remplacee par le vert
-  // de la charte (voir repository/filepicker.js, classes .fp-repo/.nav-link
-  // ajoutees/retirees dynamiquement selon l'onglet actif).
-  '.fp-repo .fp-repo-name { color:#1A1714 !important; }',
-  '.fp-repo-area .fp-repo .nav-link.active { background:#2E9488 !important; border-color:#2E9488 !important; }',
-  '.fp-repo-area .fp-repo .nav-link.active .fp-repo-name { color:#fff !important; }',
-  // Panneau "Deposer un fichier" : retire "Enregistrer sous" et "Choisir une
-  // licence" (attributs stables, voir repository/filepicker.js).
-  '.fp-saveas,.fp-setlicense { display:none !important; }',
-  // Gestionnaire de fichiers (zone "Fichiers" d'un devoir/ressource) : menu
-  // contextuel "..." par fichier, ouvre les memes champs superflus
-  // (licence...) — classe stable core Moodle, voir theme/boost/scss/moodle/filemanager.scss.
-  '.fp-contextmenu { display:none !important; }',
-  // Vue de correction d'un devoir : retire le crayon "Modifier les reglages"
-  // (lien vers course/modedit.php, risque de renommage/reglage accidentel
-  // en pleine correction — attribut stable, voir
-  // mod/assign/templates/grading_navigation.mustache) et le bandeau
-  // "remis en avance de X" (classe stable, voir
-  // mod/assign/classes/output/renderer.php::get_time_remaining).
-  '[data-region="assignment-info"] a[href*="modedit.php"] { display:none !important; }',
-  '.earlysubmission { display:none !important; }',
-].join('\n');
-
-// Ouvre une correction de devoir dans la meme modale que "Mes modules"
-// (openCourseIframe), mais sans le panneau "Contenu du cours" : il n'apporte
-// rien pour corriger un devoir precis, seule la page de correction compte.
-// Le panneau et le bouton "Activer le mode edition" sont masques ici et
-// remis en place a la fermeture (closeCourseIframe) pour ne pas affecter
-// le fonctionnement normal de "Mes modules".
-function openCorrectionInCourse(cmid, courseId, userid) {
-  var course = DATA.courses.filter(function(c){ return c.id === courseId; })[0];
-  openCourseIframe(courseId, course ? course.fullname : 'Cours');
-  document.getElementById('course-modal-title').textContent = '';
-  var left = document.querySelector('.dv-left');
-  if (left) left.style.display = 'none';
-  document.getElementById('ce-edit-link').style.display = 'none';
-  // action=grader + userid ouvre directement la correction de CET eleve
-  // (mod/assign/grade.php), au lieu de la table de toute la classe ou son
-  // tri/pagination peut le placer hors de la premiere page.
-  ceSelectMod(cmid, 'assign', null, '&action=grader&userid=' + userid);
-}
-
-function ceInjectCSS(iframe, css) {
-  try {
-    var doc = iframe.contentDocument || iframe.contentWindow.document;
-    if (!doc || !doc.head) return;
-    if (!doc.getElementById('l3m-ce-style')) {
-      var s = doc.createElement('style');
-      s.id = 'l3m-ce-style';
-      s.textContent = css || _ceIframeCSS;
-      doc.head.appendChild(s);
-    }
-    ceHideChooserAllTab(doc);
-    ceHideRepoTabs(doc);
-    ceFixGraderPlaceholder(doc);
-    ceAutoFixVideoUrl(doc);
-    ceWatchInplaceEdits(doc);
-    // Une suppression d'activite passe par une page de confirmation qui
-    // recharge entierement l'iframe (pas une simple mise a jour AJAX) : ni
-    // les evenements ni l'observateur de ceWatchInplaceEdits ne la voient
-    // dans ce cas, puisqu'ils sont attaches sur le document APRES coup, une
-    // fois la suppression deja faite sur la page precedente. On rafraichit
-    // donc la liste "Contenu du cours" a chaque chargement de l'iframe, ce
-    // qui couvre aussi bien ce cas que les changements de completion en
-    // navigant simplement d'une activite a l'autre.
-    if (_ce.id) ceRefreshSections();
-    // Evite le flash de la page Moodle non stylee quand on navigue via un
-    // lien clique DANS l'iframe (ex. "Parametres" d'une activite) plutot
-    // que via notre propre changement de src (deja masque par l'opacite
-    // ailleurs) : on cache l'iframe dès que cette page commence a se quitter.
-    try {
-      doc.defaultView.addEventListener('pagehide', function() {
-        iframe.style.opacity = '0';
-      });
-    } catch (e2) {}
-  } catch (e) {}
-}
-
-// Champ "Changer d'utilisateur" de la vue de correction d'un devoir : texte
-// du parametre "placeholder" (get_string('changeuser', 'mod_assign')) passe
-// a l'autocomplete Moodle (lib/amd/src/form-autocomplete.js), insere en JS
-// bien apres le chargement de l'iframe — selon l'etat du champ, il apparait
-// soit comme attribut placeholder d'un <input>, soit comme texte affiche
-// directement dans la case de selection (aucune classe propre pour ce cas,
-// on repere donc le texte exact, meme principe que ceHideChooserAllTab).
-// Pas de traduction Moodle a modifier globalement : on ne corrige que
-// l'affichage ici.
-function ceFixGraderPlaceholder(doc) {
-  var fix = function() {
-    doc.querySelectorAll('input[placeholder="Changer d’utilisateur"]').forEach(function(el) {
-      el.placeholder = "Changer d'élève";
+function openLiaChat(seqid, titre) {
+  if (!seqid) return;
+  document.getElementById('lia-chat-course').textContent = titre || '';
+  document.getElementById('lia-chat-bg').classList.add('on');
+  if (!_liaChat.loaded || _liaChat.seqid !== seqid) {
+    _liaChat.messages = []; _liaChat.loaded = false; _liaChat.seqid = seqid;
+    document.getElementById('lia-chat-body').innerHTML = '<div class="lia-chat-empty"><span class="dv-spinner"></span></div>';
+    apiPost({ action: 'lia_chat_history', seqid: seqid }).then(function(r) {
+      _liaChat.messages = (r.ok && r.messages) ? r.messages : [];
+      _liaChat.loaded = true;
+      liaChatRender();
+    }).catch(function() {
+      _liaChat.messages = []; _liaChat.loaded = true;
+      liaChatRender();
     });
-    // Scan large (tout le document, pas seulement [data-region="user-selector"])
-    // : le composant grading_app peut re-rendre cette zone via une structure
-    // qui echappe a ce scope precis selon le contexte (grading vs grader).
-    // Le filtre "feuille + texte exact" evite tout faux positif ailleurs.
-    doc.querySelectorAll('*').forEach(function(el) {
-      if (el.children.length === 0 && el.textContent.trim() === "Changer d’utilisateur") {
-        el.textContent = "Changer d'élève";
-      }
-    });
-  };
-  // Toujours execute, meme si l'observateur est deja attache : l'app JS de
-  // Moodle (grading_app) peut re-rendre cette zone plusieurs fois de suite
-  // au chargement, et notre correction perdre cette course une fois sur
-  // deux si on ne la retente qu'au prochain changement du DOM.
-  fix();
-  if (doc._l3mGraderObserver) return;
-  try {
-    var obs = new MutationObserver(fix);
-    obs.observe(doc.body, {childList: true, subtree: true});
-    doc._l3mGraderObserver = obs;
-  } catch (e) {}
-}
-
-// L'onglet "Tout" de la fenetre "Ajouter une activite ou ressource" n'a pas
-// de classe propre (meme markup que les autres onglets) — on le masque en
-// comparant le texte, via un observateur car la fenetre est injectee bien
-// apres le chargement de l'iframe (ouverture au clic sur le "+").
-function ceHideChooserAllTab(doc) {
-  if (doc._l3mChooserObserver) return;
-  var hide = function() {
-    var nav = doc.querySelector('.modchoosernav');
-    if (!nav) return;
-    nav.querySelectorAll('.nav-link').forEach(function(el) {
-      if (el.textContent.trim() === 'Tout') el.style.display = 'none';
-    });
-    // "URL" -> "Vidéo" : c'est l'option utilisee ici pour ajouter un lien
-    // video (Glowbl, YouTube...), le nom natif Moodle preterait a confusion.
-    var urlTile = doc.querySelector('[data-region="chooser-option-container"][data-internal="url"] .optionname');
-    if (urlTile && urlTile.textContent.trim() === 'URL') urlTile.textContent = 'Vidéo';
-  };
-  hide();
-  try {
-    var obs = new MutationObserver(function(muts) {
-      for (var i = 0; i < muts.length; i++) {
-        if (muts[i].addedNodes && muts[i].addedNodes.length) { hide(); break; }
-      }
-    });
-    obs.observe(doc.body, {childList: true, subtree: true});
-    doc._l3mChooserObserver = obs;
-  } catch (e) {}
-}
-
-// "Selecteur de fichiers" Moodle (repository/filepicker.js) : chaque onglet
-// n'a qu'un id numerique d'instance propre au site (pas de type stable),
-// donc on filtre par le nom affiche (.fp-repo-name) — meme principe que
-// ceHideChooserAllTab. Ne garde que "Deposer un fichier" et "Fichiers
-// recents", les deux seuls cas d'usage reels d'un formateur.
-// Sur le formulaire d'une activite "Video" (mod_url), convertit
-// automatiquement un lien YouTube colle sous sa forme normale
-// (youtube.com/watch?v=ID ou youtu.be/ID) vers le format "embed/ID" —
-// le seul que YouTube autorise a etre affiche dans une iframe (sa page de
-// visionnage normale bloque explicitement le cadrage). Bascule aussi
-// l'affichage sur "Integrer" pour que la video se lance directement au
-// clic, sans que le formateur ait besoin de connaitre cette distinction.
-function ceAutoFixVideoUrl(doc) {
-  var urlInput = doc.getElementById('id_externalurl');
-  if (!urlInput || urlInput._l3mVideoWatched) return;
-  urlInput._l3mVideoWatched = true;
-  var convert = function() {
-    var val = urlInput.value.trim();
-    if (/youtube\.com\/embed\//.test(val)) return; // deja au bon format
-    var m = val.match(/[?&]v=([a-zA-Z0-9_-]{6,})/) || val.match(/youtu\.be\/([a-zA-Z0-9_-]{6,})/);
-    if (!m) return;
-    urlInput.value = 'https://www.youtube.com/embed/' + m[1];
-    var disp = doc.getElementById('id_display');
-    if (disp) disp.value = '1'; // RESOURCELIB_DISPLAY_EMBED
-  };
-  urlInput.addEventListener('blur', convert);
-  urlInput.addEventListener('change', convert);
-  var form = urlInput.closest('form');
-  if (form) form.addEventListener('submit', convert, true);
-}
-
-function ceHideRepoTabs(doc) {
-  if (doc._l3mRepoObserver) return;
-  var HIDE = ['Banque de contenus', 'Fichiers disponibles', 'Téléchargement d’URL', 'Fichiers personnels', 'Wikimedia'];
-  var hide = function() {
-    doc.querySelectorAll('.fp-repo').forEach(function(el) {
-      var nameEl = el.querySelector('.fp-repo-name');
-      if (nameEl && HIDE.indexOf(nameEl.textContent.trim()) !== -1) {
-        el.style.display = 'none';
-      }
-    });
-  };
-  hide();
-  try {
-    var obs = new MutationObserver(hide);
-    obs.observe(doc.body, {childList: true, subtree: true});
-    doc._l3mRepoObserver = obs;
-  } catch (e) {}
-}
-
-function ceMobileBack() {
-  var body = document.querySelector('.course-modal-body');
-  if (body) body.classList.remove('mob-content');
-}
-
-function ceSelectMod(cmid, modtype, el, extra) {
-  document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
-  document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
-  if (window.innerWidth <= 760) {
-    var body = document.querySelector('.course-modal-body');
-    if (body) body.classList.add('mob-content');
+  } else {
+    liaChatRender();
   }
-  if (el) {
-    el.classList.add('active');
-    var dot = el.querySelector('.det-mod-dot');
-    if (dot) dot.classList.add('active-dot');
-  }
-  var url = WWWROOT + '/mod/' + modtype + '/view.php?id=' + cmid + (extra || '');
-  var iframe  = document.getElementById('ce-iframe');
-  var empty   = document.getElementById('ce-empty');
-  var loading = document.getElementById('ce-loading');
-  // On estompe l'iframe avant de naviguer : sinon l'activite precedente reste
-  // affichee jusqu'a la fin du chargement de la nouvelle (flash de l'ancien
-  // contenu). Un spinner comble le temps de chargement reseau reel (le
-  // contenu de l'activite doit de toute facon venir du serveur).
-  iframe.style.opacity = '0';
-  loading.style.display = 'flex';
-  iframe.onload = function() { ceInjectCSS(iframe); iframe.style.opacity = '1'; loading.style.display = 'none'; };
-  iframe.src = url;
-  iframe.style.display = 'block';
-  empty.style.display  = 'none';
-  // Meme filet de securite qu'en mode edition (ceOpenEditMode) : certaines
-  // pages (notamment le "mode plein ecran" de theme_mb2nl sur une activite
-  // achevee a 100%) ne se stylent pas de facon fiable au seul onload, sans
-  // qu'on ait pu determiner precisement pourquoi — on reinjecte donc le CSS
-  // periodiquement pendant que cette activite reste affichee.
-  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
-  _ceRefreshTimer = setInterval(function() { ceInjectCSS(iframe); }, 1500);
+  setTimeout(function(){ document.getElementById('lia-chat-input').focus(); }, 100);
 }
 
-function ceRenderSections(sections) {
-  var box = document.getElementById('ce-sections');
-  // Retient quelles sections etaient depliees avant de reconstruire tout le
-  // HTML : ceRefreshSections() est appelee tres souvent (a chaque
-  // navigation dans l'iframe, y compris ouvrir une simple activite), et
-  // sans ça chaque rafraichissement refermait toutes les sections — d'ou
-  // l'impression que cliquer sur "›" "ne marche pas".
-  var openIdx = {};
-  document.querySelectorAll('#ce-sections .det-mods.open').forEach(function(el){
-    openIdx[el.id.replace('ce-mods-', '')] = true;
+function closeLiaChat() {
+  document.getElementById('lia-chat-bg').classList.remove('on');
+}
+
+function liaChatRender() {
+  var box = document.getElementById('lia-chat-body');
+  if (!_liaChat.messages.length) {
+    box.innerHTML = '<div class="lia-chat-empty">Pose une question sur cette séquence. Lia répond en s\'appuyant sur son contenu.</div>';
+  } else {
+    box.innerHTML = _liaChat.messages.map(function(m) {
+      return '<div class="lia-chat-bubble ' + (m.role === 'user' ? 'user' : 'assistant') + '">' + esc(m.content) + '</div>';
+    }).join('');
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function liaChatSend() {
+  var ta = document.getElementById('lia-chat-input');
+  var text = ta.value.trim();
+  if (!text) return;
+  var seqid = _liaChat.seqid;
+  ta.value = '';
+  ta.disabled = true;
+  document.getElementById('lia-chat-send-btn').disabled = true;
+  _liaChat.messages.push({ role: 'user', content: text });
+  _liaChat.messages.push({ role: 'assistant', content: '…', pending: true });
+  liaChatRender();
+
+  apiPost({ action: 'lia_chat_send', seqid: seqid, message: text }).then(function(r) {
+    ta.disabled = false;
+    document.getElementById('lia-chat-send-btn').disabled = false;
+    _liaChat.messages.pop();
+    _liaChat.messages.push({ role: 'assistant', content: (r.ok && r.reply) ? r.reply : 'Erreur, réessaie.' });
+    liaChatRender();
+    ta.focus();
+  }).catch(function() {
+    ta.disabled = false;
+    document.getElementById('lia-chat-send-btn').disabled = false;
+    _liaChat.messages.pop();
+    _liaChat.messages.push({ role: 'assistant', content: 'Erreur réseau, réessaie.' });
+    liaChatRender();
   });
-  if (!sections || !sections.length) {
-    box.innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Aucun contenu.</p>';
+}
+
+// ── Édition du profil (prénom/nom/email) — confirmation par mot de passe
+// obligatoire (voir action AJAX 'update_profile' côté serveur, même
+// mécanisme que espace-eleve.php). Rechargement de page apres succes : le
+// prenom/nom apparaissent a plusieurs autres endroits deja rendus depuis le
+// chargement initial (initiales de l'avatar...) — plus simple et plus sur
+// de tout re-render via un reload que de patcher chaque affichage. ──
+function profEditToggle(show) {
+  document.getElementById('prof-edit-form').style.display = show ? 'block' : 'none';
+  document.getElementById('prof-edit-trigger-row').style.display = show ? 'none' : '';
+  document.getElementById('prof-edit-err').style.display = 'none';
+  if (show) {
+    var fnInput = document.getElementById('prof-firstname-input');
+    fnInput.value = document.getElementById('prof-firstname-display').textContent.trim();
+    document.getElementById('prof-lastname-input').value = document.getElementById('prof-lastname-display').textContent.trim();
+    document.getElementById('prof-email-input').value = document.getElementById('prof-email-display').textContent.trim();
+    document.getElementById('prof-edit-pw').value = '';
+    setTimeout(function(){ fnInput.focus(); fnInput.select(); }, 50);
+  }
+}
+
+function profEditSave() {
+  var firstname = document.getElementById('prof-firstname-input').value.trim();
+  var lastname  = document.getElementById('prof-lastname-input').value.trim();
+  var email     = document.getElementById('prof-email-input').value.trim();
+  var pw        = document.getElementById('prof-edit-pw').value;
+  var errEl     = document.getElementById('prof-edit-err');
+  errEl.style.display = 'none';
+
+  if (!firstname || !lastname) {
+    errEl.textContent = 'Prénom et nom sont obligatoires.';
+    errEl.style.display = 'block';
     return;
   }
-  var html = '';
-  sections.forEach(function(s, si) {
-    var allDone = s.total > 0 && s.done_n === s.total;
-    var isOpen  = !!openIdx[si];
-    html += '<div class="det-sec" id="ce-sec-' + si + '">';
-    html += '<div class="det-sec-head" onclick="ceToggleSec(' + si + ')">';
-    html += '<div class="det-sec-num' + (allDone ? ' done' : '') + '">' + s.num + '</div>';
-    html += '<div class="det-sec-info"><div class="det-sec-name">' + esc(s.name) + '</div>';
-    if (s.total > 0) html += '<div class="det-sec-count">(' + s.done_n + '/' + s.total + ')</div>';
-    html += '</div><div class="det-sec-arrow' + (isOpen ? ' open' : '') + '" id="ce-arr-' + si + '">›</div></div>';
-    html += '<div class="det-mods' + (isOpen ? ' open' : '') + '" id="ce-mods-' + si + '">';
-    s.mods.forEach(function(m) {
-      var dotCls = m.done ? ' done' : '';
-      html += '<div class="det-mod" data-cmid="' + m.cmid + '" onclick="ceSelectMod(' + m.cmid + ',\'' + m.modtype + '\',this)">';
-      html += '<div class="det-mod-dot' + dotCls + '"></div>';
-      html += '<div class="det-mod-name">' + esc(m.name) + '</div></div>';
-    });
-    html += '</div></div>';
-  });
-  box.innerHTML = html;
-}
+  if (!email || email.indexOf('@') === -1) {
+    errEl.textContent = 'Adresse email invalide.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!pw) {
+    errEl.textContent = 'Merci de saisir votre mot de passe pour confirmer.';
+    errEl.style.display = 'block';
+    return;
+  }
 
-function ceToggleSec(idx) {
-  var mods = document.getElementById('ce-mods-' + idx);
-  var arr  = document.getElementById('ce-arr-' + idx);
-  if (!mods) return;
-  mods.classList.toggle('open');
-  arr.classList.toggle('open');
-}
-function ceUnfoldAll() {
-  document.querySelectorAll('#ce-sections .det-mods').forEach(function(el){ el.classList.add('open'); });
-  document.querySelectorAll('#ce-sections .det-sec-arrow').forEach(function(el){ el.classList.add('open'); });
-}
-function ceFilter(val) {
-  var q = val.toLowerCase();
-  document.querySelectorAll('#ce-sections .det-sec').forEach(function(sec) {
-    var mods = sec.querySelectorAll('.det-mod');
-    var anyVisible = false;
-    mods.forEach(function(m) {
-      var match = !q || m.querySelector('.det-mod-name').textContent.toLowerCase().indexOf(q) >= 0;
-      m.style.display = match ? '' : 'none';
-      if (match) anyVisible = true;
-    });
-    sec.style.display = (!q || anyVisible) ? '' : 'none';
-    if (q && anyVisible) {
-      sec.querySelector('.det-mods').classList.add('open');
-      sec.querySelector('.det-sec-arrow').classList.add('open');
-    }
-  });
-}
-
-function ceOpenEditMode() {
-  document.querySelectorAll('.det-mod').forEach(function(e){ e.classList.remove('active'); });
-  document.querySelectorAll('.det-mod-dot').forEach(function(e){ e.classList.remove('active-dot'); });
-  var iframe   = document.getElementById('ce-iframe');
-  var prefetch = document.getElementById('ce-prefetch-iframe');
-  var empty    = document.getElementById('ce-empty');
-  var loading  = document.getElementById('ce-loading');
-  var courseUrl = WWWROOT + '/course/view.php?id=' + _ce.id;
-
-  // Le prechargement (cePrefetchEditMode) est deja pret pour ce cours : on
-  // echange juste les deux iframes (id + visibilite), sans nouveau
-  // chargement, pour un affichage quasi instantane.
-  var canSwap = prefetch.dataset.prefetchCourseId === String(_ce.id) && prefetch.dataset.prefetchReady === '1';
-  if (canSwap) {
-    prefetch.id = 'ce-iframe';
-    iframe.id = 'ce-prefetch-iframe';
-    delete prefetch.dataset.prefetchCourseId;
-    delete prefetch.dataset.prefetchReady;
-    prefetch.style.display = 'block';
-    prefetch.style.opacity = '1';
-    iframe.style.display = 'none';
-    iframe.style.opacity = '0';
-    empty.style.display = 'none';
-    loading.style.display = 'none';
-    iframe = prefetch;
-  } else {
-    iframe.style.opacity = '0';
-    loading.style.display = 'flex';
-    iframe.onload = function() { ceInjectCSS(iframe); iframe.style.opacity = '1'; loading.style.display = 'none'; };
-    if (_ce.contextid && !_ceEditingActivated) {
-      // Le mode édition est active directement via l'URL officielle Moodle
-      // (pas besoin du bouton natif "Activer le mode édition", qui reste
-      // masque comme partout ailleurs dans ce visualiseur — meme habillage
-      // que la vue activite normale, _ceIframeCSS par defaut). Seulement la
-      // premiere fois : ensuite $USER->editing reste actif pour la session,
-      // pas besoin de repasser par ce redirect (gagne un aller-retour serveur).
-      iframe.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
-        '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
-      _ceEditingActivated = true;
+  var btn = document.getElementById('prof-edit-save-btn');
+  btn.disabled = true;
+  apiPost({ action: 'update_profile', firstname: firstname, lastname: lastname, email: email, password: pw }).then(function(r) {
+    if (r.ok) {
+      toast('Profil mis à jour');
+      setTimeout(function(){ location.reload(); }, 600);
     } else {
-      iframe.src = courseUrl;
+      btn.disabled = false;
+      errEl.textContent = r.msg || 'Erreur, réessaie.';
+      errEl.style.display = 'block';
     }
-    iframe.style.display = 'block';
-    empty.style.display  = 'none';
-  }
-  // Rafraichissement automatique de la liste "Contenu du cours" tant que le
-  // mode edition est ouvert : plus simple et plus fiable que d'essayer de
-  // detecter precisement chaque action Moodle (ajout, suppression, masquage,
-  // deplacement...), dont les mecanismes internes varient et ne declenchent
-  // pas toujours les evenements attendus. On reinjecte aussi le CSS a chaque
-  // tick (sans effet si deja present, voir le garde-fou dans ceInjectCSS) :
-  // certaines pages internes (ex. course/section.php, atteinte via une
-  // sous-section) utilisent un autre gabarit Moodle ou l'injection au
-  // premier chargement peut echouer silencieusement — ce filet corrige
-  // l'affichage sans qu'il faille identifier la cause exacte au cas par cas.
-  if (_ceRefreshTimer) clearInterval(_ceRefreshTimer);
-  _ceRefreshTimer = setInterval(function() {
-    ceInjectCSS(iframe);
-    if (_ce.id) ceRefreshSections();
-  }, 2500);
-}
-
-function ceRenderBreadcrumb(crumbs) {
-  var el = document.getElementById('ce-breadcrumb');
-  if (!crumbs || !crumbs.length) { el.innerHTML = ''; return; }
-  el.innerHTML = crumbs.map(function(c, i) {
-    var isLast = i === crumbs.length - 1;
-    return (i > 0 ? '<span class="dv-crumb-sep">&gt;</span>' : '') +
-      '<span' + (isLast ? ' class="dv-crumb-current"' : '') + '>' + esc(c) + '</span>';
-  }).join('');
-}
-
-function openCourseIframe(courseId, courseName) {
-  _ce.id = courseId; _ce.name = courseName;
-  var ceBody = document.querySelector('.course-modal-body');
-  if (ceBody) ceBody.classList.remove('mob-content'); // repartir sur la liste des sections en mobile
-  document.getElementById('course-modal-title').textContent = courseName;
-  document.getElementById('ce-iframe').style.display = 'none';
-  document.getElementById('ce-iframe').src = '';
-  document.getElementById('ce-empty').style.display = 'flex';
-  document.getElementById('ce-search-inp').value = '';
-  document.getElementById('ce-breadcrumb').innerHTML = '';
-  document.getElementById('ce-sections').innerHTML = '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Chargement…</p>';
-  document.getElementById('course-modal-bg').classList.add('on');
-  ceRefreshSections();
-}
-
-// Precharge en arriere-plan (iframe cachee) le mode edition de ce cours, des
-// l'ouverture de "Mes modules" : si l'utilisateur clique ensuite sur
-// "Activer le mode edition", ceOpenEditMode peut afficher ce resultat
-// quasi instantanement au lieu de charger from scratch. A noter : ce
-// prechargement passe par editmode.php la premiere fois de la session, ce
-// qui active $USER->editing cote serveur meme si l'utilisateur ne clique
-// jamais sur le bouton — accepte ici car sans consequence pour un
-// formateur/admin deja autorise a editer.
-function cePrefetchEditMode(courseId) {
-  var prefetch = document.getElementById('ce-prefetch-iframe');
-  if (!prefetch) return;
-  prefetch.dataset.prefetchCourseId = String(courseId);
-  prefetch.dataset.prefetchReady = '0';
-  var courseUrl = WWWROOT + '/course/view.php?id=' + courseId;
-  prefetch.onload = function() {
-    try {
-      if (prefetch.contentWindow.location.href.indexOf('/course/view.php') === -1) return;
-    } catch (e) {}
-    if (prefetch.dataset.prefetchCourseId !== String(courseId)) return;
-    ceInjectCSS(prefetch);
-    prefetch.dataset.prefetchReady = '1';
-  };
-  if (_ce.contextid && !_ceEditingActivated) {
-    prefetch.src = WWWROOT + '/editmode.php?context=' + _ce.contextid +
-      '&pageurl=' + encodeURIComponent(courseUrl) + '&setmode=1&sesskey=' + SESSKEY;
-    _ceEditingActivated = true;
-  } else {
-    prefetch.src = courseUrl;
-  }
-}
-
-// Recharge la liste des sections/activites du cours ouvert (_ce.id) depuis
-// le serveur, sans reinitialiser le reste de la modale (recherche, iframe
-// ouverte...). Utilise a l'ouverture (openCourseIframe) et pour refleter en
-// direct un renommage fait en mode edition (voir ceWatchInplaceEdits) sans
-// que le formateur ait besoin de recharger toute la page.
-function ceRefreshSections() {
-  var courseId = _ce.id;
-  // Anti-cache (_ts) : par precaution, pour exclure toute reponse mise en
-  // cache par le navigateur sur cette requete appelee tres frequemment.
-  fetch(window.location.pathname + '?action=course_detail&courseid=' + courseId + '&_ts=' + Date.now(), {cache: 'no-store'})
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (!d.ok || _ce.id !== courseId) return;
-      _ce.sections = d.sections;
-      _ce.contextid = d.contextid;
-      ceRenderBreadcrumb(d.breadcrumb);
-      ceRenderSections(d.sections);
-      // Une seule fois par cours ouvert (pas a chaque rafraichissement
-      // periodique) : _ce.contextid n'est connu qu'a partir d'ici, donc
-      // c'est le premier moment ou le prechargement peut passer par
-      // editmode.php correctement si besoin.
-      if (_ce.prefetchedFor !== courseId) {
-        _ce.prefetchedFor = courseId;
-        cePrefetchEditMode(courseId);
-      }
-    })
-    .catch(function() {
-      document.getElementById('ce-sections').innerHTML =
-        '<p style="padding:20px 18px;color:var(--muted);font-size:13px">Erreur réseau.</p>';
-    });
-}
-
-// Un renommage en direct (section, activite...) dans l'iframe "mode edition"
-// utilise le mecanisme "inplace editable" natif de Moodle, qui declenche cet
-// evenement (bouillonnant) une fois la sauvegarde AJAX terminee — voir
-// lib/amd/src/local/inplace_editable/events.js. Un ajout/suppression/
-// deplacement d'activite ou de section passe lui par l'editeur de cours
-// reactif, qui declenche 'core_course:stateChanged' sur le document a
-// chaque changement d'etat — voir course/format/amd/src/courseeditor.js
-// (dispatchStateChangedEvent). Les deux sont ecoutes ici pour rafraichir la
-// liste "Contenu du cours" sans que le formateur ait a recharger la page.
-function ceWatchInplaceEdits(doc) {
-  if (doc._l3mInplaceWatched) return;
-  doc._l3mInplaceWatched = true;
-  var refresh = function() { if (_ce.id) ceRefreshSections(); };
-  doc.addEventListener('core/inplace_editable:updated', refresh);
-  doc.addEventListener('core_course:stateChanged', refresh);
-  // Filet de securite : certaines actions (masquer/afficher, supprimer...)
-  // ne declenchent pas toujours les evenements ci-dessus selon le format de
-  // cours. On observe donc aussi directement les changements de structure du
-  // contenu du cours, avec un debounce pour ne rafraichir qu'une fois
-  // l'action terminee (evite les rafales pendant l'animation Moodle).
-  // Important : seulement si .course-content existe reellement (page de
-  // cours) — sans ce garde-fou, le repli sur doc.body observait N'IMPORTE
-  // QUELLE page chargee dans l'iframe (un PDF, un quiz...), et les
-  // manipulations DOM internes d'un visualiseur (ex. PDF.js qui redessine
-  // ses pages en continu) declenchaient des rafraichissements en boucle —
-  // d'ou les ralentissements/l'affichage instable observes sur un PDF.
-  try {
-    var content = doc.querySelector('.course-content');
-    if (content) {
-      var timer = null;
-      var obs = new MutationObserver(function() {
-        clearTimeout(timer);
-        timer = setTimeout(refresh, 500);
-      });
-      obs.observe(content, {childList: true, subtree: true});
-    }
-  } catch (e) {}
-  // "Supprimer" (.editing_delete) ouvre une boite de dialogue de
-  // confirmation Moodle avant d'agir : on ne peut pas savoir a l'avance
-  // quand l'utilisateur va confirmer, donc on sonde quelques fois sur
-  // quelques secondes des le clic, pour rafraichir des que la suppression
-  // devient effective plutot que d'attendre une fermeture/reouverture de
-  // la fenetre.
-  doc.addEventListener('click', function(ev) {
-    var link = ev.target.closest && ev.target.closest('.editing_delete');
-    if (!link) return;
-    var n = 0;
-    var poll = setInterval(function() {
-      n++;
-      refresh();
-      if (n >= 6) clearInterval(poll);
-    }, 700);
-  }, true);
-}
-function closeCourseIframe() {
-  document.getElementById('course-modal-bg').classList.remove('on');
-  var left = document.querySelector('.dv-left');
-  if (left) left.style.display = '';
-  document.getElementById('ce-edit-link').style.display = '';
-  var iframe = document.getElementById('ce-iframe');
-  iframe.src = 'about:blank';
-  if (_ceRefreshTimer) { clearInterval(_ceRefreshTimer); _ceRefreshTimer = null; }
+  }).catch(function() {
+    btn.disabled = false;
+    errEl.textContent = 'Erreur réseau, réessaie.';
+    errEl.style.display = 'block';
+  });
 }
 
 /* ─────────────────────────────────────────
@@ -2930,10 +2577,9 @@ function go(v) {
   _rendered[v] = true;
   if      (v === 'jour')   renderJour();
   else if (v === 'plan')   renderPlan();
-  else if (v === 'corr')   renderCorr();
   else if (v === 'elev')   renderElev();
   else if (v === 'dispo')  renderDispo();
-  else if (v === 'cours')  renderMesCours();
+  else if (v === 'cours')  { renderProgSequences(); }
   else if (v === 'peda')   renderPeda();
   else if (v === 'params') renderParams();
 }
@@ -3047,16 +2693,15 @@ function renderJour() {
     DATA.courses.length + ' cours',
     DATA.students.length + ' apprenant' + (DATA.students.length > 1 ? 's' : '')
   ];
-  if (cohortWeeks.length) parts.push(cohortWeeks.length + ' classe' + (cohortWeeks.length > 1 ? 's actives' : ' active'));
+  if (cohortWeeks.length) parts.push(cohortWeeks.length + ' ' + TERM_CLASSE_LC + (cohortWeeks.length > 1 ? 's actives' : ' active'));
   if (DATA.meta.role_label) parts.unshift(DATA.meta.role_label);
   document.getElementById('jour-sub').textContent = parts.join(' · ');
 
   // Sidebar chip — première classe active
   var sclEl = document.getElementById('sidebar-cls');
-  if (sclEl && DATA.cohorts.length) sclEl.textContent = DATA.cohorts[0].name;
+  if (sclEl && DATA.cohorts.length) sclEl.textContent = dispCohName(DATA.cohorts[0].name);
 
-  // 5 KPIs
-  var nbCorr = DATA.corrections.length;
+  // 4 KPIs
   var nbLia  = DATA.signal_lia.length;
   // Un evenement calendrier reel s'AJOUTE au calcul du moteur Lia (ce n'est
   // pas la meme seance formalisee, c'est une seance en plus du programme —
@@ -3101,15 +2746,9 @@ function renderJour() {
       action: null },
     { cls:'k-violet', title:'Élèves suivis',
       num: DATA.students.length,
-      chip: DATA.cohorts.length + ' classe' + (DATA.cohorts.length>1?'s':''), chipCls:'',
+      chip: DATA.cohorts.length + ' ' + TERM_CLASSE_LC + (DATA.cohorts.length>1?'s':''), chipCls:'',
       sub: DATA.courses.length + ' cours assigné' + (DATA.courses.length > 1 ? 's' : ''),
       action: null },
-    { cls: nbCorr > 0 ? 'k-danger' : 'k-cream',
-      title: 'Corrections en attente',
-      num: nbCorr,
-      chip: null, chipCls:'',
-      sub: nbCorr > 0 ? nbCorr + ' devoir' + (nbCorr>1?'s':'') + ' à corriger' : 'Tout est corrigé ✓',
-      action: nbCorr > 0 ? '<button class="kpi-action" onclick="go(\'corr\')">Traiter \u2192</button>' : null },
     { cls: nbLia > 0 ? 'k-danger' : 'k-cream',
       title: 'Signal Lia',
       num: nbLia,
@@ -3128,13 +2767,6 @@ function renderJour() {
       (k.action || '') +
     '</div>';
   }).join('');
-
-  if (nbCorr > 0 && !document.querySelector('#nav-corr-btn .nav-badge')) {
-    var badge = document.createElement('span');
-    badge.className   = 'nav-badge';
-    badge.textContent = nbCorr;
-    document.getElementById('nav-corr-btn').appendChild(badge);
-  }
 
   // Semaines véhicule actives
   // Semaines véhicule : actives ou à venir (une entrée par cohorte)
@@ -3170,7 +2802,7 @@ function renderJour() {
       if (vw.active) {
         return '<div class="veh-card">' +
           '<div class="veh-header">&#128663; Semaine véhicule · ' + esc(vw.dates) + '</div>' +
-          '<p class="veh-body">' + esc(vw.name) + ' · ' + vw.nb + ' apprenant' + (vw.nb > 1 ? 's' : '') +
+          '<p class="veh-body">' + esc(dispCohName(vw.name)) + ' · ' + vw.nb + ' apprenant' + (vw.nb > 1 ? 's' : '') +
             ' · 3 élèves max par voiture</p>' +
           '<div class="veh-groups">' +
             vw.groups.map(function(g){ return '<span class="veh-grp-chip">Grp ' + esc(g) + '</span>'; }).join('') +
@@ -3187,7 +2819,7 @@ function renderJour() {
             '&#128663; Prochaine semaine véhicule · ' + weeksLabel +
           '</div>' +
           '<div style="padding:10px 13px;font-size:13px;color:var(--ink)">' +
-            '<b>' + esc(vw.name) + '</b> · ' + esc(vw.dates) + '<br>' +
+            '<b>' + esc(dispCohName(vw.name)) + '</b> · ' + esc(vw.dates) + '<br>' +
             '<span style="color:var(--muted)">' + vw.nb + ' apprenant' + (vw.nb > 1 ? 's' : '') +
               ' · ' + vw.groups.length + ' sous-groupe' + (vw.groups.length > 1 ? 's' : '') +
               ' · Stage ' + vw.sesNum + '/3</span>' +
@@ -3232,7 +2864,7 @@ function renderJour() {
     seancesBlocks.push(curWeekGrid.map(function(e) {
       return '<div class="plan-session">' +
         '<div class="plan-session-name">' + esc(e.label) + (e.lia ? ' <span style="color:var(--violet)">✦</span>' : '') +
-          ' <span class="plan-session-cls">· classe ' + esc(e.coh) + '</span>' +
+          ' <span class="plan-session-cls">· ' + TERM_CLASSE_LC + ' ' + esc(e.coh) + '</span>' +
         '</div>' +
         '<span class="plan-session-h">' + Math.round(e.h * 2) / 2 + ' h</span>' +
         '<span class="' + tagClassJ(e.type) + '">' + tagLabelJ(e.type) + '</span>' +
@@ -3245,14 +2877,14 @@ function renderJour() {
       var wtypeColor = {c:'var(--teal)',s:'var(--muted)',r:'var(--violet)',rs:'var(--violet)',e1:'var(--orange)',e:'var(--orange)'}[cw.wtype]||'var(--muted)';
       var chip = '<span style="display:inline-block;background:' + wtypeColor + '22;color:' + wtypeColor + ';border:1px solid ' + wtypeColor + '44;font-size:10.5px;font-weight:700;border-radius:99px;padding:2px 9px">' + esc(cw.label) + '</span>';
       var header = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
-        '<b style="font-size:14px;color:var(--ink)">' + esc(cw.name) + '</b>' +
+        '<b style="font-size:14px;color:var(--ink)">' + esc(dispCohName(cw.name)) + '</b>' +
         '<span style="color:var(--muted);font-size:12px">Sem. ' + cw.rel + '/35</span>' + chip +
         (cw.nb ? '<span style="color:var(--muted);font-size:12px">· ' + cw.nb + ' apprenant' + (cw.nb>1?'s':'') + '</span>' : '') +
       '</div>';
       var body = '';
       if (!cw.blocs.length) {
         var icons = {s:'🏢',r:'🏫',rs:'🏫',e:'📝',e1:'📝'};
-        body = '<p style="color:var(--muted);font-size:13px;margin:0">' + (icons[cw.wtype]||'') + ' ' + esc(cw.label) + ' — pas de cours à distance cette semaine.</p>';
+        body = '<p style="color:var(--muted);font-size:13px;margin:0">' + (icons[cw.wtype]||'') + ' ' + esc(cw.label) + ', pas de cours à distance cette semaine.</p>';
       } else {
         body = cw.blocs.map(function(b){
           return '<div class="event" style="align-items:center">' +
@@ -3269,7 +2901,7 @@ function renderJour() {
 
   if (!seancesBlocks.length) {
     seancesEl.innerHTML = !cohortWeeks.length
-      ? '<p style="color:var(--muted);font-size:13px">Aucune cohorte active — vérifiez la date de rentrée (champ idnumber).</p>'
+      ? '<p style="color:var(--muted);font-size:13px">Aucune cohorte active, vérifiez la date de rentrée (champ idnumber).</p>'
       : '<p style="color:var(--muted);font-size:13px">Rien de planifié cette semaine.</p>';
   } else {
     seancesEl.innerHTML = seancesBlocks.join('<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">');
@@ -3282,7 +2914,7 @@ function renderJour() {
     liaEl.innerHTML = '<div style="background:var(--teal-t);border:1px solid var(--teal);border-radius:10px;padding:12px 14px;font-size:13px;font-weight:700;color:var(--teal-d)">✓ Tous vos apprenants sont actifs</div>';
   } else {
     liaEl.innerHTML = DATA.signal_lia.map(function(l){
-      var cohBadge = l.cohort ? '<span style="font-size:11px;font-weight:500;color:var(--muted)"> · ' + esc(l.cohort) + '</span>' : '';
+      var cohBadge = l.cohort ? '<span style="font-size:11px;font-weight:500;color:var(--muted)"> · ' + esc(dispCohName(l.cohort)) + '</span>' : '';
       // Tags signaux
       var tags = [];
       tags.push(l.days === '?'
@@ -3290,10 +2922,6 @@ function renderJour() {
         : '<span class="sig-tag t-red">Inactif ' + l.days + ' j</span>');
       if (typeof l.pct === 'number' && l.pct < 30) {
         tags.push('<span class="sig-tag t-orange">Progression ' + l.pct + '%</span>');
-      }
-      var corrCount = (DATA.corrections || []).filter(function(c){ return c.userid === l.id; }).length;
-      if (corrCount > 0) {
-        tags.push('<span class="sig-tag t-blue">' + corrCount + ' devoir' + (corrCount > 1 ? 's' : '') + ' à noter</span>');
       }
       return '<div class="sig-card sig-orange">' +
         '<div class="sig-student">' + esc(l.nom) + cohBadge + '</div>' +
@@ -3410,7 +3038,7 @@ function renderPlan() {
     } else {
       alertHtml = '<b>' + overloaded.length + ' semaine' + (overloaded.length > 1 ? 's' : '') +
         ' au-dessus de ' + cap + ' h</b> (' + overloaded.join(', ') + ')' +
-        (hasVeh ? ' — semaines véhicule. Lia a soumis une re-répartition ' +
+        (hasVeh ? ', semaines véhicule. Lia a soumis une re-répartition ' +
           '<span style="background:var(--amber,#F6C685);color:var(--amber-d,#8a5a10);' +
           'font-weight:800;font-size:10.5px;padding:2px 8px;border-radius:99px;margin-left:4px">en arbitrage</span>' : '');
     }
@@ -3467,7 +3095,7 @@ function renderPlan() {
       var liaHtml = curEntries.map(function(e) {
         return '<div class="plan-session">' +
           '<div class="plan-session-name">' + esc(e.label) + (e.lia ? ' <span style="color:var(--violet)">✦</span>' : '') +
-            ' <span class="plan-session-cls">· classe ' + esc(e.coh) + '</span>' +
+            ' <span class="plan-session-cls">· ' + TERM_CLASSE_LC + ' ' + esc(e.coh) + '</span>' +
           '</div>' +
           '<span class="plan-session-h">' + Math.round(e.h * 2) / 2 + ' h</span>' +
           '<span class="' + tagClass(e.type) + '">' + tagLabel(e.type) + '</span>' +
@@ -3483,7 +3111,7 @@ function renderPlan() {
 
     if (!curInfo.blocs.length) {
       listEl.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:4px 0">' +
-        esc(LIA_WLABELS[curInfo.wtype] || 'Semaine spéciale') + ' — pas de cours à distance.</p>';
+        esc(LIA_WLABELS[curInfo.wtype] || 'Semaine spéciale') + ', pas de cours à distance.</p>';
     } else {
       var rows = [];
       cohorts.forEach(function(cohort) {
@@ -3491,7 +3119,7 @@ function renderPlan() {
           rows.push(
             '<div class="plan-session">' +
               '<div class="plan-session-name">' + esc(b.n) +
-                ' <span class="plan-session-cls">· ' + esc(cohort.name) + '</span>' +
+                ' <span class="plan-session-cls">· ' + esc(dispCohName(cohort.name)) + '</span>' +
               '</div>' +
               '<span class="plan-session-h">' + LIA_SESSION_H + ' h</span>' +
               '<span class="visio-tag">visio</span>' +
@@ -3505,40 +3133,6 @@ function renderPlan() {
 }
 
 /* ─────────────────────────────────────────
-   VUE CORRECTIONS
-───────────────────────────────────────── */
-function renderCorr() {
-  var n = DATA.corrections.length;
-  document.getElementById('corr-sub').textContent = n > 0
-    ? n + ' correction' + (n > 1 ? 's' : '') + ' en attente.'
-    : 'Aucune correction en attente.';
-
-  var el = document.getElementById('corr-list');
-  if (!n) {
-    el.innerHTML = '<div class="okbox">Aucune correction en attente ✓</div>';
-    return;
-  }
-  el.innerHTML = DATA.corrections.map(function(c, i){
-    var nom = esc(c.firstname + ' ' + c.lastname);
-    return '<div class="cor" id="cor-' + i + '">' +
-      '<div class="cor-name">' + nom + '</div>' +
-      '<div class="cor-assign">Devoir : ' + esc(c.assign_name) + '</div>' +
-      '<div class="cor-date">Déposé le ' + esc(c.date_label) + '</div>' +
-      '<div class="cor-acts">' +
-        '<button type="button" class="btn mini primary" onclick="openCorrectionInCourse(' + c.cmid + ',' + c.course + ',' + c.userid + ')">Ouvrir</button>' +
-        '<button class="btn mini ghost" onclick="markCorrected(' + i + ')">Marquer comme corrigé</button>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-}
-
-function markCorrected(idx) {
-  var el = document.getElementById('cor-' + idx);
-  if (el) { el.style.opacity = '.35'; el.style.pointerEvents = 'none'; }
-  toast('Marqué comme corrigé — ouvrez Moodle pour valider la note.');
-}
-
-/* ─────────────────────────────────────────
    VUE ÉLÈVES
 ───────────────────────────────────────── */
 function renderElev() {
@@ -3548,7 +3142,7 @@ function renderElev() {
     if (s.cohort_name && cohNames.indexOf(s.cohort_name) < 0) cohNames.push(s.cohort_name);
   });
   document.getElementById('elev-filter-btns').innerHTML = cohNames.map(function(n){
-    return '<button class="filter-btn" data-coh="' + esc(n) + '" onclick="filterElev(this)">' + esc(n) + '</button>';
+    return '<button class="filter-btn" data-coh="' + esc(n) + '" onclick="filterElev(this)">' + esc(dispCohName(n)) + '</button>';
   }).join('');
 
   renderElevTable();
@@ -3595,7 +3189,7 @@ function renderElevTable() {
   tbody.innerHTML = list.map(function(s){
     var rowCls  = s.inactive ? ' class="row-inactive"' : '';
     var inact   = s.inactive ? ' <span class="chip c-ko">&gt;7 j inactif</span>' : '';
-    var coh     = s.cohort_name ? esc(s.cohort_name) : '<span style="color:var(--muted)">—</span>';
+    var coh     = s.cohort_name ? esc(dispCohName(s.cohort_name)) : '<span style="color:var(--muted)">—</span>';
     var pctClr  = s.pct < 20 ? 'color:var(--red);font-weight:700' : '';
     var bar     = '<span class="bar"><i style="width:' + s.pct + '%"></i></span>' +
                   ' <span style="' + pctClr + '">' + s.pct + ' %</span>';
@@ -3646,7 +3240,7 @@ function addDispo() {
     document.getElementById('dispo-from').value = '';
     document.getElementById('dispo-to').value   = '';
     renderDispoList(DATA.my_dispos);
-    toast('Indisponibilité transmise — en attente de validation.');
+    toast('Indisponibilité transmise, en attente de validation.');
   }).catch(function() { toast('Erreur réseau.'); });
 }
 
@@ -3665,7 +3259,7 @@ function renderDispoList(dispos) {
     el.innerHTML = '<p style="color:var(--muted);font-size:13px">Aucune déclaration pour l\'instant.</p>';
     return;
   }
-  var badges = { pending: ['pending', 'En attente'], validated: ['validated', '✓ Validée — plan ajusté'], rejected: ['rejected', 'Refusée'] };
+  var badges = { pending: ['pending', 'En attente'], validated: ['validated', '✓ Validée, plan ajusté'], rejected: ['rejected', 'Refusée'] };
   el.innerHTML = dispos.map(function(d){
     var b = badges[d.status] || badges.pending;
     var note = (d.status === 'rejected' && d.admin_note) ? ' <span style="color:var(--muted);font-size:11.5px">(' + esc(d.admin_note) + ')</span>' : '';
@@ -3694,20 +3288,167 @@ function renderParams() {
 }
 
 /* ─────────────────────────────────────────
-   VUE MES COURS
+   SEQUENCES (repertoire de modules du referentiel) — meme visuel/navigation
+   que Programme : grille de cartes, clic = drill-down (au lieu d'un
+   accordeon empile), voir .seqp-* ci-dessus et .card/.grid dans
+   programme.php (question du 25/09/2026). Une Sequence porte AU PLUS UNE
+   Etape (voir sequences-config.php) -> un seul bouton "Faire l'etape" par
+   Sequence, affiche a cote de son titre ; les modules sont de simples
+   cartes informatives, sans action propre (question du 01/10/2026 : plus un
+   bouton par module). Pas de "Faire l'étape" cote formateur
+   (PROG_IS_STUDENT=false) — reserve aux eleves.
 ───────────────────────────────────────── */
-function renderMesCours() {
-  var tbody = document.getElementById('mescours-tbody');
-  if (!DATA.courses.length) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">Aucun cours assigné.</td></tr>';
+var _progSeqOpen = null;
+var PROG_IS_STUDENT = false;
+var PLAYERURL_PROG = WWWROOT + '/sequence-player.php';
+
+function progSeqOpen(seqid) {
+  _progSeqOpen = seqid;
+  renderProgSequences();
+}
+
+// Clic sur un module -> renvoie vers lui dans Programme (plus haut sur la
+// page) : on fait naviguer l'iframe jusqu'au bon noeud et on scrolle jusqu'a
+// elle, la carte visee y est mise en valeur (voir OPEN_TARGET/HIGHLIGHT_ID
+// et .card-highlight dans programme.php). Question du 06/10/2026.
+function openInProgramme(target, highlight) {
+  var ifr = document.getElementById('prog-iframe');
+  if (!ifr) return;
+  ifr.src = WWWROOT + '/programme.php?embed=1&open=' + encodeURIComponent(target) + '&highlight=' + encodeURIComponent(highlight);
+  ifr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Deverrouillage manuel d'une Etape (Responsable pedagogique) — meme action
+// AJAX "set_override" que le <select> de programme.php, juste appelee
+// depuis "Sequences" (voir l3m_seq_doc_set_override() dans
+// l3m_referentiel.php). Global (toutes les eleves), pas par eleve.
+function setSeqOverride(sel, dbid) {
+  var value = sel.value;
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'set_override');
+  fd.append('dbid', dbid);
+  fd.append('value', value);
+  sel.disabled = true;
+  fetch(WWWROOT + '/programme.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      sel.disabled = false;
+      if (r.ok) toast('Mis à jour'); else alert(r.msg || 'Erreur');
+    })
+    .catch(function() { sel.disabled = false; alert('Erreur réseau'); });
+}
+
+// Coche/decoche un module precis comme "aborde" pendant une seance "classe
+// virtuelle" — POST vers sequences-config.php (ou vivent toutes les
+// mutations de Sequences), meme sesskey de session valable cross-page
+// (question du 06/10/2026 : checklist par module, pas un "tout ou rien").
+function setCvModuleDone(seqid, ref, checked) {
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'set_cv_module_done');
+  fd.append('seqid', seqid);
+  fd.append('ref', ref);
+  fd.append('done', checked ? 1 : 0);
+  fetch(WWWROOT + '/sequences-config.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (r.ok) toast('Mis à jour'); else alert(r.msg || 'Erreur');
+    })
+    .catch(function() { alert('Erreur réseau'); });
+}
+
+function renderProgSequences() {
+  var seqs = DATA.prog_sequences || [];
+  var sub = document.getElementById('seq-sub');
+  var list = document.getElementById('seq-list');
+  list.className = 'seqp-grid';
+  if (!seqs.length) {
+    sub.textContent = 'Aucune séquence pour l\'instant.';
+    list.innerHTML = '';
     return;
   }
-  tbody.innerHTML = DATA.courses.map(function(c) {
-    return '<tr>' +
-      '<td class="mm-name">' + esc(c.fullname) + '</td>' +
-      '<td class="mm-short">' + esc(c.shortname) + '</td>' +
-      '<td><button type="button" class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Ajouter du contenu</button></td>' +
-    '</tr>';
+
+  var open = _progSeqOpen !== null ? seqs.filter(function(s) { return s.id === _progSeqOpen; })[0] : null;
+
+  if (open) {
+    sub.textContent = '';
+    var mods = open.modules || [];
+    // Checklist par module (Responsable pedagogique, Sequences "classe
+    // virtuelle" uniquement) : pas de suivi automatique de presence Glowbl,
+    // donc coche a la main lesquels des modules ont ete reellement abordes
+    // pendant la seance — pas un "tout ou rien" par Sequence (question du
+    // 06/10/2026). La case stoppe sa propagation pour ne pas declencher la
+    // navigation vers Programme portee par la carte elle-meme.
+    var cvChecklist = DATA.is_ped_lead && open.type === 'classe_virtuelle';
+    var doneSet = {};
+    (open.cv_done_modules || []).forEach(function(r) { doneSet[r] = true; });
+    var modsHtml = mods.length
+      ? mods.map(function(m) {
+          var cb = cvChecklist
+            ? '<input type="checkbox" onclick="event.stopPropagation()" onchange="setCvModuleDone(' + open.id + ',\'' + m.ref + '\',this.checked)"' + (doneSet[m.ref] ? ' checked' : '') + ' style="margin-right:10px;flex-shrink:0">'
+            : '';
+          return '<div class="seqp-mod-card" onclick="openInProgramme(\'' + m.target + '\',\'' + m.highlight + '\')">' + cb + esc(m.nom) + '</div>';
+        }).join('')
+      : '<p class="sub" style="margin:0">Aucun module pour l\'instant.</p>';
+    var actionHtml = '';
+    if (open.action && open.action.kind === 'cv') {
+      actionHtml = '<a class="btn mini primary" href="' + esc(open.action.url) + '" target="_blank" rel="noopener">🔴 Rejoindre la classe virtuelle</a>';
+    } else if (PROG_IS_STUDENT && open.action && open.action.kind === 'etape') {
+      actionHtml = open.action.completed
+        ? '<a class="btn mini ghost" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">✓ Étape terminée · Revoir</a>'
+        : '<a class="btn mini primary" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">Commencer la séquence</a>';
+    }
+    // "Demander a Lia" (chat IA) — disponible pour toute Sequence, cote
+    // formateur uniquement (voir l3m_progseq_contexte_ia() dans
+    // l3m_referentiel.php). Rebranche ici le 06/10/2026 a la place de
+    // l'ancien bouton dans la visionneuse de cours Moodle (supprimee avec
+    // "Corrections en attente").
+    if (!PROG_IS_STUDENT) {
+      actionHtml += ' <button type="button" class="btn mini ghost" onclick="openLiaChat(' + open.id + ',\'' + esc(open.titre).replace(/'/g, "\\'") + '\')">💬 Demander à Lia</button>';
+    }
+    // Deverrouillage manuel (Responsable pedagogique) — meme mecanisme que
+    // le <select> de Programme (l3m_seq_doc_set_override), expose ici pour
+    // ne pas obliger le ped-lead a aller chercher l'Unite dans Programme
+    // (question du 02/10/2026 : "ajouter le deblocage manuel pour le
+    // formateur Responsable pedagogique").
+    var overrideHtml = '';
+    if (DATA.is_ped_lead && open.action && open.action.kind === 'etape' && open.action.dbid) {
+      var ov = open.action.override || 'auto';
+      overrideHtml = '<div style="margin-top:12px;margin-bottom:14px">' +
+        '<label class="seqp-ovr-label">Déblocage manuel (Responsable pédagogique)</label>' +
+        '<select class="seqp-ovr-select" onchange="setSeqOverride(this,\'' + open.action.dbid + '\')">' +
+          '<option value="auto"' + (ov === 'auto' ? ' selected' : '') + '>Auto (selon progression de l\'élève)</option>' +
+          '<option value="open"' + (ov === 'open' ? ' selected' : '') + '>🔓 Forcer disponible</option>' +
+          '<option value="locked"' + (ov === 'locked' ? ' selected' : '') + '>🔒 Forcer verrouillé</option>' +
+        '</select>' +
+      '</div>';
+    } else if (cvChecklist) {
+      overrideHtml = '<p class="sub" style="margin-top:12px;margin-bottom:0">☑ Cochez ci-dessous les modules effectivement abordés pendant cette séance. Ça débloque leur support s\'ils sont partagés avec une autre séquence.</p>';
+    }
+    list.className = '';
+    list.innerHTML =
+      '<button type="button" class="seqp-back" onclick="progSeqOpen(null)">&larr; Retour aux séquences</button>' +
+      '<div class="seqp-detail-id">Séquence ' + open.order + '</div>' +
+      '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:' + (overrideHtml ? '0' : '14px') + '">' +
+        '<h3 class="seqp-detail-title" style="margin:0">' + esc(open.titre) + '</h3>' +
+        actionHtml +
+      '</div>' +
+      overrideHtml +
+      '<div class="seqp-mod-grid">' + modsHtml + '</div>';
+    return;
+  }
+
+  sub.textContent = seqs.length + ' séquence' + (seqs.length > 1 ? 's' : '');
+  list.innerHTML = seqs.map(function(seq) {
+    var mods = seq.modules || [];
+    return '<div class="seqp-card" onclick="progSeqOpen(' + seq.id + ')">' +
+      '<div class="seqp-chevron">›</div>' +
+      '<div class="seqp-id">Séquence ' + seq.order + '</div>' +
+      '<div class="seqp-title">' + esc(seq.titre) + '</div>' +
+      '<div class="seqp-bar-track"><div class="seqp-bar-fill" style="width:0%"></div></div>' +
+      '<div class="seqp-meta">' + mods.length + ' module' + (mods.length > 1 ? 's' : '') + '</div>' +
+    '</div>';
   }).join('');
 }
 

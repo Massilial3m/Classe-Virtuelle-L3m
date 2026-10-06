@@ -1,0 +1,500 @@
+{
+  "_avertissement": "SQUELETTE VIDE — a remplir via sequence-editor.php (module_id=7).",
+  "sequence_id": "seq2_accidentalite_accidentologie",
+  "titre": "[À compléter] Préparation à l'évaluation CCP1 – Simulations d'examen",
+  "phase0_ouverture": {
+    "titre": "[À compléter] Préparation à l'évaluation CCP1 – Simulations d'examen",
+    "accroche": "",
+    "objectifs": [
+      "",
+      ""
+    ]
+  },
+  "phase1_construction_accidentalite": {
+    "statut": "non_note",
+    "ecrans": [
+      {
+        "id": "1.1",
+        "type": "amorce",
+        "question": "",
+        "revele_a": null
+      },
+      {
+        "id": "1.2",
+        "type": "texte_question",
+        "texte": "",
+        "revele_reponse_de": "1.1",
+        "revele_texte": "",
+        "question": "",
+        "id_question": "Q2",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.3",
+        "type": "texte_seul",
+        "texte": "",
+        "revele_reponse_de_id_question": "Q2",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.4",
+        "type": "texte_question_double",
+        "texte": "",
+        "questions": [
+          {
+            "id_question": "Q3",
+            "question": "",
+            "reponse_reference": ""
+          },
+          {
+            "id_question": "Q4",
+            "question": "",
+            "reponse_reference": ""
+          }
+        ]
+      },
+      {
+        "id": "1.5",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q5",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.6",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q6",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.7",
+        "type": "amorce",
+        "question": "",
+        "revele_a": null
+      },
+      {
+        "id": "1.8",
+        "type": "texte_question_double",
+        "texte": "",
+        "revele_reponse_de": "1.7",
+        "reponse_reference": "",
+        "questions": [
+          {
+            "id_question": "Q7",
+            "question": "",
+            "reponse_reference": ""
+          },
+          {
+            "id_question": "Q8",
+            "question": "",
+            "reponse_reference": ""
+          }
+        ]
+      },
+      {
+        "id": "1.9",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q9",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.10",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q10",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.11",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q11",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "1.12",
+        "type": "synthese",
+        "texte": ""
+      }
+    ]
+  },
+  "phase2_transition": {
+    "texte": "",
+    "bouton": ""
+  },
+  "phase3_qcm_accidentalite": {
+    "statut": "note",
+    "seuil_pct": 70,
+    "seuil_bon_sur_total": "4/5",
+    "questions": [
+      {
+        "id": "3.1",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "3.2",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "3.3",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "3.4",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "3.5",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          }
+        ]
+      }
+    ],
+    "remediation_non_redigee": true
+  },
+  "phase4_construction_accidentologie": {
+    "statut": "non_note",
+    "ecrans": [
+      {
+        "id": "4.1",
+        "type": "amorces_multiples",
+        "questions": [
+          {
+            "id_question": "A1",
+            "question": ""
+          },
+          {
+            "id_question": "A2",
+            "question": ""
+          },
+          {
+            "id_question": "A3",
+            "question": ""
+          },
+          {
+            "id_question": "A4",
+            "question": ""
+          }
+        ]
+      },
+      {
+        "id": "4.2",
+        "type": "texte_question",
+        "texte": "",
+        "revele_reponse_de": [
+          "A1",
+          "A2"
+        ],
+        "revele_texte": "",
+        "id_question": "Q12",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "4.3",
+        "type": "texte_question",
+        "texte": "",
+        "revele_reponse_de": "A3",
+        "revele_texte": "",
+        "id_question": "Q13",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "4.4",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q14",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "4.5",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q15",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "4.6",
+        "type": "texte_question",
+        "texte": "",
+        "id_question": "Q16",
+        "question": "",
+        "reponse_reference": ""
+      },
+      {
+        "id": "4.7",
+        "type": "texte_question",
+        "texte": "",
+        "revele_reponse_de": "A4",
+        "revele_texte": "",
+        "id_question": "Q17",
+        "question": "",
+        "reponse_reference": ""
+      }
+    ]
+  },
+  "phase4_8_collecte": {
+    "id": "4.8",
+    "type": "collecte_brute",
+    "statut": "collecte_sans_correction",
+    "note_technique": "AUCUNE correction ni classement IA sur cet ecran. Stockage tel quel, reaffichage intact en Sequence 3.",
+    "champs": [
+      {
+        "id_champ": "C1",
+        "consigne": ""
+      },
+      {
+        "id_champ": "C2",
+        "consigne": ""
+      },
+      {
+        "id_champ": "C3",
+        "consigne": ""
+      }
+    ]
+  },
+  "phase5_transition": {
+    "texte": "",
+    "bouton": ""
+  },
+  "phase6_qcm_accidentologie": {
+    "statut": "note",
+    "seuil_pct": 70,
+    "seuil_bon_sur_total": "5/6",
+    "questions": [
+      {
+        "id": "6.1",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "6.2",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "6.3",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "6.4",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "6.5",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          }
+        ]
+      },
+      {
+        "id": "6.6",
+        "question": "",
+        "type": "multi_select",
+        "options": [
+          {
+            "texte": "",
+            "correcte": false,
+            "explication": ""
+          },
+          {
+            "texte": "",
+            "correcte": true,
+            "explication": ""
+          }
+        ]
+      }
+    ],
+    "remediation_non_redigee": true
+  },
+  "phase7_cloture": {
+    "texte": "",
+    "export_pdf": {
+      "nb_reponses": 17,
+      "questions_incluses": [
+        "Q2",
+        "Q3",
+        "Q4",
+        "Q5",
+        "Q6",
+        "Q7",
+        "Q8",
+        "Q9",
+        "Q10",
+        "Q11",
+        "Q12",
+        "Q13",
+        "Q14",
+        "Q15",
+        "Q16",
+        "Q17"
+      ],
+      "note": "Numerotees 1 a 17 dans le PDF final."
+    }
+  },
+  "module_id": 7,
+  "module_nom": "Préparation à l'évaluation CCP1 – Simulations d'examen"
+}

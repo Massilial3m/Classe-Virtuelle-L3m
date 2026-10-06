@@ -10,6 +10,7 @@ require_once($CFG->dirroot . '/cohort/lib.php');
 require_once($CFG->dirroot . '/user/lib.php');
 require_once(__DIR__ . '/lia_engine.php');
 require_once(__DIR__ . '/l3m_branding.php');
+require_once(__DIR__ . '/l3m_referentiel.php');
 
 require_login();
 $ctx_sys = context_system::instance();
@@ -347,7 +348,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
         $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
         if (!$target_cohort || $reserved) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' introuvable']); exit;
         }
         // Meme regle d'appartenance que le listing "Classes & eleves" (voir
         // plus bas) : au moins un membre du client de l'admin, ou tag direct
@@ -357,7 +358,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ['cid' => $cohortid]
         ) || $target_cohort->component === 'l3m_client_' . $admin_client;
         if (!$owns) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' introuvable']); exit;
         }
         // Ne supprime que le regroupement (cohorte) : les comptes eleves et
         // leurs inscriptions aux cours ne sont pas touches, ils sont juste
@@ -373,14 +374,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
         $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
         if (!$target_cohort || $reserved) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' introuvable']); exit;
         }
         $owns = $DB->record_exists_sql(
             "SELECT 1 FROM {cohort_members} cm WHERE cm.cohortid = :cid AND " . l3m_admin_client_sql('cm.userid', $admin_client, $saran_cohort_id),
             ['cid' => $cohortid]
         ) || $target_cohort->component === 'l3m_client_' . $admin_client;
         if (!$owns) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe introuvable']); exit;
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' introuvable']); exit;
         }
         // Champ natif "description" de la cohorte, inutilisé jusqu'ici —
         // réutilisé pour stocker le secteur géographique de la classe (même
@@ -397,7 +398,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
         $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
         if (!$target_cohort || $reserved || !l3m_admin_owns_user($userid, $admin_client)) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe ou élève introuvable']);
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' ou élève introuvable']);
             exit;
         }
         if (!$DB->record_exists('cohort_members', ['cohortid' => $cohortid, 'userid' => $userid])) {
@@ -413,7 +414,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $target_cohort = $DB->get_record('cohort', ['id' => $cohortid]);
         $reserved = $target_cohort && in_array($target_cohort->idnumber, [L3M_CLIENT_COHORT_IDNUMBER_LBA, L3M_CLIENT_COHORT_IDNUMBER_SARAN], true);
         if (!$target_cohort || $reserved || !l3m_admin_owns_user($userid, $admin_client)) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe ou élève introuvable']);
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' ou élève introuvable']);
             exit;
         }
         cohort_remove_member($cohortid, $userid);
@@ -486,7 +487,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         foreach ($created_ids as $uid) { l3m_set_user_client($uid, $admin_client); }
-        echo json_encode(['ok' => true, 'msg' => count($created_ids) . ' élèves · 2 classes créées']);
+        echo json_encode(['ok' => true, 'msg' => count($created_ids) . ' élèves · 2 ' . l3m_term_classe_lc() . 's créées']);
         exit;
     }
 
@@ -546,7 +547,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['ok' => false, 'msg' => 'Intervenant introuvable']); exit;
         }
         if (!$l3m_valid_lia_letter($coh)) {
-            echo json_encode(['ok' => false, 'msg' => 'Classe invalide']); exit;
+            echo json_encode(['ok' => false, 'msg' => l3m_term_classe() . ' invalide']); exit;
         }
         $type     = optional_param('type', 'visio', PARAM_ALPHA);
         $label    = trim(optional_param('label', 'Affectation manuelle', PARAM_TEXT));
@@ -1615,6 +1616,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo json_encode(['ok' => false, 'msg' => 'Message vide']);
             exit;
         }
+        // Sans cours partage avec le destinataire (cas frequent pour un manager
+        // qui n'est jamais "inscrit" dans un cours comme un formateur/eleve),
+        // Moodle refuse l'envoi natif ("User X cannot send a message to
+        // conversation Y"), meme si l'annuaire de cette plateforme a deja
+        // valide qui peut contacter qui — meme correctif que espace-eleve.php
+        // et espace-formateur.php : devenir contacts mutuels (unidirectionnel
+        // suffit, is_contact() teste les 2 sens) avant l'envoi.
+        if (!\core_message\api::is_contact($USER->id, $studentid)) {
+            \core_message\api::add_contact($USER->id, $studentid);
+        }
         $convid = (int)(\core_message\api::get_conversation_between_users([$USER->id, $studentid]) ?: 0);
         if (!$convid) {
             $newconv = \core_message\api::create_conversation(
@@ -2203,7 +2214,7 @@ foreach ($formateurs as $f) {
     if ($f['hours_peak'] > 0 && $f['hours_peak'] > $f['capacity']) {
         $lia_alerts[] = [
             'type'  => 'warn',
-            'title' => 'Capacité dépassée — ' . $f['nom'],
+            'title' => 'Capacité dépassée : ' . $f['nom'],
             'body'  => $f['nom'] . ' a atteint ' . $f['hours_peak'] . ' h sur une semaine (capacité ' . $f['capacity'] . ' h/sem).',
             'action'=> 'Voir les intervenants',
             'target'=> 'team'
@@ -2280,33 +2291,6 @@ try {
     }
 } catch (Exception $cl_e) { $courses_list = []; }
 
-// ===== LISTE COURS + CATÉGORIES pour l'onglet "Modules" (créer/consulter) =====
-$course_categories = [];
-try {
-    $cats_raw = $DB->get_records('course_categories', null, 'sortorder ASC', 'id, name, parent, depth');
-    foreach ($cats_raw as $cat) {
-        $cat_is_saran = ((int)$cat->id === $saran_category_id);
-        if (($admin_client === 'saran') !== $cat_is_saran) continue;
-        $course_categories[] = ['id' => (int)$cat->id, 'name' => $cat->name, 'parent' => (int)$cat->parent, 'depth' => (int)$cat->depth];
-    }
-} catch (Exception $cc_e) { $course_categories = []; }
-
-$courses_full_list = [];
-try {
-    $cf_raw = $DB->get_records_select('course', "id > 1 AND category $course_client_op :satcat2", ['satcat2' => $saran_category_id], 'fullname ASC',
-        'id, fullname, shortname, category, visible');
-    $cat_names = [];
-    foreach ($course_categories as $cc) { $cat_names[$cc['id']] = $cc['name']; }
-
-    foreach ($cf_raw as $cf) {
-        $courses_full_list[] = [
-            'id' => (int)$cf->id, 'fullname' => $cf->fullname, 'shortname' => $cf->shortname,
-            'category' => (int)$cf->category, 'category_name' => $cat_names[(int)$cf->category] ?? '—',
-            'visible' => (int)$cf->visible,
-        ];
-    }
-} catch (Exception $cf_e) { $courses_full_list = []; }
-
 // ===== MOTEUR LIA (calcul serveur, source unique avec espace-formateur.php) =====
 preg_match_all('/\d+/', $ecsr_params['regroupements_vehicule'], $veh_matches);
 preg_match_all('/\d+/', $ecsr_params['regroupements_salle'], $salle_matches);
@@ -2379,6 +2363,7 @@ foreach (l3m_get_beta_testers() as $bt_uid) {
 
 $admin_data = json_encode([
     'is_siteadmin'        => is_siteadmin(),
+    'is_ped_lead_viewer'  => l3m_is_ped_lead($USER->id) || is_siteadmin(),
     'admin_client'        => $admin_client,
     'pending_signed_docs' => $pending_signed_docs,
     'unread_messages'     => $unread_messages,
@@ -2400,8 +2385,7 @@ $admin_data = json_encode([
     'plan_events'  => $plan_events,
     'courses_list' => $courses_list,
     'formations'   => l3m_get_formations_list($admin_client, $saran_category_id),
-    'courses_full' => $courses_full_list,
-    'course_categories' => $course_categories,
+    'prog_sequences' => l3m_progseq_for_display($USER->id),
     'lia_people'   => $lia_people,
     'lia_cohorts'  => $lia_cohorts,
     'lia_plan'     => $lia_plan,
@@ -2419,7 +2403,8 @@ $user_name     = $USER->firstname . ' ' . $USER->lastname;
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Administration — <?= s($brand['name']) ?></title>
+<title>Administration · <?= s($brand['name']) ?></title>
+<link rel="icon" type="image/png" href="<?= s($brand['logo']) ?>">
 <style>
 :root {
   --teal:<?= $brand['teal'] ?>; --teal-d:<?= $brand['teal_d'] ?>; --teal-t:<?= $brand['teal_t'] ?>;
@@ -2501,6 +2486,30 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .k-danger .kpi-num { color:var(--red); }
 .panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:14px; min-width:0; }
 .panel h3 { margin:0 0 12px; font-size:11px; font-weight:700; color:var(--teal-d); text-transform:uppercase; letter-spacing:.07em; }
+
+/* "Mes modules" (Programme + Sequences) — porte depuis espace-formateur.php
+   pour que l'admin voie exactement la meme chose (question du 02/10/2026). */
+.section-title { font-size:16px; font-weight:800; margin:18px 0 10px; display:flex; align-items:center; gap:8px; }
+.section-divider { height:1px; background:var(--line); margin:28px 0 6px; }
+.prog-embed-box { border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:8px; background:#fff; }
+.seqp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:16px; margin-bottom:14px; }
+.seqp-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; display:flex; flex-direction:column; min-height:150px; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; position:relative; }
+.seqp-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
+.seqp-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:8px; }
+.seqp-title { font-size:16px; font-weight:700; line-height:1.35; margin:0 0 14px; flex-grow:1; color:var(--ink); }
+.seqp-bar-track { height:5px; background:var(--line); border-radius:99px; overflow:hidden; margin-bottom:8px; }
+.seqp-bar-fill { height:100%; background:linear-gradient(90deg,var(--teal),var(--teal-d)); border-radius:99px; }
+.seqp-meta { font-size:13px; color:var(--muted); }
+.seqp-chevron { position:absolute; top:20px; right:18px; color:var(--line); font-size:18px; }
+.seqp-back { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); padding:8px 14px; border-radius:99px; font-size:13px; font-weight:600; cursor:pointer; font-family:inherit; margin-bottom:14px; }
+.seqp-back:hover { border-color:var(--teal); }
+.seqp-detail-id { font-size:11.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--teal-d); margin-bottom:4px; }
+.seqp-detail-title { font-size:20px; margin:0 0 14px; color:var(--ink); }
+.seqp-mod-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:16px; }
+.seqp-mod-card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; display:flex; align-items:center; min-height:64px; font-size:14px; font-weight:700; color:var(--ink); line-height:1.35; cursor:pointer; transition:border-color .15s,box-shadow .15s,transform .12s; }
+.seqp-mod-card:hover { border-color:var(--teal); box-shadow:0 4px 14px rgba(20,30,45,.06); transform:translateY(-1px); }
+.seqp-ovr-label { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; display:block; margin-bottom:4px; }
+.seqp-ovr-select { border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:12.5px; font-family:inherit; background:#fff; color:var(--ink); }
 .cols2 { display:grid; grid-template-columns:1.1fr .9fr; gap:14px; }
 @media(max-width:900px) { .cols2 { grid-template-columns:1fr; } }
 .event { display:flex; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px; align-items:baseline; }
@@ -2521,6 +2530,9 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .btn.primary { background:var(--<?= $brand['button_accent'] ?>); color:#fff; }
 .btn.ghost { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); border:1.5px solid var(--<?= $brand['button_accent'] ?>); }
 .btn.mini { padding:5px 12px; font-size:11px; }
+/* La regle globale "aside button:hover" (menu lateral) matchait aussi nos
+   boutons ghost places dans .msg-list-pane (qui est un <aside>). */
+.msg-list-pane .btn.ghost:hover { background:var(--card); color:var(--<?= $brand['button_accent'] ?>-d); }
 .btn.danger-btn { background:var(--red-t); color:var(--red); border:1.5px solid var(--red); }
 .grid3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(255px,1fr)); gap:12px; }
 .pers { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
@@ -2579,6 +2591,33 @@ h2 { font-size:12px; font-weight:700; margin:22px 0 8px; color:var(--teal-d); te
 .pg-pcell { width:13px; height:13px; border-radius:3px; color:#fff; font-size:8px; font-weight:800; display:flex; align-items:center; justify-content:center; }
 .pg-ch-v { background:var(--teal); } .pg-ch-veh { background:var(--orange); } .pg-ch-s { background:var(--amber); color:var(--amber-d); }
 .pg-star { font-size:7px; color:var(--violet-d); line-height:1; }
+/* Filtre par type dans la legende (Distance/Vehicule/Salle/Stage/Examen) —
+   voir setPlanTypeFilter() : les cases/pastilles qui ne correspondent pas
+   au type choisi sont attenuees plutot que masquees, pour garder le
+   contexte de la grille (qui est occupe a cote). */
+.pg-legend .pg-filter-btn { background:none; border:none; padding:0; margin:0; font:inherit; font-size:11px; color:var(--muted); cursor:pointer; display:inline-flex; align-items:center; }
+.pg-legend .pg-filter-btn:hover { color:var(--ink); }
+.pg-legend .pg-filter-btn.on { color:var(--ink); font-weight:800; }
+.pg-dim { visibility:hidden; }
+/* Version beta "calendrier simplifie" (testeurs uniquement, voir
+   l3m_is_beta_tester) : cases plus grandes pour respirer, legende sur une
+   seule ligne (scroll horizontal si besoin plutot que retour a la ligne).
+   La colonne formateurs figee et le detail au survol existaient deja. */
+.pg-legend.beta-cal { flex-wrap:nowrap; overflow-x:auto; white-space:nowrap; padding-bottom:4px; }
+.pg-legend.beta-cal span { flex:0 0 auto; }
+.pg-wrap.beta-cal .pg-cell { width:27px; flex:0 0 27px; height:36px; font-size:9px; }
+.pg-wrap.beta-cal .pg-mrow .pg-cell, .pg-wrap.beta-cal .pg-wrow .pg-cell { height:18px; font-size:9px; }
+.pg-wrap.beta-cal .pg-lab { flex:0 0 168px; max-width:168px; padding:6px 10px; }
+.pg-wrap.beta-cal .pg-lab b { font-size:12.5px; }
+.pg-wrap.beta-cal .pg-lab span { font-size:10.5px; }
+.pg-wrap.beta-cal .pg-pcell { width:16px; height:16px; font-size:9px; border-radius:4px; }
+.pg-wrap.beta-cal .pg-star { font-size:8px; }
+.pg-wrap.beta-cal .pg-manual { font-size:7px; }
+.pg-wrap.beta-cal .pg-cell.pg-now { background:var(--teal-t); box-shadow:none; }
+.pg-wrap.beta-cal .pg-mrow .pg-cell.pg-now, .pg-wrap.beta-cal .pg-wrow .pg-cell.pg-now { background:var(--teal-t); font-weight:800; color:var(--teal-d); }
+.pg-wrap.beta-cal .pg-ch-v { background:var(--violet-t); color:var(--violet-d); }
+.pg-wrap.beta-cal .pg-c-d { background:var(--violet-t); color:var(--violet-d); }
+.pg-wrap.beta-cal .pg-pcell.pg-overload { text-decoration:underline; text-decoration-color:var(--red); text-decoration-thickness:2px; text-underline-offset:1.5px; }
 .pg-logline { font-size:12px; padding:6px 0; border-bottom:1px solid var(--line); display:flex; gap:8px; }
 .pg-logline:last-child { border:none; }
 .pg-logline .pg-lw { flex:0 0 34px; font-weight:800; color:var(--teal-d); font-variant-numeric:tabular-nums; }
@@ -2610,10 +2649,10 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .bar i { display:block; height:100%; border-radius:3px; background:var(--violet); }
 @media(max-width:640px){
   /* Tableaux a beaucoup de colonnes (Leads, En attente d'activation) :
-     meme principe d'empilement que .mm-table, mais avec un libelle de
-     colonne rappele devant chaque valeur (data-label), car ici le contenu
-     seul (ex. "Situation" en texte libre) ne suffit pas a se comprendre
-     hors du contexte de son en-tete de colonne. */
+     empilement en petite fiche verticale, avec un libelle de colonne
+     rappele devant chaque valeur (data-label), car ici le contenu seul
+     (ex. "Situation" en texte libre) ne suffit pas a se comprendre hors du
+     contexte de son en-tete de colonne. */
   .rtable thead { display:none; }
   .rtable, .rtable tbody, .rtable tr, .rtable td { display:block; width:100%; white-space:normal; }
   .rtable tr { padding:12px 14px; border-bottom:1px solid var(--line); }
@@ -2623,18 +2662,6 @@ tr.inactive td { background:rgba(214,69,69,.04); }
     content:attr(data-label) " : "; font-weight:700; font-size:10.5px; text-transform:uppercase;
     letter-spacing:.05em; color:var(--muted);
   }
-}
-@media(max-width:640px){
-  /* "Modules" (catalogue admin) : intitules longs (nowrap) qui sortent de
-     l'ecran sur mobile sans indication de scroll. On empile chaque module
-     en petite fiche verticale a la place. */
-  .mm-table thead { display:none; }
-  .mm-table, .mm-table tbody, .mm-table tr, .mm-table td { display:block; width:100%; white-space:normal; }
-  .mm-table tr { padding:12px 14px; border-bottom:1px solid var(--line); }
-  .mm-table td { padding:0; border-bottom:none; }
-  .mm-table td:not(:first-child) { margin-top:6px; }
-  .mm-table .mm-name { font-weight:700; color:var(--ink); }
-  .mm-table .mm-short, .mm-table .mm-cat { font-size:11.5px; color:var(--muted); }
 }
 /* ---- cartes classes ---- */
 .view-coh-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }
@@ -2877,7 +2904,24 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .docs-form-grid .fld.full{grid-column:1/-1}
 .fld select{width:100%;border:1.5px solid var(--line);background:var(--bg);border-radius:10px;padding:9px 13px;font-size:13.5px;font-family:inherit;color:var(--ink);outline:none}
 .fld select:focus{border-color:var(--teal)}
-@media(max-width:760px) { aside { flex-basis:54px; } aside button span { display:none; } .today { display:none; } }
+@media(max-width:760px) {
+  aside { flex-basis:54px; } aside button span { display:none; } .today { display:none; }
+  /* Grille KPI "Planning & Lia" forcee a 3 colonnes en dur (voir attribut
+     style de #plan-pkpis) : sur mobile chaque carte devient trop etroite et
+     "Cohortes planifiees" (liste qui peut s'allonger) deborde/est ecrasee —
+     on repasse en 1 colonne, empilee, plutot que 3 colonnes compressees. */
+  #plan-pkpis { grid-template-columns:1fr !important; }
+  /* Legende "Type" (calendrier beta) : en scroll horizontal invisible sur
+     desktop (indice de survol), mais sans affordance de scroll visible sur
+     mobile — on revient a un retour a la ligne normal, il y a de la place
+     verticale contrairement a l'horizontale. */
+  .pg-legend.beta-cal { flex-wrap:wrap; overflow-x:visible; white-space:normal; }
+  /* "Documents eleves" : grille fixe 250px + 1fr qui ecrase la colonne de
+     droite (boutons/textes tronques) sur mobile — meme famille de bug que
+     .cols2, on repasse en 1 colonne empilee : liste puis panneau du doc. */
+  .docs-split { grid-template-columns:1fr; }
+  .docs-slist { max-height:40vh; }
+}
 button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { transition:none !important; } }
 
@@ -2886,7 +2930,14 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 .msg-modal-close { position:absolute; top:12px; right:12px; z-index:5; border:none; background:var(--ink); width:32px; height:32px; border-radius:50%; font-size:15px; color:#fff; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); line-height:1; display:flex; align-items:center; justify-content:center; }
 .msg-modal-close:hover { color:var(--ink); }
 
-.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); }
+/* position:static + z-index:auto : ".msg-list-pane" est un <aside>, comme le
+   menu principal — sans ce reset il herite du "aside { position:sticky }"
+   plus haut (regle generique sur la balise, pas la classe). Ici la balise
+   generique n'a pas de z-index explicite donc pas de collision visible avec
+   le bouton de fermeture (z-index:5) pour l'instant, mais le meme bug existe
+   cote eleve/formateur (z-index:50 sur leur "aside") — reset par coherence
+   et pour eviter une regression si un z-index est ajoute un jour ici. */
+.msg-list-pane { width:308px; flex:0 0 308px; border-right:1px solid var(--line); display:flex; flex-direction:column; background:var(--card); position:static; z-index:auto; }
 .msg-list-head { padding:20px 20px 4px; }
 .msg-list-head h2 { margin:0; font-size:19px; font-weight:800; }
 .msg-list-sub { font-size:12px; color:var(--muted); margin-top:2px; }
@@ -2967,10 +3018,6 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 </style>
 </head>
 <body>
-<?php if (l3m_is_beta_tester($USER->id)): ?>
-<div style="position:fixed;bottom:14px;right:14px;z-index:9999;background:#5B4FCF;color:#fff;font-size:11px;font-weight:700;padding:6px 12px;border-radius:99px;box-shadow:0 2px 8px rgba(0,0,0,.25)">🧪 Testeur, espace admin</div>
-<?php endif; ?>
-
 <!-- TOPBAR -->
 <div class="top">
   <a class="brand" href="<?= $CFG->wwwroot ?>">
@@ -3004,8 +3051,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <button data-v="leads" onclick="nav(this)">☎ <span>Leads</span><span class="nav-badge" id="leads-nav-badge" style="display:none">0</span></button>
   <button data-v="plan" onclick="nav(this)">▦ <span>Planning &amp; Lia</span></button>
   <button data-v="team" onclick="nav(this)">◉ <span>Intervenants</span></button>
-  <button data-v="coh"  onclick="nav(this)">⚑ <span>Classes &amp; élèves</span></button>
-  <button data-v="cours" onclick="nav(this)">🎓 <span>Modules</span></button>
+  <button data-v="coh"  onclick="nav(this)">⚑ <span><?= l3m_term_classe($USER->id) ?>s &amp; élèves</span></button>
+  <button data-v="cours" onclick="nav(this)">🎓 <span>Mes modules</span></button>
   <button data-v="docs"  onclick="nav(this)">☰ <span>Documents</span><span class="nav-badge" id="docs-nav-badge" style="display:none">0</span></button>
   <button data-v="admin" onclick="nav(this)">🗂 <span>Administratif</span></button>
   <button data-v="param" onclick="nav(this)">⚙ <span>Paramètres</span></button>
@@ -3037,37 +3084,39 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ===== PLANNING & LIA ===== -->
 <div class="view" id="v-plan">
   <h1>Planning &amp; Lia</h1>
-  <p class="sub">Le plan vivant des classes et de l'équipe. La colonne encadrée de violet&nbsp;= cette semaine. Survolez une case pour le détail.</p>
+  <p class="sub">Le plan de l'équipe. Colonne teintée&nbsp;= cette semaine. Survolez une case pour le détail.</p>
 
   <div class="pg-pbar">
     <div class="pg-toggle">
       <button class="on" id="plan-tgP" onclick="setVuePlan('pers')">Vue intervenants</button>
-      <button id="plan-tgC" onclick="setVuePlan('coh')">Vue classes</button>
+      <button id="plan-tgC" onclick="setVuePlan('coh')">Vue <?= l3m_term_classe_lc($USER->id) ?>s</button>
     </div>
     <span style="flex:1"></span>
-    <button class="btn primary" onclick="simulerClasse()">✦ Simuler une nouvelle classe</button>
+    <button class="btn primary" onclick="simulerClasse()">✦ Simuler une nouvelle <?= l3m_term_classe_lc($USER->id) ?></button>
   </div>
 
   <div class="pg-proposal" id="plan-prop">
-    <b>✦ Proposition de Lia — nouvelle classe <span id="plan-prop-letter">D</span></b>
+    <b>✦ Proposition de Lia : nouvelle <?= l3m_term_classe_lc($USER->id) ?> <span id="plan-prop-letter">D</span></b>
     <ul>
-      <li>Rentrée optimale : <b id="plan-prop-date"></b> (décalage <span id="plan-prop-decalage"></span> après la dernière classe)</li>
+      <li>Rentrée optimale : <b id="plan-prop-date"></b> (décalage <span id="plan-prop-decalage"></span> après la dernière <?= l3m_term_classe_lc($USER->id) ?>)</li>
       <li>Stages tuilés ✓ · semaines véhicule vérifiées ✓ · intervenants disponibles ✓</li>
     </ul>
-    <button class="btn primary" id="plan-prop-btn">Créer la classe</button>
+    <button class="btn primary" id="plan-prop-btn">Créer la <?= l3m_term_classe_lc($USER->id) ?></button>
     <button class="btn ghost" onclick="document.getElementById('plan-prop').classList.remove('on')">Annuler</button>
   </div>
 
-  <div class="pg-legend">
-    <span><i class="pg-sw" style="background:var(--teal-t);border:1px solid var(--teal)"></i>Distance</span>
-    <span><i class="pg-sw" style="background:var(--orange)"></i>Regroupement véhicule</span>
-    <span><i class="pg-sw" style="background:var(--amber)"></i>Regroupement salle</span>
-    <span><i class="pg-sw" style="background:var(--sand-t);border:1px solid var(--sand)"></i>Stage</span>
-    <span><i class="pg-sw" style="background:var(--dark)"></i>Examens</span>
-    <span>Pastilles&nbsp;: <i class="pg-sw" style="background:var(--teal)"></i>visio · <i class="pg-sw" style="background:var(--orange)"></i>véhicule · <i class="pg-sw" style="background:var(--amber)"></i>salle · ✦&nbsp;= ajusté par Lia · <i class="pg-sw" style="background:var(--red-t);border:1px solid var(--red)"></i>surcharge</span>
+  <div class="pg-legend beta-cal" id="plan-legend">
+    <b style="color:var(--ink);margin-right:2px">Type</b>
+    <button type="button" class="pg-filter-btn on" data-type="" onclick="setPlanTypeFilter(null)">Tous</button>
+    <button type="button" class="pg-filter-btn" data-type="distance" onclick="setPlanTypeFilter('distance')"><i class="pg-sw" style="background:var(--violet-t);border:1px solid var(--violet)"></i>Distance</button>
+    <button type="button" class="pg-filter-btn" data-type="vehicule" onclick="setPlanTypeFilter('vehicule')"><i class="pg-sw" style="background:var(--orange)"></i>Véhicule</button>
+    <button type="button" class="pg-filter-btn" data-type="salle" onclick="setPlanTypeFilter('salle')"><i class="pg-sw" style="background:var(--amber)"></i>Salle</button>
+    <button type="button" class="pg-filter-btn" data-type="stage" onclick="setPlanTypeFilter('stage')"><i class="pg-sw" style="background:var(--sand-t);border:1px solid var(--sand)"></i>Stage</button>
+    <button type="button" class="pg-filter-btn" data-type="examen" onclick="setPlanTypeFilter('examen')"><i class="pg-sw" style="background:var(--muted)"></i>Examen</button>
+    <span style="margin-left:auto;color:var(--muted);font-style:italic">détail complet au survol (modalité, surcharge…)</span>
   </div>
 
-  <div class="pg-wrap" id="plan-grid"><p style="color:var(--muted);padding:20px;font-size:13px">Chargement du planning…</p></div>
+  <div class="pg-wrap beta-cal" id="plan-grid"><p style="color:var(--muted);padding:20px;font-size:13px">Chargement du planning…</p></div>
 
   <div class="cols2">
     <div class="panel"><h3>Journal de Lia (automatique)</h3><div id="plan-log"></div></div>
@@ -3090,7 +3139,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <div class="team-header">
     <div>
       <h1>Intervenants</h1>
-      <p class="sub" style="margin-bottom:0">Chaque personne porte des habilitations — c'est sur elles que Lia s'appuie pour affecter les heures. Les anciens diplômes restent valides par équivalence.</p>
+      <p class="sub" style="margin-bottom:0">Chaque personne porte des habilitations : c'est sur elles que Lia s'appuie pour affecter les heures. Les anciens diplômes restent valides par équivalence.</p>
     </div>
     <button class="btn primary" style="flex-shrink:0;margin-top:4px" onclick="openAddFormateur()">+ Ajouter un intervenant</button>
   </div>
@@ -3101,10 +3150,10 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ===== CLASSES & ÉLÈVES ===== -->
 <div class="view" id="v-coh">
   <div class="view-coh-header">
-    <h1>Classes &amp; élèves</h1>
-    <button class="btn primary" onclick="openModal()">+ Créer une classe</button>
+    <h1><?= l3m_term_classe($USER->id) ?>s &amp; élèves</h1>
+    <button class="btn primary" onclick="openModal()">+ Créer une <?= l3m_term_classe_lc($USER->id) ?></button>
   </div>
-  <p class="sub" style="margin-bottom:0">Sous-groupes de conduite, règlement intérieur, progression et assiduité — tout ce qui déclenche une action est signalé.</p>
+  <p class="sub" style="margin-bottom:0">Sous-groupes de conduite, règlement intérieur, progression et assiduité : tout ce qui déclenche une action est signalé.</p>
 
   <div class="class-cards" id="class-cards"></div>
 
@@ -3119,7 +3168,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <thead>
         <tr>
           <th>Élève</th>
-          <th>Classe</th>
+          <th><?= l3m_term_classe($USER->id) ?></th>
           <th>Sous-groupe</th>
           <th>Règlement int.</th>
           <th>E-learning</th>
@@ -3133,28 +3182,37 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
-<!-- ===== MODULES ===== -->
+<!-- ===== MES MODULES (Programme + Sequences) — meme contenu que
+     espace-formateur.php, question du 02/10/2026 ===== -->
 <div class="view" id="v-cours">
-  <div class="view-coh-header">
-    <h1>Modules</h1>
-    <button class="btn primary" onclick="openCourseModal()">+ Créer un module</button>
+  <h1>Mes modules</h1>
+  <?php if (l3m_is_ped_lead($USER->id) || is_siteadmin()): ?>
+  <div style="text-align:right;margin-bottom:6px">
+    <a href="<?= $CFG->wwwroot ?>/referentiel-editor.php" style="font-size:12.5px;font-weight:800;color:var(--<?= $brand['button_accent'] ?>-d);text-decoration:none">✏️ Éditer le programme</a>
   </div>
-  <p class="sub" style="margin-bottom:0">Catalogue des modules Moodle (M1, M2…). La création d'un module crée la coquille (nom, catégorie) — le formateur y ajoute ensuite le contenu (les cours numérotés).</p>
+  <?php endif; ?>
+  <div class="prog-embed-box">
+    <iframe id="prog-iframe" src="<?= $CFG->wwwroot ?>/programme.php?embed=1" style="width:100%;border:none;display:block;min-height:220px" title="Programme"></iframe>
+  </div>
+  <script>
+  window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'l3m-prog-height') {
+      var ifr = document.getElementById('prog-iframe');
+      if (ifr) ifr.style.height = e.data.height + 'px';
+    }
+  });
+  </script>
 
-  <div class="twrap" style="margin-top:16px">
-    <table class="mm-table">
-      <thead>
-        <tr>
-          <th>Module</th>
-          <th>Nom court</th>
-          <th>Catégorie</th>
-          <th>Statut</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="cours-admin-tbody"></tbody>
-    </table>
+  <div class="section-divider"></div>
+
+  <?php if (l3m_is_ped_lead($USER->id) || is_siteadmin()): ?>
+  <div style="text-align:right;margin-bottom:6px">
+    <a href="<?= $CFG->wwwroot ?>/sequences-config.php" style="font-size:12.5px;font-weight:800;color:var(--<?= $brand['button_accent'] ?>-d);text-decoration:none">✏️ Gérer les séquences</a>
   </div>
+  <?php endif; ?>
+  <h2 class="section-title">▶ Séquences</h2>
+  <p class="sub" id="seq-sub">Chargement…</p>
+  <div class="seq-list" id="seq-list"></div>
 </div>
 
 <div class="modal-bg" id="course-modal-bg" onclick="if(event.target===this)closeCourseIframe()">
@@ -3229,8 +3287,8 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <p class="sub">Configuration du parcours ECSR. Les valeurs ci-dessous servent de base au moteur Lia (Phase 2).</p>
   <div class="param-grid">
     <div class="param-card pc-teal">
-      <div class="pc-head"><div class="ico">⚑</div><div class="text"><h3>Structure des classes</h3><p>Effectifs et sous-groupes</p></div></div>
-      <div class="param-row"><span class="lbl">Élèves par classe</span><span class="val"><input type="number" id="p-eleves_par_classe" value="<?= (int)$ecsr_params['eleves_par_classe'] ?>" min="1" max="20"> élèves</span></div>
+      <div class="pc-head"><div class="ico">⚑</div><div class="text"><h3>Structure des <?= l3m_term_classe_lc($USER->id) ?>s</h3><p>Effectifs et sous-groupes</p></div></div>
+      <div class="param-row"><span class="lbl">Élèves par <?= l3m_term_classe_lc($USER->id) ?></span><span class="val"><input type="number" id="p-eleves_par_classe" value="<?= (int)$ecsr_params['eleves_par_classe'] ?>" min="1" max="20"> élèves</span></div>
       <div class="param-row"><span class="lbl">Sous-groupes</span><span class="val"><input type="number" class="sm" id="p-sous_groupes_nb" value="<?= (int)$ecsr_params['sous_groupes_nb'] ?>"> de <input type="number" class="sm" id="p-sous_groupes_taille" value="<?= (int)$ecsr_params['sous_groupes_taille'] ?>"> élèves</span></div>
       <div class="param-row"><span class="lbl">Élèves par véhicule</span><span class="val">3 <small style="color:var(--muted);font-size:10px">règle non modifiable · direction</small></span></div>
       <div class="param-row"><span class="lbl">Décalage entre rentrées</span><span class="val"><input type="number" id="p-decalage_rentrees" value="<?= (int)$ecsr_params['decalage_rentrees'] ?>"> semaines</span></div>
@@ -3246,7 +3304,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="pc-head"><div class="ico">◉</div><div class="text"><h3>Capacité intervenants</h3><p>Charge horaire maximale</p></div></div>
       <div class="param-row"><span class="lbl">Salarié</span><span class="val"><input type="number" id="p-salarie_h" value="<?= (int)$ecsr_params['salarie_h'] ?>"> h/sem</span></div>
       <div class="param-row"><span class="lbl">Vacataire</span><span class="val"><input type="number" id="p-vacataire_h" value="<?= (int)$ecsr_params['vacataire_h'] ?>"> h/sem</span></div>
-      <div class="param-row"><span class="lbl">Suivi hebdo par classe</span><span class="val"><input type="number" class="sm" id="p-suivi_hebdo" value="<?= (int)$ecsr_params['suivi_hebdo'] ?>"> h<br><small style="color:var(--muted);font-size:10px">tutorat</small></span></div>
+      <div class="param-row"><span class="lbl">Suivi hebdo par <?= l3m_term_classe_lc($USER->id) ?></span><span class="val"><input type="number" class="sm" id="p-suivi_hebdo" value="<?= (int)$ecsr_params['suivi_hebdo'] ?>"> h<br><small style="color:var(--muted);font-size:10px">tutorat</small></span></div>
       <div class="param-row"><span class="lbl">Marge dépassement</span><span class="val"><input type="number" id="p-marge_depassement" value="<?= (int)$ecsr_params['marge_depassement'] ?>"> %</span></div>
     </div>
     <div class="param-card pc-sand">
@@ -3268,7 +3326,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       <div class="param-row"><span class="lbl">Relance auto documents</span><span class="val" style="color:var(--ink)"><select id="p-relance_auto_documents"><option value="1" <?= $ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>activée</option><option value="0" <?= !$ecsr_params['relance_auto_documents'] ? 'selected' : '' ?>>désactivée</option></select></span></div>
       <div class="param-row"><span class="lbl">Suivi caméra (Global)</span><span class="val" style="color:var(--ink)"><select id="p-suivi_camera_global"><option value="1" <?= $ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>activé</option><option value="0" <?= !$ecsr_params['suivi_camera_global'] ? 'selected' : '' ?>>désactivé</option></select></span></div>
       <div class="param-row"><span class="lbl">Seuil alerte caméra</span><span class="val"><input type="number" id="p-seuil_alerte_camera" value="<?= (int)$ecsr_params['seuil_alerte_camera'] ?>"> %</span></div>
-      <div class="param-row"><span class="lbl">Proposition classe D</span><span class="val"><select id="p-proposition_classe_d"><option value="manuelle" <?= $ecsr_params['proposition_classe_d'] === 'manuelle' ? 'selected' : '' ?>>manuelle</option><option value="automatique" <?= $ecsr_params['proposition_classe_d'] === 'automatique' ? 'selected' : '' ?>>automatique</option></select></span></div>
+      <div class="param-row"><span class="lbl">Proposition <?= l3m_term_classe_lc($USER->id) ?> D</span><span class="val"><select id="p-proposition_classe_d"><option value="manuelle" <?= $ecsr_params['proposition_classe_d'] === 'manuelle' ? 'selected' : '' ?>>manuelle</option><option value="automatique" <?= $ecsr_params['proposition_classe_d'] === 'automatique' ? 'selected' : '' ?>>automatique</option></select></span></div>
     </div>
   </div>
   <div class="pc-actions">
@@ -3277,15 +3335,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <button class="btn primary" onclick="paramsSave()">Enregistrer</button>
   </div>
 
-  <h1 style="margin-top:32px">Testeurs bêta</h1>
-  <p class="sub">Les comptes listés ici ont accès aux nouvelles fonctionnalités avant qu'elles soient activées pour tout le monde. Ajoutez un compte par son identifiant ou son e-mail.</p>
-  <div class="param-card pc-teal" style="max-width:520px">
-    <div style="display:flex;gap:8px;margin-bottom:12px">
-      <input type="text" id="beta-add-input" placeholder="identifiant ou e-mail…" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px" onkeydown="if(event.key==='Enter')addBetaTester()">
-      <button class="btn primary" onclick="addBetaTester()">+ Ajouter</button>
-    </div>
-    <div id="beta-testers-list"></div>
-  </div>
+  <!-- Testeurs bêta : outil interne (gestion via script), volontairement
+       retire de l'espace admin client — pas destine aux comptes admin
+       type "Aby Gaye". Le JS (renderBetaTesters/add/removeBetaTester) reste
+       en place, garde par une verif null sur #beta-testers-list, au cas ou
+       ce bloc serait un jour reintroduit. -->
 </div>
 
 <!-- ===== DOCUMENTS ===== -->
@@ -3350,7 +3404,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <p class="modal-sub" id="creds-modal-sub"></p>
     <div class="fld"><label>Identifiant</label><input type="text" id="creds-username" readonly></div>
     <div class="fld" id="creds-pw-row" style="display:none">
-      <label>Mot de passe (à transmettre maintenant — non récupérable ensuite)</label>
+      <label>Mot de passe (à transmettre maintenant, non récupérable ensuite)</label>
       <input type="text" id="creds-password" readonly>
     </div>
     <p class="sub" style="font-size:11.5px;margin:4px 0 0">
@@ -3406,7 +3460,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
             <option value="signed">✓ Signé</option>
             <option value="validated">✓ Validé</option>
             <option value="pending" selected>⚠ À signer / deadline</option>
-            <option value="future">— À venir</option>
+            <option value="future">À venir</option>
           </select>
         </div>
         <div class="fld">
@@ -3450,10 +3504,10 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- MODAL Créer une classe -->
 <div class="modal-bg" id="modal-bg" onclick="if(event.target===this)closeModal()">
   <div class="modal">
-    <h2>Nouvelle classe</h2>
-    <p class="modal-sub">Une classe est une promotion d'élèves suivant le même parcours.</p>
+    <h2>Nouvelle <?= l3m_term_classe_lc($USER->id) ?></h2>
+    <p class="modal-sub">Une <?= l3m_term_classe_lc($USER->id) ?> est une promotion d'élèves suivant le même parcours.</p>
     <div class="fld">
-      <label>Nom de la classe</label>
+      <label>Nom de la <?= l3m_term_classe_lc($USER->id) ?></label>
       <input type="text" id="modal-name" placeholder="ex : Classe A · Promotion Automne 2026" maxlength="100">
     </div>
     <div class="fld">
@@ -3462,38 +3516,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     </div>
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal()">Annuler</button>
-      <button class="btn primary" id="modal-save" onclick="saveClass()">Créer la classe</button>
+      <button class="btn primary" id="modal-save" onclick="saveClass()">Créer la <?= l3m_term_classe_lc($USER->id) ?></button>
     </div>
   </div>
 </div>
 
-<!-- MODAL Créer un module -->
-<div class="modal-bg" id="modal-course-bg" onclick="if(event.target===this)closeCourseModal()">
-  <div class="modal">
-    <h2>Nouveau module</h2>
-    <p class="modal-sub">Crée la coquille du module (nom, catégorie). Le formateur y ajoute ensuite le contenu (les cours) depuis son espace.</p>
-    <div class="fld">
-      <label>Nom complet</label>
-      <input type="text" id="course-fullname" placeholder="ex : M6 – Gestion des situations d'urgence" maxlength="255">
-    </div>
-    <div class="fld">
-      <label>Nom court</label>
-      <input type="text" id="course-shortname" placeholder="ex : ECSR-CCP1-M6" maxlength="100">
-    </div>
-    <div class="fld">
-      <label>Catégorie</label>
-      <select id="course-category"></select>
-    </div>
-    <div class="fld">
-      <label>Résumé <small style="color:var(--muted)">(optionnel)</small></label>
-      <input type="text" id="course-summary" placeholder="Description courte du cours">
-    </div>
-    <div class="modal-actions">
-      <button class="btn ghost" onclick="closeCourseModal()">Annuler</button>
-      <button class="btn primary" id="course-save-btn" onclick="saveCourse()">Créer le cours</button>
-    </div>
-  </div>
-</div>
 
 <!-- MODAL Ajouter / Modifier intervenant -->
 <div class="modal-bg" id="modal-form-bg" onclick="if(event.target===this)closeFormModal()">
@@ -3512,7 +3539,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <div class="fld">
       <label>Secteur</label>
       <input type="text" id="fmod-secteur" placeholder="ex : Nord, Sud, Centre-ville…">
-      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Lia priorise un formateur du même secteur que la classe pour les séances véhicule/salle.</p>
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Lia priorise un formateur du même secteur que la <?= l3m_term_classe_lc($USER->id) ?> pour les séances véhicule/salle.</p>
     </div>
     <div class="fld" id="fmod-pedlead-field">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:500;font-size:13px;color:var(--ink)">
@@ -3593,7 +3620,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
         <span class="msg-search-ico">&#128269;</span>
         <input type="text" id="msg-search-input" placeholder="Rechercher un contact..." oninput="msgFilterList()">
       </div>
-      <button type="button" class="btn mini" id="msg-new-btn" style="margin:0 14px 8px" onclick="msgToggleDirectory()">+ Nouveau message</button>
+      <button type="button" class="btn mini ghost" id="msg-new-btn" style="margin:0 16px 8px;width:calc(100% - 32px);justify-content:center" onclick="msgToggleDirectory()">+ Nouveau message</button>
       <div class="msg-contacts" id="msg-contacts"></div>
     </aside>
     <section class="msg-thread-pane">
@@ -3624,6 +3651,26 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 <script>
 var DATA = <?= $admin_data ?>;
+// Terminologie beta "classe" -> "cohorte" (l3m_branding.php) — texte affiche
+// uniquement, les noms reels de classe restent inchanges en base.
+var TERM_CLASSE = <?= json_encode(l3m_term_classe($USER->id)) ?>;
+var TERM_CLASSE_LC = <?= json_encode(l3m_term_classe_lc($USER->id)) ?>;
+// Calendrier "Planning & Lia" simplifie (generalise a tous les comptes) :
+// en-tete sur une ligne, heures semaine courante sur la fiche formateur,
+// surcharge en soulignement rouge plutot qu'en fond de case.
+var IS_BETA_CAL = true;
+// Reecrit l'affichage d'un nom de classe stocke tel quel en base
+// ("Classe X ...") en "<terme> X ..." cote testeur beta, sans jamais
+// toucher la donnee reelle (utile pour ne pas casser le filtrage/regex).
+function dispCohName(name) {
+  if (!name) return name;
+  name = name.replace(/^Classe\b/, TERM_CLASSE);
+  // Retire le tiret separateur entre la lettre et la date ("Cohorte B - Juillet
+  // 2026" / "Cohorte B- Septembre 2026" -> "Cohorte B Juillet 2026") — la donnee
+  // brute en base n'est jamais touchee (regex d'extraction de lettre ailleurs).
+  name = name.replace(/^(Cohorte\s+\S+)\s*[-–—]\s*/, '$1 ');
+  return name;
+}
 var SESSKEY = '<?= $sesskey ?>';
 var WWWROOT = '<?= $CFG->wwwroot ?>';
 var ADMINURL = '<?= $CFG->wwwroot ?>/admin-lba.php';
@@ -3631,6 +3678,136 @@ var COLORS = ['#2E9488','#7C6FDD','#F2A03D','#8B95A0','#D64545','#3EADA0'];
 var activeFilter = 'all';
 
 /* ===== NAVIGATION ===== */
+/* ─────────────────────────────────────────
+   MES MODULES — Sequences (repertoire de modules du referentiel), meme
+   logique que espace-formateur.php (question du 02/10/2026). Pas de bouton
+   "Commencer la sequence" ici (PROG_IS_STUDENT=false) — juste le
+   deverrouillage manuel (Responsable pedagogique) et le lien classe
+   virtuelle.
+───────────────────────────────────────── */
+var _progSeqOpen = null;
+var PROG_IS_STUDENT = false;
+var PLAYERURL_PROG = WWWROOT + '/sequence-player.php';
+
+function progSeqOpen(seqid) {
+  _progSeqOpen = seqid;
+  renderProgSequences();
+}
+
+// Clic sur un module -> renvoie vers lui dans Programme (plus haut sur la
+// page) : on fait naviguer l'iframe jusqu'au bon noeud et on scrolle jusqu'a
+// elle, la carte visee y est mise en valeur (voir OPEN_TARGET/HIGHLIGHT_ID
+// et .card-highlight dans programme.php). Question du 06/10/2026.
+function openInProgramme(target, highlight) {
+  var ifr = document.getElementById('prog-iframe');
+  if (!ifr) return;
+  ifr.src = WWWROOT + '/programme.php?embed=1&open=' + encodeURIComponent(target) + '&highlight=' + encodeURIComponent(highlight);
+  ifr.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function setSeqOverride(sel, dbid) {
+  var value = sel.value;
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'set_override');
+  fd.append('dbid', dbid);
+  fd.append('value', value);
+  sel.disabled = true;
+  fetch(WWWROOT + '/programme.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      sel.disabled = false;
+      if (r.ok) toast('Mis à jour'); else alert(r.msg || 'Erreur');
+    })
+    .catch(function() { sel.disabled = false; alert('Erreur réseau'); });
+}
+
+function setCvModuleDone(seqid, ref, checked) {
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'set_cv_module_done');
+  fd.append('seqid', seqid);
+  fd.append('ref', ref);
+  fd.append('done', checked ? 1 : 0);
+  fetch(WWWROOT + '/sequences-config.php', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r) { return r.json(); })
+    .then(function(r) {
+      if (r.ok) toast('Mis à jour'); else alert(r.msg || 'Erreur');
+    })
+    .catch(function() { alert('Erreur réseau'); });
+}
+
+function renderProgSequences() {
+  var seqs = DATA.prog_sequences || [];
+  var sub = document.getElementById('seq-sub');
+  var list = document.getElementById('seq-list');
+  list.className = 'seqp-grid';
+  if (!seqs.length) {
+    sub.textContent = 'Aucune séquence pour l\'instant.';
+    list.innerHTML = '';
+    return;
+  }
+
+  var open = _progSeqOpen !== null ? seqs.filter(function(s) { return s.id === _progSeqOpen; })[0] : null;
+
+  if (open) {
+    sub.textContent = '';
+    var mods = open.modules || [];
+    var cvChecklist = DATA.is_ped_lead_viewer && open.type === 'classe_virtuelle';
+    var doneSet = {};
+    (open.cv_done_modules || []).forEach(function(r) { doneSet[r] = true; });
+    var modsHtml = mods.length
+      ? mods.map(function(m) {
+          var cb = cvChecklist
+            ? '<input type="checkbox" onclick="event.stopPropagation()" onchange="setCvModuleDone(' + open.id + ',\'' + m.ref + '\',this.checked)"' + (doneSet[m.ref] ? ' checked' : '') + ' style="margin-right:10px;flex-shrink:0">'
+            : '';
+          return '<div class="seqp-mod-card" onclick="openInProgramme(\'' + m.target + '\',\'' + m.highlight + '\')">' + cb + esc(m.nom) + '</div>';
+        }).join('')
+      : '<p class="sub" style="margin:0">Aucun module pour l\'instant.</p>';
+    var actionHtml = '';
+    if (open.action && open.action.kind === 'cv') {
+      actionHtml = '<a class="btn mini primary" href="' + esc(open.action.url) + '" target="_blank" rel="noopener">🔴 Rejoindre la classe virtuelle</a>';
+    }
+    var overrideHtml = '';
+    if (DATA.is_ped_lead_viewer && open.action && open.action.kind === 'etape' && open.action.dbid) {
+      var ov = open.action.override || 'auto';
+      overrideHtml = '<div style="margin-top:12px;margin-bottom:14px">' +
+        '<label class="seqp-ovr-label">Déblocage manuel (Responsable pédagogique)</label>' +
+        '<select class="seqp-ovr-select" onchange="setSeqOverride(this,\'' + open.action.dbid + '\')">' +
+          '<option value="auto"' + (ov === 'auto' ? ' selected' : '') + '>Auto (selon progression de l\'élève)</option>' +
+          '<option value="open"' + (ov === 'open' ? ' selected' : '') + '>🔓 Forcer disponible</option>' +
+          '<option value="locked"' + (ov === 'locked' ? ' selected' : '') + '>🔒 Forcer verrouillé</option>' +
+        '</select>' +
+      '</div>';
+    } else if (cvChecklist) {
+      overrideHtml = '<p class="sub" style="margin-top:12px;margin-bottom:0">☑ Cochez ci-dessous les modules effectivement abordés pendant cette séance. Ça débloque leur support s\'ils sont partagés avec une autre séquence.</p>';
+    }
+    list.className = '';
+    list.innerHTML =
+      '<button type="button" class="seqp-back" onclick="progSeqOpen(null)">&larr; Retour aux séquences</button>' +
+      '<div class="seqp-detail-id">Séquence ' + open.order + '</div>' +
+      '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:' + (overrideHtml ? '0' : '14px') + '">' +
+        '<h3 class="seqp-detail-title" style="margin:0">' + esc(open.titre) + '</h3>' +
+        actionHtml +
+      '</div>' +
+      overrideHtml +
+      '<div class="seqp-mod-grid">' + modsHtml + '</div>';
+    return;
+  }
+
+  sub.textContent = seqs.length + ' séquence' + (seqs.length > 1 ? 's' : '');
+  list.innerHTML = seqs.map(function(seq) {
+    var mods = seq.modules || [];
+    return '<div class="seqp-card" onclick="progSeqOpen(' + seq.id + ')">' +
+      '<div class="seqp-chevron">›</div>' +
+      '<div class="seqp-id">Séquence ' + seq.order + '</div>' +
+      '<div class="seqp-title">' + esc(seq.titre) + '</div>' +
+      '<div class="seqp-bar-track"><div class="seqp-bar-fill" style="width:0%"></div></div>' +
+      '<div class="seqp-meta">' + mods.length + ' module' + (mods.length > 1 ? 's' : '') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
 function nav(btn) {
   document.querySelectorAll('aside button').forEach(b => b.classList.remove('on'));
   document.querySelectorAll('.view').forEach(v => v.classList.remove('on'));
@@ -3638,7 +3815,7 @@ function nav(btn) {
   var vid = 'v-' + btn.dataset.v;
   document.getElementById(vid).classList.add('on');
   if (vid === 'v-plan') initPlan();
-  if (vid === 'v-cours') renderCoursAdmin();
+  if (vid === 'v-cours') renderProgSequences();
   if (vid === 'v-leads') { renderLeads(); renderPendingActivations(); }
   if (vid === 'v-admin' && !document.getElementById('admin-tool-frame').src) {
     adminToolShow(document.querySelector('#v-admin .admin-tool-card.on'));
@@ -3654,7 +3831,7 @@ function goToAlert(target, filter) {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('on'));
     document.getElementById('students-title').textContent = filter === 'inactive'
       ? 'Élèves inactifs depuis 7 jours'
-      : (filter === 'low' ? 'Élèves — progression < 20 %' : 'Tous les élèves');
+      : (filter === 'low' ? 'Élèves, progression < 20 %' : 'Tous les élèves');
     renderClassCards();
     renderStudentsTable();
   }
@@ -3823,7 +4000,7 @@ function msgToggleDirectory() {
 function msgRenderDirectory() {
   var box = document.getElementById('msg-contacts');
   var q = _msg.filter;
-  var students   = (DATA.students   || []).map(function(s){ return {id: s.id, nom: s.nom, sub: 'Élève' + (s.cohort_name ? ' · ' + s.cohort_name : '')}; });
+  var students   = (DATA.students   || []).map(function(s){ return {id: s.id, nom: s.nom, sub: 'Élève' + (s.cohort_name ? ' · ' + dispCohName(s.cohort_name) : '')}; });
   var formateurs = (DATA.formateurs || []).map(function(f){ return {id: f.id, nom: f.nom, sub: 'Formateur' + (f.role_label ? ' · ' + f.role_label : '')}; });
   var all = students.concat(formateurs).filter(function(p){ return p.id !== <?= (int)$USER->id ?>; });
   if (q) all = all.filter(function(p){ return p.nom.toLowerCase().indexOf(q) !== -1; });
@@ -3884,7 +4061,7 @@ function msgSelectContact(convid, userid, nom, cls, isonline) {
   document.getElementById('msg-thread-name').textContent = nom;
   document.getElementById('msg-thread-sub').innerHTML =
     '<span class="dot' + (isonline?' online':'') + '"></span>' + (isonline ? 'En ligne' : 'Hors ligne') +
-    (cls ? ' · Classe ' + esc(cls) : '');
+    (cls ? ' · ' + TERM_CLASSE + ' ' + esc(cls) : '');
 
   var entry = _msg.list.find(function(c){ return c.userid === userid; });
   msgSetTraiteBtn(entry ? entry.traite : false);
@@ -4022,8 +4199,8 @@ function renderDash() {
     s.setHours(0,0,0,0);
     return s.getTime() === today0.getTime();
   });
-  var sub = k.groups + ' classe' + (k.groups > 1 ? 's' : '') + ' en cours';
-  if (rentrees.length) sub += ' · la ' + rentrees.map(function(c){ return esc(c.name); }).join(', ') + ' fait sa rentrée ce matin';
+  var sub = k.groups + ' ' + TERM_CLASSE_LC + (k.groups > 1 ? 's' : '') + ' en cours';
+  if (rentrees.length) sub += ' · la ' + rentrees.map(function(c){ return esc(dispCohName(c.name)); }).join(', ') + ' fait sa rentrée ce matin';
   document.getElementById('dash-sub').textContent = sub;
 
   // ---- KPI Classes enrichi ----
@@ -4043,11 +4220,11 @@ function renderDash() {
   var kpis = [
     { cls:'k-orange', title:'Élèves actifs',
       num: k.students, pill: '',
-      sub: 'Répartis sur ' + k.groups + ' classe' + (k.groups > 1 ? 's' : '') +
+      sub: 'Répartis sur ' + k.groups + ' ' + TERM_CLASSE_LC + (k.groups > 1 ? 's' : '') +
            (DATA.classes.length ? ' (' + DATA.classes.map(function(c){ return classLetter(c.name)||c.name.slice(0,1); }).join(' · ') + ')' : '') },
-    { cls:'k-mint',   title:'Classes en cours',
+    { cls:'k-mint',   title: TERM_CLASSE + 's en cours',
       num: k.groups,  pill: classePill,
-      sub: classesDetail || 'Aucune classe démarrée' },
+      sub: classesDetail || 'Aucune ' + TERM_CLASSE_LC + ' démarrée' },
     { cls:'k-violet', title:'Présence classes virt.',
       num: k.presence + '%', pill: '7 derniers jours',
       sub: 'Élèves actifs sur Glowbl' },
@@ -4057,7 +4234,7 @@ function renderDash() {
     { cls: nbAlerts > 0 ? 'k-danger' : 'k-mint',
       title: 'Points d\'attention', num: nbAlerts,
       pill: nbAlerts > 0 ? 'urgent' : '',
-      sub:  nbAlerts > 0 ? 'Alertes Lia actives' : 'Aucune alerte — RAS ✓' }
+      sub:  nbAlerts > 0 ? 'Alertes Lia actives' : 'Aucune alerte, RAS ✓' }
   ];
   document.getElementById('kpi-grid').innerHTML = kpis.map(function(kpi) {
     return '<div class="kpi ' + kpi.cls + '">' +
@@ -4073,7 +4250,7 @@ function renderDash() {
     evEl.innerHTML = DATA.today_events.map(function(ev) {
       return '<div class="event"><span class="h">' + ev.heure + '</span>' +
         '<span>' + esc(ev.titre) +
-        (ev.cours  ? ' — <b>' + esc(ev.cours) + '</b>' : '') +
+        (ev.cours  ? ' · <b>' + esc(ev.cours) + '</b>' : '') +
         (ev.auteur ? ' <span class="chip c-vi">' + esc(ev.auteur) + '</span>' : '') +
         '</span></div>';
     }).join('');
@@ -4108,7 +4285,7 @@ function renderDash() {
         : '<span class="chip" style="background:var(--orange-t);color:var(--orange-d)">stage</span>';
       var dateStr = fmtDate(m.date);
       return '<div class="event"><span class="h" style="flex:0 0 56px">' + dateStr + '</span>' +
-        '<span>Classe ' + esc(m.classe) + ' — ' + esc(m.label) + ' ' + typeChip + '</span></div>';
+        '<span>' + TERM_CLASSE + ' ' + esc(m.classe) + ' · ' + esc(m.label) + ' ' + typeChip + '</span></div>';
     }).join('');
   } else {
     titleEl.style.display = 'none';
@@ -4266,7 +4443,7 @@ function editFormateur(uid) {
   _fmodMode = 'edit'; _fmodUid = uid;
   var f = DATA.formateurs.find(x => x.id === uid);
   if (!f) return;
-  document.getElementById('fmod-title').textContent = 'Modifier — ' + f.nom;
+  document.getElementById('fmod-title').textContent = 'Modifier ' + f.nom;
   document.getElementById('fmod-sub').textContent   = f.email;
   document.getElementById('fmod-new-fields').style.display  = 'none';
   document.getElementById('fmod-habs-section').style.display = '';
@@ -4361,7 +4538,7 @@ function saveFormateurModal() {
             showCredentialsModal(r.username, r.password, function(){ location.reload(); }, 'Intervenant créé');
           } else {
             // Compte deja existant reutilise : rien de nouveau a afficher.
-            toast('Intervenant ajouté — rechargement…', 2000);
+            toast('Intervenant ajouté, rechargement…', 2000);
             setTimeout(() => location.reload(), 1500);
           }
         } else { toast('Erreur : ' + (r.msg || '?')); }
@@ -4406,6 +4583,26 @@ function liaWType(rel) {
 
 var LIA_MONTHS_FR = ['janv.','févr.','mars','avr.','mai','juin','juil.','août','sept.','oct.','nov.','déc.'];
 var LIA_PLAN = null, LIA_VUE = 'pers', LIA_PEOPLE = [], LIA_COHORTS = [], LIA_START = null, LIA_TODAY_W = 1, LIA_PLAN_EV_WEEKS = {};
+// Filtre par type (legende Planning & Lia) — null = Tous. Clique a nouveau
+// sur le meme type pour revenir a Tous (voir la legende, id="plan-legend").
+var LIA_TYPE_FILTER = null;
+function setPlanTypeFilter(t) {
+  LIA_TYPE_FILTER = (LIA_TYPE_FILTER === t) ? null : t;
+  document.querySelectorAll('#plan-legend .pg-filter-btn').forEach(function(b){
+    b.classList.toggle('on', (b.dataset.type || null) === LIA_TYPE_FILTER);
+  });
+  liaRender();
+}
+// 'veh'/'salle'/'stage'/'exam' (valeurs de e.type, Vue intervenants) -> cle
+// de filtre partagee avec la legende ; tout le reste (dont undefined =
+// visio) tombe sur 'distance'.
+function liaEntryTypeKey(type) {
+  return type === 'veh' ? 'vehicule' : type === 'salle' ? 'salle' : type === 'stage' ? 'stage' : type === 'exam' ? 'examen' : 'distance';
+}
+// 'c'/'s'/'r'/'rs'/'e'/'e1' (liaWType, Vue cohortes) -> meme cle de filtre.
+function liaWTypeKey(t) {
+  return t === 's' ? 'stage' : t === 'r' ? 'vehicule' : t === 'rs' ? 'salle' : (t === 'e' || t === 'e1') ? 'examen' : 'distance';
+}
 
 function liaWeekTotal(plan, personId, w) {
   var es = plan && plan.grid && plan.grid[personId] ? plan.grid[personId][w] || [] : [];
@@ -4419,22 +4616,29 @@ function liaFmtDate(w) {
 }
 
 function liaHeadRows(totalW) {
-  var m = '<div class="pg-row pg-mrow"><div class="pg-lab"></div>';
-  var prevMo = -1, prevYr = -1;
-  for (var w = 1; w <= totalW; w++) {
-    var d = LIA_START ? new Date(LIA_START.getTime()+(w-1)*7*86400*1000) : null;
-    var mo = d ? d.getMonth() : -1, yr = d ? d.getFullYear() : -1;
-    var label = '';
-    if (d && mo !== prevMo) {
-      // L'année n'apparaît que quand elle change (janvier, ou tout premier
-      // mois affiché) — sinon "janv." pourrait désigner 2026 ou 2027 sans
-      // distinction sur un planning qui dépasse 12 mois.
-      label = LIA_MONTHS_FR[mo] + (yr !== prevYr ? ' ' + yr : '');
+  var m = '';
+  if (!IS_BETA_CAL) {
+    m += '<div class="pg-row pg-mrow"><div class="pg-lab"></div>';
+    var prevMo = -1, prevYr = -1;
+    for (var w = 1; w <= totalW; w++) {
+      var d = LIA_START ? new Date(LIA_START.getTime()+(w-1)*7*86400*1000) : null;
+      var mo = d ? d.getMonth() : -1, yr = d ? d.getFullYear() : -1;
+      var label = '';
+      if (d && mo !== prevMo) {
+        // L'année n'apparaît que quand elle change (janvier, ou tout premier
+        // mois affiché) — sinon "janv." pourrait désigner 2026 ou 2027 sans
+        // distinction sur un planning qui dépasse 12 mois.
+        label = LIA_MONTHS_FR[mo] + (yr !== prevYr ? ' ' + yr : '');
+      }
+      m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+label+'</div>';
+      prevMo = mo; prevYr = yr;
     }
-    m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+label+'</div>';
-    prevMo = mo; prevYr = yr;
+    m += '</div>';
   }
-  m += '</div><div class="pg-row pg-wrow"><div class="pg-lab"><span>Semaine</span></div>';
+  // Testeurs beta : une seule ligne d'en-tete (pas de ligne "mois"), le
+  // libelle de la colonne fixe reprend celui de la vue active.
+  var rowLabel = IS_BETA_CAL ? (LIA_VUE === 'coh' ? TERM_CLASSE : 'Formateur') : 'Semaine';
+  m += '<div class="pg-row pg-wrow"><div class="pg-lab"><span>'+rowLabel+'</span></div>';
   for (var w = 1; w <= totalW; w++) m += '<div class="pg-cell'+(w===LIA_TODAY_W?' pg-now':'')+'">'+w+'</div>';
   return m + '</div>';
 }
@@ -4445,40 +4649,52 @@ function liaRender() {
 
   if (LIA_VUE === 'coh') {
     LIA_COHORTS.forEach(function(cohort) {
-      html += '<div class="pg-row"><div class="pg-lab"><b>Classe '+esc(cohort.L)+'</b><span>rentrée '+liaFmtDate(cohort.off+1)+(cohort.nb_members?' · '+cohort.nb_members+' élèves':'')+'</span></div>';
+      html += '<div class="pg-row"><div class="pg-lab"><b>'+TERM_CLASSE+' '+esc(cohort.L)+'</b><span>rentrée '+liaFmtDate(cohort.off+1)+(cohort.nb_members?' · '+cohort.nb_members+' élèves':'')+'</span></div>';
       for (var w = 1; w <= p.totalW; w++) {
         var rel = w-cohort.off, nowC = w===LIA_TODAY_W?' pg-now':'';
         if (rel<1||rel>35) { html += '<div class="pg-cell'+nowC+'"></div>'; continue; }
         var t = liaWType(rel);
+        var dimC = (LIA_TYPE_FILTER && liaWTypeKey(t) !== LIA_TYPE_FILTER) ? ' pg-dim' : '';
         if      (t==='c')  {
           var hasDot = LIA_PLAN_EV_WEEKS[w] ? ' pg-has-ev' : '';
-          html += '<div class="pg-cell pg-c-d'+nowC+hasDot+'" title="S'+w+' · visio · cliquer pour planifier" onclick="openSeanceModal(\'' + cohort.L + '\','+w+','+cohort.off+')" style="cursor:pointer">' + (hasDot ? '●' : '') + '</div>';
+          html += '<div class="pg-cell pg-c-d'+nowC+dimC+hasDot+'" title="S'+w+' · visio · cliquer pour planifier" onclick="openSeanceModal(\'' + cohort.L + '\','+w+','+cohort.off+')" style="cursor:pointer">' + (hasDot ? '●' : '') + '</div>';
         }
-        else if (t==='s')  html += '<div class="pg-cell pg-c-s'+nowC+'" title="S'+w+' · stage · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">St</div>';
-        else if (t==='r')  html += '<div class="pg-cell pg-c-r'+nowC+'" title="S'+w+' · regroupement véhicule · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
-        else if (t==='rs') html += '<div class="pg-cell pg-c-rs'+nowC+'" title="S'+w+' · regroupement salle · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
-        else if (t==='e1') html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · examen CCP1 · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">C1</div>';
-        else               html += '<div class="pg-cell pg-c-e'+nowC+'" title="S'+w+' · session titre · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">Ex</div>';
+        else if (t==='s')  html += '<div class="pg-cell pg-c-s'+nowC+dimC+'" title="S'+w+' · stage · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">St</div>';
+        else if (t==='r')  html += '<div class="pg-cell pg-c-r'+nowC+dimC+'" title="S'+w+' · regroupement véhicule · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
+        else if (t==='rs') html += '<div class="pg-cell pg-c-rs'+nowC+dimC+'" title="S'+w+' · regroupement salle · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">R</div>';
+        else if (t==='e1') html += '<div class="pg-cell pg-c-e'+nowC+dimC+'" title="S'+w+' · examen CCP1 · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">C1</div>';
+        else               html += '<div class="pg-cell pg-c-e'+nowC+dimC+'" title="S'+w+' · session titre · cliquer pour affecter" onclick="openLiaAffectModal(null,'+w+',\''+cohort.L+'\')" style="cursor:pointer">Ex</div>';
       }
       html += '</div>';
     });
   } else {
     LIA_PEOPLE.forEach(function(per) {
-      html += '<div class="pg-row"><div class="pg-lab"><b class="pg-clickable" onclick="openLiaHoursDetail('+per.id+')">'+esc(per.nom)+'</b><span>'+esc(per.role)+'</span></div>';
+      var curH = Math.round(liaWeekTotal(p, per.id, LIA_TODAY_W));
+      var hoursLine = IS_BETA_CAL
+        ? '<span>'+esc(per.role)+'</span><span style="font-weight:700;color:'+(curH>per.cap?'var(--red)':'var(--muted)')+'">'+curH+'h / '+per.cap+'h</span>'
+        : '<span>'+esc(per.role)+'</span>';
+      html += '<div class="pg-row"><div class="pg-lab"><b class="pg-clickable" onclick="openLiaHoursDetail('+per.id+')">'+esc(per.nom)+'</b>'+hoursLine+'</div>';
       for (var w = 1; w <= p.totalW; w++) {
         var es = p.grid[per.id]?p.grid[per.id][w]||[]:[], t = liaWeekTotal(p,per.id,w), nowC = w===LIA_TODAY_W?' pg-now':'';
-        var lc = t > per.cap+0.5 ? ' pg-hot' : t > 24 ? ' pg-p3' : t > 14 ? ' pg-p2' : t > 0 ? ' pg-p1' : '';
+        var overload = t > per.cap+0.5;
+        // Testeurs beta : fond de case allege (le detail de charge reste
+        // dans l'infobulle), la surcharge se voit sur le soulignement des
+        // pastilles plutot que sur toute la case (voir .pg-overload).
+        var lc = IS_BETA_CAL ? '' : (overload ? ' pg-hot' : t > 24 ? ' pg-p3' : t > 14 ? ' pg-p2' : t > 0 ? ' pg-p1' : '');
         var click = ' onclick="openLiaAffectModal('+per.id+','+w+',null)" style="cursor:pointer"';
-        if (!es.length) { html += '<div class="pg-cell'+lc+nowC+'" title="S'+w+' · '+esc(per.nom)+' — cliquer pour affecter"'+click+'></div>'; continue; }
+        if (!es.length) { html += '<div class="pg-cell'+lc+nowC+'" title="S'+w+' · '+esc(per.nom)+' · cliquer pour affecter"'+click+'></div>'; continue; }
         var byCoh = {};
         es.forEach(function(e){ (byCoh[e.coh]=byCoh[e.coh]||[]).push(e); });
-        var chips = '', tip = 'S'+w+' · '+per.nom+' — '+Math.round(t)+' h&#10;';
+        var chips = '', tip = 'S'+w+' · '+per.nom+' · '+Math.round(t)+' h&#10;';
         Object.keys(byCoh).sort().forEach(function(c) {
           var arr = byCoh[c];
-          var main = arr.some(function(e){return e.type==='veh';}) ? 'pg-ch-veh' : arr.some(function(e){return e.type==='salle';}) ? 'pg-ch-s' : arr.some(function(e){return e.type==='stage';}) ? 'pg-ch-stage' : arr.some(function(e){return e.type==='exam';}) ? 'pg-ch-exam' : 'pg-ch-v';
+          var mtype = arr.some(function(e){return e.type==='veh';}) ? 'veh' : arr.some(function(e){return e.type==='salle';}) ? 'salle' : arr.some(function(e){return e.type==='stage';}) ? 'stage' : arr.some(function(e){return e.type==='exam';}) ? 'exam' : null;
+          var main = mtype==='veh' ? 'pg-ch-veh' : mtype==='salle' ? 'pg-ch-s' : mtype==='stage' ? 'pg-ch-stage' : mtype==='exam' ? 'pg-ch-exam' : 'pg-ch-v';
           var star = arr.some(function(e){return e.lia;});
           var manual = arr.some(function(e){return e.manual;});
-          chips += '<span class="pg-pcell '+main+'">'+c+'</span>'+(star?'<span class="pg-star">✦</span>':'')+(manual?'<span class="pg-manual">✎</span>':'');
+          var overCls = (IS_BETA_CAL && overload) ? ' pg-overload' : '';
+          var dimCls = (LIA_TYPE_FILTER && liaEntryTypeKey(mtype) !== LIA_TYPE_FILTER) ? ' pg-dim' : '';
+          chips += '<span class="pg-pcell '+main+overCls+dimCls+'">'+c+'</span>'+(star?'<span class="pg-star'+dimCls+'">✦</span>':'')+(manual?'<span class="pg-manual'+dimCls+'">✎</span>':'');
           arr.forEach(function(e){ tip += (e.lia?'✦ ':'')+(e.manual?'✎ ':'')+c+' · '+(e.type==='veh'?'véhicule':e.type==='salle'?'salle':e.type==='stage'?'stage':e.type==='exam'?'examen':'visio')+' « '+e.label+' » · '+Math.round(e.h*2)/2+' h&#10;'; });
         });
         tip += 'cliquer pour affecter';
@@ -4505,7 +4721,7 @@ function liaRender() {
   document.getElementById('plan-pkpis').innerHTML =
     '<div class="kpi k-mint" style="min-height:80px"><div class="kpi-head"><span class="kpi-title">Heures lissées par Lia</span></div><div class="kpi-main"><div class="kpi-num">'+p.movedH+'<small>h</small></div></div><div class="kpi-sub">sur '+p.weeks+' semaine(s)</div></div>'+
     '<div class="kpi k-cream" style="min-height:80px"><div class="kpi-head"><span class="kpi-title">Semaines d\'arrêt équipe</span></div><div class="kpi-main"><div class="kpi-num">'+p.idle.length+'</div></div><div class="kpi-sub">tous en stage simultanément</div></div>'+
-    '<div class="kpi k-violet" style="min-height:80px"><div class="kpi-head"><span class="kpi-title">Classes planifiées</span></div><div class="kpi-main"><div class="kpi-num">'+p.cohorts.length+'</div></div><div class="kpi-sub">'+p.cohorts.map(function(c){ return 'Classe '+c.L; }).join(' · ')+'</div></div>';
+    '<div class="kpi k-violet" style="min-height:80px"><div class="kpi-head"><span class="kpi-title">'+TERM_CLASSE+'s planifiées</span></div><div class="kpi-main"><div class="kpi-num">'+p.cohorts.length+'</div></div><div class="kpi-sub">'+p.cohorts.map(function(c){ return TERM_CLASSE+' '+c.L; }).join(' · ')+'</div></div>';
 }
 
 function setVuePlan(v) {
@@ -4530,19 +4746,19 @@ function simulerClasse() {
     var isoDate = propDate.getFullYear() + '-' + String(propDate.getMonth() + 1).padStart(2, '0') + '-' + String(propDate.getDate()).padStart(2, '0');
     btn.disabled = true; btn.textContent = 'Création…';
     apiPost({action: 'create_class', name: 'Classe ' + nextL, startdate: isoDate}).then(function(r) {
-      if (!r.ok) { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur : ' + (r.msg || '?')); return; }
+      if (!r.ok) { btn.disabled = false; btn.textContent = 'Créer la ' + TERM_CLASSE_LC; toast('Erreur : ' + (r.msg || '?')); return; }
       DATA.classes.push({ id: r.id, name: r.name, startdate: isoDate, secteur: '', nb_members: 0, avg_prog: 0, member_ids: [] });
       renderCoh();
       return apiPost({action: 'preview_lia_plan'}).then(function(d) {
-        btn.disabled = false; btn.textContent = 'Créer la classe';
-        if (!d.ok) { toast('Classe créée, mais actualisation du planning en échec — rechargez la page.'); return; }
+        btn.disabled = false; btn.textContent = 'Créer la ' + TERM_CLASSE_LC;
+        if (!d.ok) { toast('Classe créée, mais actualisation du planning en échec, rechargez la page.'); return; }
         LIA_COHORTS = d.cohorts;
         LIA_PLAN    = d.plan;
         liaRender();
         document.getElementById('plan-prop').classList.remove('on');
-        toast('Classe ' + nextL + ' créée — rentrée le ' + fmtDateFull(propDate));
+        toast('Classe ' + nextL + ' créée, rentrée le ' + fmtDateFull(propDate));
       });
-    }).catch(function() { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur réseau.'); });
+    }).catch(function() { btn.disabled = false; btn.textContent = 'Créer la ' + TERM_CLASSE_LC; toast('Erreur réseau.'); });
   };
   document.getElementById('plan-prop').classList.add('on');
 }
@@ -4740,8 +4956,8 @@ function renderClassCards() {
       : '';
 
     return '<div class="class-card' + (activeFilter === String(c.id) ? ' active' : '') + '" id="cc-' + c.id + '" onclick="filterByClass(' + c.id + ')">' +
-      '<button type="button" class="cc-delete" title="Supprimer la classe" onclick="event.stopPropagation();deleteClass(' + c.id + ',\'' + esc(c.name).replace(/'/g,"\\'") + '\',' + c.nb_members + ')">&#10005;</button>' +
-      '<div class="cc-name">' + esc(c.name) + '</div>' +
+      '<button type="button" class="cc-delete" title="Supprimer la ' + TERM_CLASSE_LC + '" onclick="event.stopPropagation();deleteClass(' + c.id + ',\'' + esc(c.name).replace(/'/g,"\\'") + '\',' + c.nb_members + ')">&#10005;</button>' +
+      '<div class="cc-name">' + esc(dispCohName(c.name)) + '</div>' +
       (weekLabel ? '<div class="cc-week">' + weekLabel + '</div>' : '') +
       '<div class="cc-meta">' + metaHtml + '</div>' +
       '<div class="cc-secteur" onclick="event.stopPropagation();editClassSecteur(' + c.id + ')">📍 ' +
@@ -4763,7 +4979,7 @@ function renderClassCards() {
 function editClassSecteur(cohortId) {
   var c = DATA.classes.find(function(x) { return x.id === cohortId; });
   if (!c) return;
-  var val = prompt('Secteur de la classe « ' + c.name + ' » (ex : Nord, Sud, Centre-ville…) — Lia priorise un formateur du même secteur pour les séances véhicule/salle :', c.secteur || c.secteur_suggested || '');
+  var val = prompt('Secteur de la ' + TERM_CLASSE_LC + ' « ' + dispCohName(c.name) + ' » (ex : Nord, Sud, Centre-ville…), Lia priorise un formateur du même secteur pour les séances véhicule/salle :', c.secteur || c.secteur_suggested || '');
   if (val === null) return;
   saveClassSecteur(cohortId, val.trim());
 }
@@ -4787,9 +5003,10 @@ function saveClassSecteur(cohortId, val) {
 }
 
 function deleteClass(cohortId, name, nbMembers) {
+  name = dispCohName(name);
   var msg = nbMembers > 0
-    ? '⚠ Supprimer la classe « ' + name + '  » (' + nbMembers + ' élève' + (nbMembers > 1 ? 's' : '') + ') ? Les élèves ne seront pas supprimés, seulement retirés de cette classe.'
-    : 'Supprimer la classe « ' + name + ' » ?';
+    ? '⚠ Supprimer la ' + TERM_CLASSE_LC + ' « ' + name + '  » (' + nbMembers + ' élève' + (nbMembers > 1 ? 's' : '') + ') ? Les élèves ne seront pas supprimés, seulement retirés de cette ' + TERM_CLASSE_LC + '.'
+    : 'Supprimer la ' + TERM_CLASSE_LC + ' « ' + name + ' » ?';
   if (!confirm(msg)) return;
   apiPost({ action: 'delete_class', cohortid: cohortId }).then(function(d) {
     if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
@@ -4800,14 +5017,14 @@ function deleteClass(cohortId, name, nbMembers) {
     renderFilterBtns();
     renderStudentsTable();
     updateClassCards();
-    toast('Classe supprimée.');
+    toast(TERM_CLASSE + ' supprimée.');
   }).catch(function() { toast('Erreur réseau.'); });
 }
 
 function renderFilterBtns() {
   var container = document.getElementById('class-filter-btns');
   container.innerHTML = DATA.classes.map(c =>
-    '<button class="filter-btn" data-filter="' + c.id + '" onclick="filterStudents(this)">' + esc(c.name) + '</button>'
+    '<button class="filter-btn" data-filter="' + c.id + '" onclick="filterStudents(this)">' + esc(dispCohName(c.name)) + '</button>'
   ).join('');
 }
 
@@ -4821,7 +5038,7 @@ function filterByClass(cohortId) {
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('on', b.dataset.filter === activeFilter));
   renderClassCards();
   var coh = DATA.classes.find(c => c.id === cohortId);
-  document.getElementById('students-title').textContent = coh ? 'Élèves — ' + coh.name : 'Tous les élèves';
+  document.getElementById('students-title').textContent = coh ? 'Élèves : ' + dispCohName(coh.name) : 'Tous les élèves';
   renderStudentsTable();
   document.getElementById('students-tbody').closest('.twrap').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
@@ -4831,7 +5048,7 @@ function filterStudents(btn) {
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('on'));
   btn.classList.add('on');
   document.getElementById('students-title').textContent = activeFilter === 'all' ? 'Tous les élèves'
-    : 'Élèves — ' + (DATA.classes.find(c => String(c.id) === activeFilter)?.name || '');
+    : 'Élèves : ' + (DATA.classes.find(c => String(c.id) === activeFilter)?.name || '');
   renderClassCards();
   renderStudentsTable();
 }
@@ -4845,7 +5062,7 @@ function renderStudentsTable() {
   var tbody = document.getElementById('students-tbody');
   if (!filtered.length) {
     tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">' +
-      (DATA.students.length ? 'Aucun élève dans cette classe.' : 'Aucun élève trouvé.') + '</td></tr>';
+      (DATA.students.length ? 'Aucun élève dans cette ' + TERM_CLASSE_LC + '.' : 'Aucun élève trouvé.') + '</td></tr>';
     return;
   }
   tbody.innerHTML = filtered.map(s => {
@@ -4860,7 +5077,7 @@ function renderStudentsTable() {
     // Classe (affectation)
     var classSelectHtml = '<select data-uid="' + s.id + '" data-current="' + (s.cohort_id || 0) + '" onchange="assignToClass(this)" style="font-size:12px;padding:4px 6px">' +
       '<option value="">—</option>' +
-      DATA.classes.map(function(c) { return '<option value="' + c.id + '"' + (s.cohort_id === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') +
+      DATA.classes.map(function(c) { return '<option value="' + c.id + '"' + (s.cohort_id === c.id ? ' selected' : '') + '>' + esc(dispCohName(c.name)) + '</option>'; }).join('') +
       '</select>';
 
     // Règlement
@@ -4929,7 +5146,7 @@ function openSeanceModal(letter, week, off) {
   var friDate = new Date(mondayDate.getTime() + 4 * 86400 * 1000);
   var friStr  = friDate.getDate() + ' ' + LIA_MONTHS_FR[friDate.getMonth()];
 
-  document.getElementById('ms-title').textContent = 'Planifier une séance — Classe ' + letter + ' · S' + week;
+  document.getElementById('ms-title').textContent = 'Planifier une séance : ' + TERM_CLASSE + ' ' + letter + ' · S' + week;
   document.getElementById('ms-sub').textContent   = 'Semaine du ' + monStr + ' au ' + friStr;
 
   // Populate course selector
@@ -4949,7 +5166,7 @@ function openSeanceModal(letter, week, off) {
 
   // Default name
   var rel = week - off;
-  document.getElementById('ms-name').value = 'Séance ECSR · Classe ' + letter + ' · S' + week + (rel > 0 ? ' (rel. ' + rel + ')' : '');
+  document.getElementById('ms-name').value = 'Séance ECSR · ' + TERM_CLASSE + ' ' + letter + ' · S' + week + (rel > 0 ? ' (rel. ' + rel + ')' : '');
 
   document.getElementById('modal-seance-bg').classList.add('on');
 }
@@ -4994,7 +5211,7 @@ function saveSeance() {
         LIA_PLAN_EV_WEEKS[_seanceWeek] = (LIA_PLAN_EV_WEEKS[_seanceWeek] || 0) + 1;
         closeSeanceModal();
         liaRender();
-        toast('Séance planifiée — visible dans espace formateur et élève');
+        toast('Séance planifiée, visible dans espace formateur et élève');
       } else {
         alert('Erreur : ' + (d.msg || 'inconnue'));
       }
@@ -5040,14 +5257,14 @@ function openLiaAffectModal(pid, w, coh) {
     if (es.length) defaultCoh = es[0].coh;
   }
 
-  document.getElementById('lia-pid').innerHTML = '<option value="">— Choisir —</option>' +
+  document.getElementById('lia-pid').innerHTML = '<option value="">Choisir</option>' +
     LIA_PEOPLE.map(function(p) { return '<option value="'+p.id+'"'+(pid===p.id?' selected':'')+'>'+esc(p.nom)+'</option>'; }).join('');
-  document.getElementById('lia-coh').innerHTML = '<option value="">— Choisir —</option>' +
-    LIA_COHORTS.map(function(c) { return '<option value="'+c.L+'"'+(defaultCoh===c.L?' selected':'')+'>Classe '+esc(c.L)+'</option>'; }).join('');
+  document.getElementById('lia-coh').innerHTML = '<option value="">Choisir</option>' +
+    LIA_COHORTS.map(function(c) { return '<option value="'+c.L+'"'+(defaultCoh===c.L?' selected':'')+'>'+TERM_CLASSE+' '+esc(c.L)+'</option>'; }).join('');
   document.getElementById('lia-course').innerHTML = '<option value="">—</option>' +
     (DATA.courses_list || []).map(function(c) { return '<option value="'+c.id+'">'+esc(c.shortname)+' – '+esc(c.fullname)+'</option>'; }).join('');
 
-  document.getElementById('lia-title').textContent = 'Affectation manuelle — S' + w;
+  document.getElementById('lia-title').textContent = 'Affectation manuelle : S' + w;
   document.getElementById('lia-sub').textContent = 'Semaine du ' + liaFmtDate(w);
   liaAffectOnClassChange();
   document.getElementById('modal-lia-bg').classList.add('on');
@@ -5073,7 +5290,7 @@ function saveLiaAffect() {
   var courseid = parseInt(document.getElementById('lia-course').value) || 0;
   var w        = _liaAffectW;
 
-  if (!pid || !coh || !label || !(h > 0)) { alert('Remplir le formateur, la classe, le module et un nombre d\'heures.'); return; }
+  if (!pid || !coh || !label || !(h > 0)) { alert('Remplir le formateur, la ' + TERM_CLASSE_LC + ', le module et un nombre d\'heures.'); return; }
 
   var btn = document.querySelector('#modal-lia .btn.primary');
   btn.disabled = true; btn.textContent = 'Enregistrement...';
@@ -5125,10 +5342,10 @@ function openLiaHoursDetail(pid) {
   });
   var cohLetters = Object.keys(totals).sort();
   var rows = cohLetters.map(function(c) {
-    return '<div style="display:flex;justify-content:space-between"><span>Classe '+esc(c)+'</span><b>'+Math.round(totals[c])+' h</b></div>';
+    return '<div style="display:flex;justify-content:space-between"><span>'+TERM_CLASSE+' '+esc(c)+'</span><b>'+Math.round(totals[c])+' h</b></div>';
   }).join('');
   var total = cohLetters.reduce(function(s, c) { return s + totals[c]; }, 0);
-  document.getElementById('lia-hours-title').textContent = 'Heures — ' + per.nom;
+  document.getElementById('lia-hours-title').textContent = 'Heures : ' + per.nom;
   document.getElementById('lia-hours-body').innerHTML =
     (rows || '<div style="color:var(--muted)">Aucune heure affectée.</div>') +
     '<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px;display:flex;justify-content:space-between"><span>Total</span><b>'+Math.round(total)+' h</b></div>' +
@@ -5168,7 +5385,7 @@ function assignToClass(sel) {
             coh && coh.member_ids.push(uid);
           }
           sel.dataset.current = newCohId;
-          toast('Élève affecté à la classe');
+          toast('Élève affecté à la ' + TERM_CLASSE_LC);
           renderStudentsTable();
           updateClassCards();
         } else { toast('Erreur : ' + (r.msg || '?')); }
@@ -5208,7 +5425,7 @@ function saveClass() {
   btn.disabled = true; btn.textContent = 'Création…';
   apiPost({ action: 'create_class', name: name, startdate: date })
     .then(r => {
-      btn.disabled = false; btn.textContent = 'Créer la classe';
+      btn.disabled = false; btn.textContent = 'Créer la ' + TERM_CLASSE_LC;
       if (r.ok) {
         DATA.classes.push({ id: r.id, name: r.name, startdate: date, secteur: '', nb_members: 0, avg_prog: 0, member_ids: [] });
         closeModal();
@@ -5216,45 +5433,7 @@ function saveClass() {
         toast('Classe « ' + r.name + ' » créée');
       } else { toast('Erreur : ' + (r.msg || '?')); }
     })
-    .catch(() => { btn.disabled = false; btn.textContent = 'Créer la classe'; toast('Erreur réseau'); });
-}
-
-/* ===== MODULES ===== */
-function renderCoursAdmin() {
-  var tbody = document.getElementById('cours-admin-tbody');
-  var list = DATA.courses_full || [];
-  if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:20px">Aucun module.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = list.map(function(c) {
-    return '<tr>' +
-      '<td class="mm-name">' + esc(c.fullname) + '</td>' +
-      '<td class="mm-short">' + esc(c.shortname) + '</td>' +
-      '<td class="mm-cat">' + esc(c.category_name) + '</td>' +
-      '<td>' + (c.visible ? '<span class="chip c-ok">Visible</span>' : '<span class="chip c-ko">Masqué</span>') + '</td>' +
-      '<td style="display:flex;gap:6px">' +
-        '<button class="btn mini ghost" onclick="openCourseIframe(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Voir</button>' +
-        '<button class="btn mini ghost" style="color:var(--red,#C0392B);border-color:var(--red,#C0392B)" onclick="deleteModule(' + c.id + ',\'' + esc(c.fullname).replace(/'/g,"\\'") + '\')">Supprimer</button>' +
-      '</td>' +
-    '</tr>';
-  }).join('');
-}
-
-function deleteModule(courseId, fullname) {
-  var msg = '⚠ Supprimer définitivement le module « ' + fullname + ' » ? Cette action est irréversible : ' +
-    'tout le contenu (sections, activités, quiz, attestation), les inscriptions des formateurs et élèves, ' +
-    'ainsi que leurs notes et leur progression sur ce module seront perdus.';
-  if (!confirm(msg)) return;
-  apiPost({ action: 'delete_course', courseid: courseId })
-    .then(function(r) {
-      if (r.ok) {
-        DATA.courses_full = DATA.courses_full.filter(function(c) { return c.id !== courseId; });
-        renderCoursAdmin();
-        toast('Module supprimé');
-      } else { toast('Erreur : ' + (r.msg || '?')); }
-    })
-    .catch(function() { toast('Erreur réseau'); });
+    .catch(() => { btn.disabled = false; btn.textContent = 'Créer la ' + TERM_CLASSE_LC; toast('Erreur réseau'); });
 }
 
 /* ===== VIEWER DE COURS INTÉGRÉ (TOC + iframe) — même composant que
@@ -5279,8 +5458,16 @@ var _ceIframeCSS = [
   '#adminblock-region { display:none !important; }',
   // Zone de bloc "Bottom" du theme mb2nl (theme/mb2nl/layout/parts/region_bottom.php) :
   // s'affiche meme vide, en style sombre (classe "dark1") — bandeau noir
-  // sans contenu ni utilite ici.
-  '#bottom { display:none !important; }',
+  // sans contenu ni utilite ici. "#bottom-abcd" est un 2e bandeau distinct
+  // (4 colonnes de blocs, meme style sombre "dark1") juste en dessous —
+  // meme bug, oublie lors du 1er fix : lui aussi reste display:block et
+  // visible meme quand ses 4 sous-regions sont vides.
+  '#bottom,#bottom-abcd { display:none !important; }',
+  // Bouton rond fixe "Ouvrir le panneau lateral" du theme mb2nl (.tgsdb_btn,
+  // TOC native du cours) : flotte en position fixe par-dessus le contenu
+  // (ex. sur une activite Video) — sans utilite ici puisque la plateforme a
+  // deja sa propre TOC (colonne "Contenu du cours").
+  '.tgsdb_btn { display:none !important; }',
   // Tiroir de messagerie natif Moodle (data-region="right-hand-drawer") :
   // reste visible malgre sa classe "hidden" (conflit de priorite avec le
   // theme) — sans interet ici puisque la plateforme a sa propre messagerie.
@@ -5915,46 +6102,6 @@ function closeCourseIframe() {
   if (_ceRefreshTimer) { clearInterval(_ceRefreshTimer); _ceRefreshTimer = null; }
 }
 
-function openCourseModal() {
-  var sel = document.getElementById('course-category');
-  sel.innerHTML = (DATA.course_categories || []).map(function(cat) {
-    return '<option value="' + cat.id + '">' + '—'.repeat(Math.max(0, cat.depth - 1)) + ' ' + esc(cat.name) + '</option>';
-  }).join('');
-  document.getElementById('modal-course-bg').classList.add('open');
-  document.getElementById('course-fullname').focus();
-}
-function closeCourseModal() {
-  document.getElementById('modal-course-bg').classList.remove('open');
-  document.getElementById('course-fullname').value = '';
-  document.getElementById('course-shortname').value = '';
-  document.getElementById('course-summary').value = '';
-}
-function saveCourse() {
-  var fullname   = document.getElementById('course-fullname').value.trim();
-  var shortname  = document.getElementById('course-shortname').value.trim();
-  var categoryid = document.getElementById('course-category').value;
-  var summary    = document.getElementById('course-summary').value.trim();
-  if (!fullname) { document.getElementById('course-fullname').focus(); return; }
-  if (!shortname) { document.getElementById('course-shortname').focus(); return; }
-  var btn = document.getElementById('course-save-btn');
-  btn.disabled = true; btn.textContent = 'Création…';
-  apiPost({ action: 'create_course', fullname: fullname, shortname: shortname, categoryid: categoryid, summary: summary })
-    .then(function(r) {
-      btn.disabled = false; btn.textContent = 'Créer le cours';
-      if (r.ok) {
-        var cat = (DATA.course_categories || []).find(function(c){ return String(c.id) === String(categoryid); });
-        DATA.courses_full.push({
-          id: r.id, fullname: r.fullname, shortname: r.shortname,
-          category: parseInt(categoryid, 10), category_name: cat ? cat.name : '—', visible: 1,
-        });
-        closeCourseModal();
-        renderCoursAdmin();
-        toast('Module « ' + r.fullname + ' » créé');
-      } else { toast('Erreur : ' + (r.msg || '?')); }
-    })
-    .catch(function() { btn.disabled = false; btn.textContent = 'Créer le cours'; toast('Erreur réseau'); });
-}
-
 /* ===== SEED TEST DATA ===== */
 function seedTestData() {
   var btn = document.getElementById('seed-btn');
@@ -5963,7 +6110,7 @@ function seedTestData() {
     .then(r => {
       btn.disabled = false; btn.textContent = 'Créer les données de test';
       if (r.ok) {
-        toast(r.msg + ' — rechargement…', 3000);
+        toast(r.msg + ', rechargement…', 3000);
         setTimeout(() => location.reload(), 3000);
       } else { toast('Erreur : ' + (r.msg || '?')); }
     })
@@ -5979,7 +6126,7 @@ function docsInitStudentList() {
   list.innerHTML = DATA.students.map(function(s) {
     return '<div class="docs-si" data-uid="' + s.id + '" onclick="docsSelectStudent(' + s.id + ',this)">' +
       '<div class="docs-si-name">' + esc(s.nom) + '</div>' +
-      '<div class="docs-si-sub">' + esc(s.cohort_name || 'Sans classe') + '</div>' +
+      '<div class="docs-si-sub">' + (s.cohort_name ? esc(dispCohName(s.cohort_name)) : 'Sans ' + TERM_CLASSE_LC) + '</div>' +
     '</div>';
   }).join('');
 }
@@ -6149,7 +6296,7 @@ function activateStudentAccess(userid, btn) {
   apiPost({ action: 'activate_student_access', userid: userid })
     .then(function(d) {
       if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); btn.disabled = false; btn.textContent = 'Activer l\'accès'; return; }
-      toast('Accès activé — l\'élève peut se connecter.');
+      toast('Accès activé, l\'élève peut se connecter.');
       renderPendingActivations();
       renderLeads();
     })
@@ -6297,7 +6444,7 @@ function docsOpenForm(doc) {
   document.getElementById('df-file').value    = '';
   document.getElementById('df-file-current').textContent =
     (doc && doc.action_url && doc.action_url.indexOf('l3m_doc_file.php') !== -1)
-      ? 'Fichier déjà uploadé — choisissez un nouveau fichier pour le remplacer.' : '';
+      ? 'Fichier déjà uploadé, choisissez un nouveau fichier pour le remplacer.' : '';
   document.getElementById('df-blocking').checked = doc ? !!parseInt(doc.is_blocking) : false;
   document.getElementById('df-bmsg').value    = doc ? doc.blocking_msg : '';
   docsToggleUrl();
@@ -6397,6 +6544,7 @@ document.addEventListener('DOMContentLoaded', function() {
 /* ===== Testeurs bêta ===== */
 function renderBetaTesters() {
   var box = document.getElementById('beta-testers-list');
+  if (!box) return; // bloc retire de l'espace admin, voir HTML
   var list = DATA.beta_testers || [];
   if (!list.length) {
     box.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">Aucun testeur pour l\'instant.</p>';
@@ -6484,7 +6632,7 @@ function removeBetaTester(uid) {
     <p class="sub" id="lia-sub"></p>
     <label>Formateur</label>
     <select id="lia-pid" onchange="liaAffectOnClassChange()"></select>
-    <label>Classe</label>
+    <label><?= l3m_term_classe($USER->id) ?></label>
     <select id="lia-coh" onchange="liaAffectOnClassChange()"></select>
     <div style="display:flex;gap:12px">
       <div style="flex:1">
@@ -6516,7 +6664,7 @@ function removeBetaTester(uid) {
 
 <div id="modal-lia-hours-bg" onclick="if(event.target===this)closeLiaHoursDetail()">
   <div id="modal-lia-hours" style="width:340px">
-    <h3 id="lia-hours-title">Heures par classe</h3>
+    <h3 id="lia-hours-title">Heures par <?= l3m_term_classe_lc($USER->id) ?></h3>
     <div id="lia-hours-body" style="font-size:13.5px;line-height:2"></div>
     <div class="lia-foot">
       <button class="btn primary" onclick="closeLiaHoursDetail()">Fermer</button>

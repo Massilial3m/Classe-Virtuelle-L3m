@@ -471,7 +471,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
                     'kind'=> 'veh_conflict',
                     'pid' => null,
                     'w'   => $w,
-                    'txt' => 'S' . $w . ' : classes ' . implode(' et ', $vehCohs) . ' en semaine véhicule simultanée — moniteurs insuffisants. Lia recommande de décaler une rentrée.',
+                    'txt' => 'S' . $w . ' : ' . l3m_term_classe_lc() . 's ' . implode(' et ', $vehCohs) . ' en semaine véhicule simultanée — moniteurs insuffisants. Lia recommande de décaler une rentrée.',
                 ];
             }
         }
@@ -501,7 +501,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
                         $alerts[] = [
                             'kind'=> 'fixed_unavailable',
                             'pid' => $pid, 'w' => $w,
-                            'txt' => 'S' . $w . ' : ' . $p['nom'] . ' indisponible — « ' . $e->label . ' » (classe ' . $e->coh . ') est une séance fixe, réaffectation manuelle nécessaire.',
+                            'txt' => 'S' . $w . ' : ' . $p['nom'] . ' indisponible — « ' . $e->label . ' » (' . l3m_term_classe_lc() . ' ' . $e->coh . ') est une séance fixe, réaffectation manuelle nécessaire.',
                         ];
                     }
                 }
@@ -536,7 +536,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
                     $grid[$bk][$w][] = $ne;
                     $log[] = [
                         'pid' => $pid, 'w' => $w,
-                        'txt' => $p['nom'] . ' était à ' . $before . ' h : Lia délègue ' . (int)round($m) . ' h « ' . $e->label . ' » (classe ' . $e->coh . ') à ' . ($bkPers ? $bkPers['nom'] : '?') . '.',
+                        'txt' => $p['nom'] . ' était à ' . $before . ' h : Lia délègue ' . (int)round($m) . ' h « ' . $e->label . ' » (' . l3m_term_classe_lc() . ' ' . $e->coh . ') à ' . ($bkPers ? $bkPers['nom'] : '?') . '.',
                     ];
                     $movedH += $m; $touchedW[$w] = 1;
                     $excess = $tot($pid, $w) - $effCap;
@@ -568,7 +568,7 @@ function lia_compute_plan(array $cohorts, array $people, array $prof2p, array $b
                     $grid[$pid][$w2][] = $ne;
                     $log[] = [
                         'pid' => $pid, 'w' => $w,
-                        'txt' => $p['nom'] . ' était à ' . $before . ' h : Lia ' . ($d < 0 ? 'anticipe' : 'décale') . ' ' . (int)round($m) . ' h « ' . $e->label . ' » (classe ' . $e->coh . ') vers S' . $w2 . '.',
+                        'txt' => $p['nom'] . ' était à ' . $before . ' h : Lia ' . ($d < 0 ? 'anticipe' : 'décale') . ' ' . (int)round($m) . ' h « ' . $e->label . ' » (' . l3m_term_classe_lc() . ' ' . $e->coh . ') vers S' . $w2 . '.',
                     ];
                     $movedH += $m; $touchedW[$w] = 1;
                     $excess = $tot($pid, $w) - $effCap;

@@ -1,0 +1,54 @@
+{
+    "2": {
+        "titre": "Séquence 2 — Accidentalité et profil de l'accident",
+        "etapes": {
+            "1": {
+                "titre": "Étape 1 : Culture sécurité routière et profil type de l'accident",
+                "unites": [
+                    "1.1.1"
+                ],
+                "contentfile": "sequence_content_seq2_etape1.json",
+                "documentfile": "seq_documents/seq2_etape1_support.pdf",
+                "statut": "publiee"
+            }
+        }
+    },
+    "3": {
+        "titre": "Sequence_test",
+        "etapes": {
+            "1": {
+                "titre": "Étape2",
+                "unites": [
+                    "1.1.2"
+                ],
+                "contentfile": "sequence_content_seq3_etape1.json",
+                "documentfile": "seq_documents/seq3_etape1_support.pdf",
+                "statut": "brouillon"
+            }
+        }
+    },
+    "4": {
+        "titre": "Séquence 3- Test",
+        "etapes": {
+            "1": {
+                "titre": "1.8.1 __ Test",
+                "unites": [],
+                "contentfile": "sequence_content_seq4_etape1.json",
+                "documentfile": "seq_documents/seq4_etape1_support.pdf",
+                "statut": "publiee"
+            }
+        }
+    },
+    "5": {
+        "titre": "Séquence 4 - Culture sécurité routière et profil de l'accident mortel",
+        "etapes": {
+            "1": {
+                "titre": "4.1 Ouverture",
+                "unites": [],
+                "contentfile": "sequence_content_seq5_etape1.json",
+                "documentfile": "seq_documents/seq5_etape1_support.pdf",
+                "statut": "brouillon"
+            }
+        }
+    }
+}

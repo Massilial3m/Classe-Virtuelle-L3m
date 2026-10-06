@@ -120,7 +120,18 @@ body.pagelayout-login .loginform {
   position:absolute !important; left:50% !important; top:50% !important;
   transform:translate(-50%,-50%) !important;
   display:flex !important; flex-flow:row wrap !important; justify-content:center !important;
-  align-items:flex-start !important; width:auto !important; max-width:100% !important; margin:0 !important;
+  align-items:flex-start !important;
+  /* width:100% (pas auto) : pour une boite en position:absolute dont seul
+     "left" est fixe (pas "right"), le calcul shrink-to-fit d'une largeur
+     "auto" se base sur l'espace disponible ENTRE ce "left" et le bord droit
+     du bloc conteneur — soit seulement la moitie de sa largeur (left:50%),
+     pas sa largeur totale. Sur mobile, la carte se retrouvait donc ecrasee
+     sur ~50% de l'ecran (confirme par mesure directe : 186px de large sur un
+     viewport de 390px), meme si .loginleft demande width:100%. Le transform
+     translate(-50%,-50%) recentre correctement une fois la largeur reelle
+     (100% du conteneur) calculee — .loginleft garde son max-width:420px
+     pour ne pas s'etaler en pleine largeur sur desktop. */
+  width:100% !important; max-width:100% !important; margin:0 !important;
 }
 .loginform .loginright,
 body.pagelayout-login .loginright { display:none !important; }
@@ -212,7 +223,15 @@ body.pagelayout-login [type=submit] {
   border-radius:10px !important; font-size:15px !important;
   padding:13px !important; letter-spacing:.02em !important; width:100% !important;
 }
-body.pagelayout-login #loginbtn:hover { background:{$brand['orange_d']} !important; }
+body.pagelayout-login #loginbtn:hover,
+body.pagelayout-login [type=submit]:hover {
+  /* Meme selecteur large que la regle de base ci-dessus (#loginbtn et
+     [type=submit]) : sans [type=submit], seul le bouton de connexion avait
+     un hover a la bonne couleur — tout autre bouton "submit" du meme
+     pagelayout-login (ex. "Deconnexion" sur l'ecran "deja authentifie")
+     retombait sur l'ancienne couleur (olive) du theme d'origine. */
+  background:{$brand['orange_d']} !important;
+}
 
 .l3m-login-sep { display:flex; align-items:center; gap:10px; margin:18px 0 14px; color:#9aa3a8; font-size:12px; }
 .l3m-login-sep::before, .l3m-login-sep::after { content:''; flex:1; height:1px; background:#E4E1D6; }

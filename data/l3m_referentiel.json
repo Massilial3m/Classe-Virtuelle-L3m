@@ -1,0 +1,142 @@
+{
+  "1": {
+    "nom": "Culture métier / connaissance générale",
+    "sous_matieres": {
+      "1": {
+        "nom": "Politique de sécurité routière et conduite routière",
+        "unites": {
+          "1.1.1": "Accidentologie",
+          "1.1.2": "Circulation routière",
+          "1.1.3": "Matrice GDE / RMC",
+          "1.1.4": "Principes du développement durable",
+          "1.1.5": "Continuum éducatif",
+          "1.1.6": "La bonne allure"
+        }
+      },
+      "2": {
+        "nom": "Le cadre de l'activité d'enseignement de la conduite",
+        "unites": {
+          "1.2.1": "Les acteurs de la sécurité routière",
+          "1.2.2": "Le cadre administratif et juridique de l'activité",
+          "1.2.3": "Le cadre social",
+          "1.2.4": "Le code de la route",
+          "1.2.5": "Réglementation et organisation administrative et commerciale des ECSR (écoles de conduite)",
+          "1.2.6": "Le permis de conduire"
+        }
+      },
+      "3": {
+        "nom": "L'automobile : caractéristiques techniques, conformité et réglementation des véhicules",
+        "unites": {
+          "1.3.1": "Mécanique et technologie automobile",
+          "1.3.2": "Physique et dynamique liée à la conduite automobile",
+          "1.3.3": "Obligations techniques et réglementaires, entretien et contrôle technique"
+        }
+      },
+      "4": {
+        "nom": "Analyse de la tâche appliquée à la conduite d'un véhicule",
+        "unites": {
+          "1.4.1": "Vision, perception",
+          "1.4.2": "L'attention du conducteur"
+        }
+      },
+      "5": {
+        "nom": "Physiologie du conducteur",
+        "unites": {
+          "1.5.1": "Fonctionnement des différents organes sensoriels",
+          "1.5.2": "Activité cérébrale",
+          "1.5.3": "Analyse des réactions et de leurs influences"
+        }
+      },
+      "6": {
+        "nom": "Psychologie du conducteur",
+        "unites": {
+          "1.6.1": "Influence des facteurs psychosociaux",
+          "1.6.2": "Relation individuelle au risque",
+          "1.6.3": "Concepts de valeurs et représentations"
+        }
+      },
+      "7": {
+        "nom": "Notion pédagogique / didactique appliquée à la sécurité et à la conduite routière",
+        "unites": {
+          "1.7.1": "Concepts de base de l'ingénierie pédagogique",
+          "1.7.2": "Caractéristiques de la relation formative à la sécurité routière et posture professionnelle de l'enseignant [LIBELLÉ À CONFIRMER : capture coupée]"
+        }
+      },
+      "8": {
+        "nom": "Notions pédagogiques",
+        "unites": []
+      }
+    }
+  },
+  "2": {
+    "nom": "Les règles de circulation",
+    "sous_matieres": {
+      "1": {
+        "nom": "1.1 Signalisation routière",
+        "unites": {
+          "2.1.1": "Les panneaux de danger",
+          "2.1.2": "Les panneaux d’interdiction",
+          "2.1.3": "Les panneaux d’obligation",
+          "2.1.4": "Les panneaux d’indication",
+          "2.1.5": "Les panneaux temporaires",
+          "2.1.6": "Les marquages au sol",
+          "2.1.7": "Les feux de signalisation"
+        }
+      },
+      "2": {
+        "nom": "Priorités et intersections",
+        "unites": {
+          "2.2.1": "Priorité à droite",
+          "2.2.2": "Stop et cédez-le-passage",
+          "2.2.3": "Rond-points et carrefours à sens giratoire",
+          "2.2.4": "Intersections avec feux",
+          "2.2.5": "Routes prioritaires",
+          "2.2.6": "Cas particuliers de priorité"
+        }
+      },
+      "3": {
+        "nom": "Vitesses et limitations",
+        "unites": {
+          "2.3.1": "Les limitations de vitesse",
+          "2.3.2": "Vitesse en agglomération",
+          "2.3.3": "Vitesse hors agglomération",
+          "2.3.4": "Autoroutes et voies rapides",
+          "2.3.5": "Conditions météorologiques",
+          "2.3.6": "Distance d'arrêt et vitesse"
+        }
+      }
+    }
+  },
+  "3": {
+    "nom": "Conduite responsable",
+    "sous_matieres": {
+      "1": {
+        "nom": "Éco-conduite",
+        "unites": {
+          "3.1.1": "Réduire sa consommation",
+          "3.1.2": "Accélérations et freinages",
+          "3.1.3": "Entretien et consommation",
+          "3.1.4": "Émissions polluantes"
+        }
+      },
+      "2": {
+        "nom": "Partage de la route",
+        "unites": {
+          "3.2.1": "Respect des autres usagers",
+          "3.2.2": "Mobilités douces",
+          "3.2.3": "Comportement courtois",
+          "3.2.4": "Gestion des conflits"
+        }
+      },
+      "3": {
+        "nom": "Conduite responsable",
+        "unites": {
+          "3.3.1": "Anticiper les risques",
+          "3.3.2": "Respecter les règles",
+          "3.3.3": "Adapter sa conduite",
+          "3.3.4": "Responsabilité du conducteur"
+        }
+      }
+    }
+  }
+}

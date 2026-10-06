@@ -1,0 +1,442 @@
+{
+  "_avertissement": "Contenu REEL transcrit depuis Sequence02_EcransReels_Etape1_Complete.pdf (partage le 15/09/2026), pas un contenu de test. Le libelle de l'ecran 0.1 (titre + accroche) n'etait pas encore redige dans le document source : la titre/accroche ci-dessous sont donc une reformulation provisoire a partir des objectifs (ecran 0.2), a faire valider par l'equipe pedagogique. L'ecran de cloture en fin de fichier est un texte provisoire (l'Etape 2 / Phase 4 'Accidentologie' n'est pas encore cadree).",
+  "sequence_id": "seq2_etape1",
+  "titre": "Culture sécurité routière et profil de l'accident",
+  "unites": [
+    "1.1.1"
+  ],
+  "blocs": [
+    {
+      "cle": "ouverture",
+      "type": "ouverture",
+      "titre": "Culture sécurité routière & profil de l'accident",
+      "accroche": "[Titre/accroche provisoires — texte définitif non encore rédigé par l'équipe pédagogique] Avant de construire ensemble le système H.E.V.O., prenons le temps de regarder les chiffres en face.",
+      "objectifs": [
+        "Partir d'une vision d'ensemble : parc automobile, réseau routier.",
+        "Resserrer sur le profil réel de l'accident mortel.",
+        "Comprendre que le danger se loge là où on cesse de le voir."
+      ]
+    },
+    {
+      "cle": "partieA",
+      "type": "expo",
+      "titre_partie": "Partie A — Culture sécurité routière",
+      "statut": "non_note",
+      "ecrans": [
+        {
+          "id": "A.1",
+          "type": "amorce",
+          "question": "À votre avis, combien de véhicules sont aujourd'hui en circulation en France, tous types confondus ?"
+        },
+        {
+          "id": "A.2",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Au 1er janvier 2025, la France compte 39,7 millions de voitures particulières. En y ajoutant les véhicules utilitaires légers (6,5 millions), les poids lourds (622 000) et les autobus/autocars (95 000), le parc automobile français total avoisine 47 millions de véhicules."
+        },
+        {
+          "id": "A.3",
+          "type": "amorce",
+          "question": "Autoroutes et routes nationales réunies représentent quelle proportion du réseau routier français ?"
+        },
+        {
+          "id": "A.4",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Pour circuler, ces véhicules disposent d'un réseau routier de plus de 1,1 million de kilomètres — l'un des plus denses d'Europe. Ce réseau se répartit en 11 751 km d'autoroutes, 9 474 km de routes nationales, 382 491 km de routes départementales et 714 883 km de voies communales. Autrement dit, autoroutes et routes nationales réunies ne représentent même pas 2 % du linéaire total : l'immense majorité du réseau routier français est un réseau secondaire, départemental et communal."
+        },
+        {
+          "id": "A.5",
+          "type": "amorce",
+          "question": "À votre avis, quel est le pic le plus haut de mortalité routière jamais atteint en France, et en quelle année ?"
+        },
+        {
+          "id": "A.6",
+          "type": "texte_seul",
+          "sous_titre": "révélation — point de départ",
+          "texte": "1972 : le pic historique de la mortalité routière en France, avec 18 034 personnes tuées cette année-là. C'est le point de départ de la courbe que vous allez construire vous-même, période par période.",
+          "graphique": {
+            "points": [
+              {
+                "annee": 1972,
+                "morts": 18034,
+                "plein": true
+              }
+            ],
+            "annotation": "1972 — 18 034 morts"
+          }
+        },
+        {
+          "id": "A.7",
+          "type": "amorce",
+          "question": "À votre avis, qu'a-t-on pu décider après un pic pareil, pour faire baisser ce chiffre ?"
+        },
+        {
+          "id": "A.8",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Deux ans plus tôt, en 1970, Marie-Antoinette Ion, l'épouse du Premier ministre Jacques Chaban-Delmas, meurt dans un accident de la route. Le jour même où il quitte Matignon, en juillet 1972, Chaban-Delmas crée le Comité interministériel de la sécurité routière. Les premières mesures tombent dans la foulée : ceinture de sécurité obligatoire (1973), premières limitations de vitesse générales.",
+          "note_production": "Piste vidéo à produire — l'histoire Chaban-Delmas racontée en 1-2 min, pour ancrer que la loi est née d'un drame personnel, pas d'une statistique abstraite. Script à écrire séparément."
+        },
+        {
+          "id": "A.9",
+          "type": "amorce",
+          "question": "À votre avis, après ces décisions, la courbe de mortalité a-t-elle : chuté fortement / stagné / continué à remonter ?"
+        },
+        {
+          "id": "A.10",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "La courbe plonge dès 1973-1974 — la première chute brutale de son histoire. Contrairement à une idée reçue répandue, les contraintes de sécurité routière — la ceinture en premier lieu — n'ont jamais coûté de vies : elles en ont sauvé, et de façon spectaculaire dès leur première application.",
+          "graphique": {
+            "points": [
+              {
+                "annee": 1972,
+                "morts": 18034,
+                "plein": true
+              },
+              {
+                "annee": 1974,
+                "morts": 13000,
+                "plein": false
+              }
+            ],
+            "annotation": "1973 — ceinture + limitations"
+          }
+        },
+        {
+          "id": "A.11",
+          "type": "texte_seul",
+          "sous_titre": "lecture seule — tendance",
+          "texte": "La baisse se poursuit ensuite, plus doucement, jusqu'au début des années 1990.",
+          "graphique": {
+            "points": [
+              {
+                "annee": 1974,
+                "morts": 13000,
+                "plein": false
+              },
+              {
+                "annee": 1992,
+                "morts": 9900,
+                "plein": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "A.12",
+          "type": "amorce",
+          "question": "Que se passe-t-il en 1992, à votre avis ?"
+        },
+        {
+          "id": "A.13",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "1992 : réforme du permis à points. Sur le papier, une mesure forte — mais dans les faits, son effet reste limité au départ : sans dispositif de sanction automatisée, les infractions restent constatées à l'appréciation humaine, et les points ne tombent pas aussi systématiquement que la réforme le prévoyait."
+        },
+        {
+          "id": "A.14",
+          "type": "amorce",
+          "question": "Entre 2002 et 2012, nouvelle chute forte : -53 % de la mortalité en dix ans. Qu'est-ce qui change à partir de 2003, à votre avis ?"
+        },
+        {
+          "id": "A.15",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "2003 : généralisation des radars automatiques. Ce n'est pas la sanction seule qui change la donne, c'est son automatisation : le permis à points existait déjà depuis 1992, mais c'est le radar qui rend la perte de points systématique, indépendante de tout contrôle humain. C'est la combinaison des deux — permis à points + sanction automatisée — qui explique une baisse aussi rapide sur une décennie.",
+          "graphique": {
+            "points": [
+              {
+                "annee": 1992,
+                "morts": 9900,
+                "plein": false
+              },
+              {
+                "annee": 2002,
+                "morts": 7700,
+                "plein": false
+              },
+              {
+                "annee": 2012,
+                "morts": 3653,
+                "plein": true
+              }
+            ],
+            "annotation": "2003 — radars automatiques · -53% vs 2002"
+          }
+        },
+        {
+          "id": "A.16",
+          "type": "amorce",
+          "sous_titre": "réflexion ouverte",
+          "question": "Entre 2012 et 2019, la baisse n'est plus que de 11 %, puis la mortalité stagne. Pourquoi, à votre avis, une mesure qui marchait aussi bien perd-elle autant d'efficacité ?"
+        },
+        {
+          "id": "A.17",
+          "type": "texte_seul",
+          "sous_titre": "lecture seule — synthèse",
+          "texte": "Aucune réponse unique ici — plusieurs pistes coexistent : les comportements qui restent après cette chute sont les plus difficiles à corriger par la contrainte (fatigue, distraction, prise de risque volontaire) ; l'effet radar/sanction atteint ses rendements décroissants une fois le gros des excès déjà corrigés ; de nouveaux facteurs de risque apparaissent (smartphone au volant). Mais surtout : une fois la mortalité descendue à ce niveau, on ne peut plus gagner en resserrant encore la sanction — la suite ne se joue plus au niveau de la sanction, mais au niveau de l'éducation. C'est exactement ce que vous allez construire demain, en direct, avec le système H.E.V.O. Résultat : en 2024, 3 193 personnes ont été tuées sur les routes de France métropolitaine — une baisse de plus de 82 % par rapport à 1972, mais un plateau depuis dix ans que seule l'éducation peut désormais faire bouger.",
+          "graphique": {
+            "points": [
+              {
+                "annee": 1972,
+                "morts": 18034,
+                "plein": true
+              },
+              {
+                "annee": 1980,
+                "morts": 13000,
+                "plein": false
+              },
+              {
+                "annee": 1990,
+                "morts": 10000,
+                "plein": false
+              },
+              {
+                "annee": 2000,
+                "morts": 7700,
+                "plein": false
+              },
+              {
+                "annee": 2010,
+                "morts": 3992,
+                "plein": true
+              },
+              {
+                "annee": 2012,
+                "morts": 3653,
+                "plein": false
+              },
+              {
+                "annee": 2019,
+                "morts": 3244,
+                "plein": true
+              },
+              {
+                "annee": 2024,
+                "morts": 3193,
+                "plein": true
+              }
+            ],
+            "note": "Courbe simplifiée à partir des chiffres officiels ONISR — points pleins confirmés (1972, 2010, 2019, 2024), points clairs interpolés entre deux repères connus. À affiner avec des données année par année si le support final l'exige."
+          }
+        }
+      ]
+    },
+    {
+      "cle": "partieB",
+      "type": "expo",
+      "titre_partie": "Partie B — Profil type de l'accident",
+      "statut": "non_note",
+      "ecrans": [
+        {
+          "id": "B.1",
+          "type": "amorce",
+          "question": "Quelle catégorie d'usagers représente la plus grande part des tués en 2024, à votre avis ?"
+        },
+        {
+          "id": "B.2",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Parmi les 3 193 personnes tuées en 2024, 1 518 étaient occupants d'un véhicule de tourisme (48 % du total), 720 usagers d'un deux-roues motorisé (23 %, dont 597 motocyclistes et 123 cyclomotoristes), 456 piétons (14 %) et 224 cyclistes (7 %) ; les 8 % restants regroupent les utilisateurs d'engins de déplacement personnel motorisé, les occupants de véhicules utilitaires, de poids lourds, de voiturettes et d'autocars. (Sources : SDES pour le parc automobile et le réseau routier ; ONISR, bilan définitif de l'accidentalité 2024, pour la mortalité.)"
+        },
+        {
+          "id": "B.3",
+          "type": "amorce",
+          "question": "Avant de lire la suite : à votre avis, meurt-on le plus souvent de nuit, sous la pluie, sur autoroute ? Notez votre intuition, on y revient juste après."
+        },
+        {
+          "id": "B.4",
+          "type": "amorce",
+          "question": "Quelle part du linéaire routier l'autoroute représente-t-elle, et quelle part du trafic automobile ?"
+        },
+        {
+          "id": "B.5",
+          "type": "amorce",
+          "question": "Quelle part de la mortalité routière l'autoroute représente-t-elle ? Que peut-on en déduire, rapporté à son trafic ?"
+        },
+        {
+          "id": "B.6",
+          "type": "texte_seul",
+          "sous_titre": "révélation — répond à B.3, B.4 et B.5",
+          "texte": "L'autoroute a mauvaise réputation : vitesse élevée, trafic dense, poids lourds. Les chiffres racontent pourtant une autre histoire. Avec à peine 1 % du linéaire routier français, l'autoroute concentre 28 % de la circulation automobile — mais seulement 7 % des personnes tuées sur la route. Rapportée au trafic qu'elle supporte, l'autoroute est donc, de très loin, le réseau le plus sûr."
+        },
+        {
+          "id": "B.7",
+          "type": "amorce",
+          "question": "Sur quel type de réseau se concentre la majorité des morts sur la route ?"
+        },
+        {
+          "id": "B.8",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "À l'inverse, le réseau secondaire — hors agglomération, sur des routes ordinaires — concentre à lui seul environ 60 % de la mortalité routière, contre 32 % en agglomération et 7 % sur autoroute."
+        },
+        {
+          "id": "B.9",
+          "type": "amorce",
+          "question": "Dans quelles conditions météorologiques la majorité des accidents mortels ont-ils lieu ? Pourquoi ?"
+        },
+        {
+          "id": "B.10",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Le constat se prolonge sur d'autres terrains. La majorité des accidents mortels n'ont pas lieu la nuit ou sous la pluie, mais par temps clair, sans précipitations, avec une bonne visibilité — précisément parce que le beau temps incite à rouler plus vite et fait sortir davantage d'usagers vulnérables (piétons, cyclistes) sur la route."
+        },
+        {
+          "id": "B.11",
+          "type": "amorce",
+          "question": "Quelle proportion des accidents hors agglomération n'implique qu'un seul véhicule ?"
+        },
+        {
+          "id": "B.12",
+          "type": "texte_seul",
+          "sous_titre": "révélation",
+          "texte": "Hors agglomération, 40 % des accidents n'impliquent qu'un seul véhicule : une sortie de route, sans tiers responsable identifiable."
+        },
+        {
+          "id": "B.13",
+          "type": "texte_seul",
+          "sous_titre": "lecture seule — synthèse",
+          "texte": "Un dernier indice va dans le même sens, avec une réserve : il n'existe pas de statistique officielle qui distingue précisément les accidents selon que le conducteur connaissait ou non la route. Le meilleur indicateur disponible reste les trajets les plus routiniers — domicile-travail, domicile-courses — qui, chaque année, tuent plusieurs centaines de personnes. Ce que ces chiffres ont en commun : ils déplacent le danger loin de l'endroit où on l'imagine spontanément — pas la route inconnue, la nuit noire, l'averse — mais la route familière, le trajet du quotidien, le grand beau temps."
+        }
+      ]
+    },
+    {
+      "cle": "transition1",
+      "type": "transition",
+      "texte": "Vous avez maintenant vu l'ensemble des données. Place à l'évaluation : 5 questions, à choix multiples, pour valider ce bloc avant de passer à Accidentologie.",
+      "bouton": "Commencer l'évaluation"
+    },
+    {
+      "cle": "qcm1",
+      "type": "qcm_bloc",
+      "statut": "note",
+      "seuil_bon_sur_total": 4,
+      "seuil_pct": 80,
+      "_remediation_note": "Mecanisme de remediation 'officiel' (score seul au 1er passage, resume IA cible, 2e passage identique non bloquant, alerte a Sebastien) PAS ENCORE implemente — le moteur actuel revele encore la correction par question et ne repasse que les questions ratees. A traiter dans une prochaine partie (Part 3).",
+      "questions": [
+        {
+          "id": "3.1",
+          "question": "Le parc automobile et le réseau routier (plusieurs réponses possibles)",
+          "options": [
+            {
+              "texte": "Le parc automobile français compte aujourd'hui près de 47 millions de véhicules, tous types confondus.",
+              "correcte": true
+            },
+            {
+              "texte": "Les voitures particulières représentent moins de la moitié du parc automobile total.",
+              "correcte": false
+            },
+            {
+              "texte": "Autoroutes et routes nationales réunies représentent moins de 2 % du linéaire routier français.",
+              "correcte": true
+            },
+            {
+              "texte": "La majorité du réseau routier français est constituée de routes départementales et communales.",
+              "correcte": true
+            }
+          ]
+        },
+        {
+          "id": "3.2",
+          "question": "L'évolution de la mortalité routière (plusieurs réponses possibles)",
+          "options": [
+            {
+              "texte": "Le pic de mortalité routière en France a été atteint en 1972, avec plus de 18 000 morts.",
+              "correcte": true
+            },
+            {
+              "texte": "La mortalité routière a diminué de manière constante et au même rythme chaque décennie depuis 1972.",
+              "correcte": false
+            },
+            {
+              "texte": "La baisse de la mortalité a été plus forte entre 2002 et 2012 qu'entre 2012 et 2019.",
+              "correcte": true
+            },
+            {
+              "texte": "En 2024, le nombre de tués sur les routes de France métropolitaine est repassé sous la barre des 1 000.",
+              "correcte": false
+            }
+          ]
+        },
+        {
+          "id": "3.3",
+          "question": "Qui meurt sur la route aujourd'hui (plusieurs réponses possibles)",
+          "options": [
+            {
+              "texte": "Les occupants de véhicules de tourisme représentent la plus grande part des personnes tuées en 2024.",
+              "correcte": true
+            },
+            {
+              "texte": "Les usagers de deux-roues motorisés représentent une part de la mortalité proche de celle des piétons.",
+              "correcte": false
+            },
+            {
+              "texte": "Les piétons et les cyclistes réunis représentent plus d'un cinquième de la mortalité routière en 2024.",
+              "correcte": true
+            },
+            {
+              "texte": "Les deux-roues motorisés représentent moins de 10 % des personnes tuées en 2024.",
+              "correcte": false
+            }
+          ]
+        },
+        {
+          "id": "3.4",
+          "question": "L'autoroute et le réseau secondaire, rapportés au trafic (plusieurs réponses possibles)",
+          "options": [
+            {
+              "texte": "L'autoroute concentre à la fois la plus grande part du linéaire routier et la plus grande part de la mortalité.",
+              "correcte": false
+            },
+            {
+              "texte": "Rapportée à la part de trafic qu'elle supporte, l'autoroute est le réseau le plus sûr.",
+              "correcte": true
+            },
+            {
+              "texte": "Le réseau hors agglomération concentre à lui seul la majorité des personnes tuées sur la route.",
+              "correcte": true
+            },
+            {
+              "texte": "L'agglomération est le réseau où l'on meurt le plus sur la route en France.",
+              "correcte": false
+            }
+          ]
+        },
+        {
+          "id": "3.5",
+          "question": "Les conditions des accidents mortels (plusieurs réponses possibles)",
+          "options": [
+            {
+              "texte": "La majorité des accidents mortels ont lieu de nuit ou sous la pluie.",
+              "correcte": false
+            },
+            {
+              "texte": "Le beau temps peut favoriser les accidents en incitant à rouler plus vite et en augmentant la présence d'usagers vulnérables.",
+              "correcte": true
+            },
+            {
+              "texte": "Hors agglomération, 40 % des accidents n'impliquent qu'un seul véhicule.",
+              "correcte": true
+            },
+            {
+              "texte": "Un accident à un seul véhicule signifie nécessairement qu'un tiers extérieur est en cause.",
+              "correcte": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "cle": "cloture",
+      "type": "cloture",
+      "texte": "Fin de l'Étape 1. [Écran provisoire] L'Étape 2 (Accidentologie) n'est pas encore disponible — elle sera ajoutée dès que son contenu sera cadré avec l'équipe pédagogique.",
+      "document": {
+        "nom_affiche": "Support — Étape 1 : Culture sécurité routière et profil type de l'accident"
+      }
+    }
+  ]
+}
