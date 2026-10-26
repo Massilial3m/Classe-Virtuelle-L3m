@@ -11,9 +11,23 @@
 require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/l3m_branding.php');
 require_once(__DIR__ . '/l3m_referentiel.php');
+require_once(__DIR__ . '/lia_engine.php'); // l3m_send_notification() — alerte eleves a la creation d'une Sequence
 require_login();
 
-if (!l3m_is_ped_lead($USER->id) && !is_siteadmin()) {
+// Un formateur simple avec acces "edition" sur UNE Sequence precise (voir
+// Pedagogie cote espace-formateur.php, l3m_seq_formateur_access_*() dans
+// l3m_referentiel.php) peut cocher/decocher les modules "classe virtuelle"
+// de CETTE Sequence depuis sa propre vue Sequences, sans acceder au reste de
+// cet editeur (reserve au Responsable pedagogique) — bypass cible du
+// garde-fou ci-dessous pour cette seule action, question du 07/10/2026.
+$l3m_scfg_is_ped_lead = l3m_is_ped_lead($USER->id) || is_siteadmin();
+$l3m_scfg_bypass_cv = false;
+if (!$l3m_scfg_is_ped_lead && $_SERVER['REQUEST_METHOD'] === 'POST'
+    && optional_param('action', '', PARAM_ALPHANUMEXT) === 'set_cv_module_done') {
+    $l3m_scfg_seqid = optional_param('seqid', 0, PARAM_INT);
+    $l3m_scfg_bypass_cv = l3m_seq_formateur_access_level($USER->id, $l3m_scfg_seqid) === 'edit';
+}
+if (!$l3m_scfg_is_ped_lead && !$l3m_scfg_bypass_cv) {
     redirect(new moodle_url($CFG->wwwroot . '/espace-formateur.php'));
 }
 
@@ -46,6 +60,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $newid = l3m_progseq_next_id(array_keys($sequences));
         $sequences[$newid] = ['titre' => $nom, 'modules' => []];
         l3m_progseq_save($sequences);
+
+        // Alerte tous les eleves du meme client (plus de cours Moodle a
+        // surveiller, donc plus de notification "nouvelle seance" — on
+        // notifie ici la creation d'une Sequence a la place, question du
+        // 07/10/2026).
+        $student_roleid_asq = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        $user_client_asq = l3m_get_user_client($USER->id);
+        if ($student_roleid_asq) {
+            $students_asq = $DB->get_records_sql(
+                "SELECT DISTINCT u.id
+                 FROM {user} u
+                 JOIN {role_assignments} ra ON ra.userid = u.id
+                 JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50
+                 WHERE ra.roleid = :rid AND u.deleted = 0",
+                ['rid' => $student_roleid_asq]
+            );
+            foreach ($students_asq as $s_asq) {
+                if (l3m_get_user_client((int)$s_asq->id) !== $user_client_asq) continue;
+                l3m_send_notification(
+                    $USER->id, (int)$s_asq->id, 'Nouvelle séquence disponible : ' . $nom,
+                    'Une nouvelle séquence a été ajoutée : ' . $nom,
+                    $CFG->wwwroot . '/espace-eleve.php#cours', 'Voir mes séquences'
+                );
+            }
+        }
+
         echo json_encode(['ok' => true]);
         exit;
 
@@ -85,21 +125,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
 
     } elseif ($action === 'set_etape') {
-        // Lie (ou delie, si etape_seqid/etapeid absents) l'UNIQUE Etape du
-        // registre QCM qui pilote le bouton "Faire l'etape" de cette
-        // Sequence (voir l3m_progseq_etape_status()) — une Sequence de "Mes
-        // modules" = au plus une Etape, pas une par module.
+        // Lie (ou delie, si etape_seqid absent) la Sequence de Programme qui
+        // pilote le bouton "Faire l'etape" de cette Sequence de "Mes
+        // modules" — une seule Sequence de Programme liee, mais TOUTES ses
+        // Parties s'enchainent desormais automatiquement (voir
+        // l3m_progseq_etape_resolue()) : on ne fige plus une Partie precise
+        // (etape_etapeid, retire le 19/10/2026 — un formateur devait "choisir
+        // quelle partie" au lieu de lier la Sequence entiere).
         $seqid = required_param('seqid', PARAM_INT);
         $etape_seqid = optional_param('etape_seqid', 0, PARAM_INT);
-        $etape_etapeid = optional_param('etape_etapeid', 0, PARAM_INT);
         header('Content-Type: application/json');
         if (!isset($sequences[$seqid])) { echo json_encode(['ok' => false, 'msg' => 'Séquence introuvable.']); exit; }
-        if ($etape_seqid && $etape_etapeid) {
+        if ($etape_seqid) {
             $sequences[$seqid]['etape_seqid'] = $etape_seqid;
-            $sequences[$seqid]['etape_etapeid'] = $etape_etapeid;
         } else {
-            unset($sequences[$seqid]['etape_seqid'], $sequences[$seqid]['etape_etapeid']);
+            unset($sequences[$seqid]['etape_seqid']);
         }
+        unset($sequences[$seqid]['etape_etapeid']); // champ fige obsolete, voir ci-dessus
         l3m_progseq_save($sequences);
         echo json_encode(['ok' => true]);
         exit;
@@ -259,7 +301,10 @@ body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--b
   <span style="flex:1"></span>
   <a href="<?= $CFG->wwwroot ?>/espace-formateur.php" style="font-size:12px;color:var(--muted);text-decoration:none">&larr; Mon espace</a>
 </div>
-<?php if ($saved): ?><div class="toast">✓ Titres enregistrés</div><?php endif; ?>
+<?php if ($saved): ?>
+<div class="toast" id="save-toast">✓ Titres enregistrés</div>
+<script>setTimeout(function(){ var t = document.getElementById('save-toast'); if (t) t.style.display = 'none'; }, 2500);</script>
+<?php endif; ?>
 <div class="wrap">
   <p class="sub">Chaque Séquence regroupe des modules choisis parmi les Sous-matières et Unités du <a href="<?= $CFG->wwwroot ?>/referentiel-editor.php">référentiel (Programme)</a>. Elles s'affichent dans « Mes modules », côté élève et formateur.</p>
 
@@ -294,14 +339,13 @@ body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--b
         </select>
       </div>
       <div class="etape-row" id="etape-sub-<?= $sid ?>" style="<?= $seqtype === 'classe_virtuelle' ? 'display:none' : '' ?>">
-        <label for="etape_<?= $sid ?>">Étape liée</label>
+        <label for="etape_<?= $sid ?>">Contenu du Programme lié</label>
         <select id="etape_<?= $sid ?>" onchange="setEtape(<?= $sid ?>, this.value)">
           <option value="">Aucune</option>
           <?php foreach ($etapes_picker as $et):
-            $val = $et['seqid'] . ':' . $et['etapeid'];
-            $isSel = (int)($seq['etape_seqid'] ?? 0) === $et['seqid'] && (int)($seq['etape_etapeid'] ?? 0) === $et['etapeid'];
+            $isSel = (int)($seq['etape_seqid'] ?? 0) === $et['seqid'];
           ?>
-            <option value="<?= $val ?>" <?= $isSel ? 'selected' : '' ?>>
+            <option value="<?= $et['seqid'] ?>" <?= $isSel ? 'selected' : '' ?>>
               <?= htmlspecialchars($et['label'], ENT_QUOTES) ?><?= $et['publiee'] ? '' : ' (brouillon)' ?>
             </option>
           <?php endforeach; ?>
@@ -422,8 +466,7 @@ function removeModule(seqid, ref, btn) {
   });
 }
 function setEtape(seqid, val) {
-  var parts = val ? val.split(':') : ['0', '0'];
-  post('set_etape', { seqid: seqid, etape_seqid: parts[0], etape_etapeid: parts[1] }).then(function(r){
+  post('set_etape', { seqid: seqid, etape_seqid: val || 0 }).then(function(r){
     if (!r.ok) alert(r.msg || 'Erreur');
   });
 }

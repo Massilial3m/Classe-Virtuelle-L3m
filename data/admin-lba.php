@@ -324,6 +324,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = optional_param('action', '', PARAM_ALPHANUMEXT);
     header('Content-Type: application/json');
 
+    if ($action === 'header_counts') {
+        $unread_notifs = 0;
+        try {
+            $unread_notifs = (int)\message_popup\api::count_unread_popup_notifications($USER->id);
+        } catch (Exception $e) {}
+        echo json_encode(['ok' => true, 'unread_notifications' => $unread_notifs], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     if ($action === 'create_class') {
         $name      = required_param('name', PARAM_TEXT);
         $startdate = optional_param('startdate', '', PARAM_TEXT);
@@ -501,12 +510,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $client      = optional_param('client', '', PARAM_ALPHA);
         $secteur     = optional_param('secteur', '', PARAM_TEXT);
         $is_ped_lead = (bool)optional_param('is_ped_lead', 0, PARAM_INT);
+        // Cohortes suivies par ce formateur — determine qui apparait dans son
+        // annuaire de messagerie (espace-formateur.php) ; vide = tous les
+        // eleves du client, comportement par defaut (question du 22/10/2026).
+        $cohorts = json_decode(optional_param('cohorts', '[]', PARAM_RAW), true);
+        $cohorts = is_array($cohorts) ? array_values(array_map('intval', $cohorts)) : [];
         $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
         if (!isset($meta[$uid])) $meta[$uid] = [];
         $meta[$uid]['role_label']  = trim($role_label);
         $meta[$uid]['type']        = $type;
         $meta[$uid]['secteur']     = trim($secteur);
         $meta[$uid]['is_ped_lead'] = $is_ped_lead;
+        $meta[$uid]['cohorts']     = $cohorts;
         set_config('formateur_meta', json_encode($meta), 'local_l3madmin');
         // Changer le rattachement client d'un compte existant est une action
         // inter-tenant sensible : réservée aux vrais administrateurs du site,
@@ -552,14 +567,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $type     = optional_param('type', 'visio', PARAM_ALPHA);
         $label    = trim(optional_param('label', 'Affectation manuelle', PARAM_TEXT));
         $h        = (float)optional_param('h', 0, PARAM_FLOAT);
-        $courseid = optional_param('courseid', 0, PARAM_INT);
+        // "seqid" (id de Sequence, voir l3m_progseq_all()) remplace le 09/10/2026
+        // l'ancien "courseid" (cours Moodle) — champ purement informatif,
+        // jamais consomme par lia_engine.php, voir le commentaire plus haut.
+        $seqid = optional_param('seqid', '', PARAM_ALPHANUMEXT);
         if (!in_array($type, ['visio', 'veh', 'salle', 'stage', 'exam'], true)) {
             echo json_encode(['ok' => false, 'msg' => 'Format invalide']); exit;
         }
         $overrides = json_decode(get_config('local_l3madmin', 'lia_overrides') ?: '[]', true) ?: [];
         $key = $pid . '|' . $w . '|' . $coh;
         $overrides = array_values(array_filter($overrides, fn($o) => ($o['pid'] . '|' . $o['w'] . '|' . $o['coh']) !== $key));
-        $overrides[] = ['pid' => $pid, 'w' => $w, 'coh' => $coh, 'type' => $type, 'label' => $label, 'h' => $h, 'courseid' => $courseid];
+        $overrides[] = ['pid' => $pid, 'w' => $w, 'coh' => $coh, 'type' => $type, 'label' => $label, 'h' => $h, 'seqid' => $seqid];
         set_config('lia_overrides', json_encode($overrides), 'local_l3madmin');
         echo json_encode(['ok' => true]);
         exit;
@@ -645,6 +663,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $client      = optional_param('client', 'lba', PARAM_ALPHA);
         $secteur     = optional_param('secteur', '', PARAM_TEXT);
         $is_ped_lead = (bool)optional_param('is_ped_lead', 0, PARAM_INT);
+        $cohorts_ai = json_decode(optional_param('cohorts', '[]', PARAM_RAW), true);
+        $cohorts_ai = is_array($cohorts_ai) ? array_values(array_map('intval', $cohorts_ai)) : [];
         // Un manager (non site admin) ne peut créer un intervenant que dans
         // son propre client — seul un vrai administrateur du site peut choisir.
         if (!is_siteadmin()) { $client = $admin_client; }
@@ -696,13 +716,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $inst = $DB->get_record('enrol', ['enrol' => 'manual', 'courseid' => $course->id]);
             if ($inst) try { $enrol_ai->enrol_user($inst, $uid, $teacher_roleid_ai); } catch (Exception $e) {}
         }
-        if ($role_label || $type || $secteur || $is_ped_lead) {
+        if ($role_label || $type || $secteur || $is_ped_lead || $cohorts_ai) {
             $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
             if (!isset($meta[$uid])) $meta[$uid] = [];
             $meta[$uid]['role_label']  = trim($role_label);
             $meta[$uid]['type']        = $type;
             $meta[$uid]['secteur']     = trim($secteur);
             $meta[$uid]['is_ped_lead'] = $is_ped_lead;
+            $meta[$uid]['cohorts']     = $cohorts_ai;
             set_config('formateur_meta', json_encode($meta), 'local_l3madmin');
         }
         l3m_set_user_client($uid, $client === 'saran' ? 'saran' : 'lba');
@@ -738,6 +759,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $notes = json_decode(get_config('local_l3madmin', 'student_notes') ?: '{}', true) ?: [];
         if ($note !== '') { $notes[$uid] = $note; } else { unset($notes[$uid]); }
         set_config('student_notes', json_encode($notes), 'local_l3madmin');
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // Assignation manuelle du sous-groupe (colonne "SOUS-GROUPE") — remplace
+    // le calcul automatique par ordre alphabetique, qui ne reflete pas une
+    // vraie repartition (ex. groupes vehicule), question du 22/10/2026.
+    if ($action === 'save_subgroup') {
+        $uid  = required_param('userid', PARAM_INT);
+        if (!l3m_admin_owns_user($uid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Élève introuvable']); exit;
+        }
+        $sg = optional_param('subgroup', 0, PARAM_INT);
+        $overrides = json_decode(get_config('local_l3madmin', 'student_subgroup') ?: '{}', true) ?: [];
+        if ($sg > 0) { $overrides[$uid] = $sg; } else { unset($overrides[$uid]); }
+        set_config('student_subgroup', json_encode($overrides), 'local_l3madmin');
         echo json_encode(['ok' => true]);
         exit;
     }
@@ -865,7 +902,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $rec->timecreated = time();
             $docid = $DB->insert_record('l3m_docs', $rec);
             l3m_send_notification(
-                $USER->id, $userid, 'Nouveau document',
+                $USER->id, $userid, 'Nouveau document : ' . trim($title),
                 'Votre formateur vous a envoyé un document : ' . trim($title),
                 $CFG->wwwroot . '/espace-eleve.php#docs', 'Voir mes documents'
             );
@@ -888,6 +925,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $DB->delete_records('l3m_docs', ['id' => $docid]);
         echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // ── Marque un document signé reçu comme traité (sort du badge "Documents"
+    // en attente) — manquait un bouton direct pour ça : jusqu'ici il fallait
+    // ouvrir "Modifier" et changer le statut a la main, question du
+    // 09/10/2026 "je vois toujours 1 dans doc". Ne touche qu'au statut, pas
+    // au fichier signe lui-meme (toujours consultable via "Document signé
+    // reçu"). ──
+    if ($action === 'ack_signed_doc') {
+        $docid = required_param('docid', PARAM_INT);
+        $doc = $DB->get_record('l3m_docs', ['id' => $docid]);
+        if (!$doc || !l3m_admin_owns_user($doc->userid, $admin_client)) {
+            echo json_encode(['ok' => false, 'msg' => 'Document introuvable']); exit;
+        }
+        $doc->status_type = 'validated';
+        $doc->timemodified = time();
+        $DB->update_record('l3m_docs', $doc);
+        echo json_encode(['ok' => true, 'doc' => $DB->get_record('l3m_docs', ['id' => $docid])]);
         exit;
     }
 
@@ -942,13 +998,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'count_pending_signed_docs') {
-        $count = 0;
+        $userids = [];
         try {
-            $count = (int)$DB->count_records_select(
-                'l3m_docs', 'signed_uploaded_at > 0 AND status_type = ?', ['pending']
-            );
+            // Meme perimetre client que le compteur initial ($pending_signed_docs
+            // plus bas) : sans ce filtre, un admin LBA voyait apres coup (au
+            // premier rafraichissement AJAX) le nombre tous clients confondus,
+            // different du badge affiche au chargement de la page.
+            $userids = array_map('intval', array_column(
+                $DB->get_records_sql(
+                    "SELECT DISTINCT d.userid FROM {l3m_docs} d
+                     JOIN {user} u ON u.id = d.userid AND u.deleted = 0
+                     WHERE d.signed_uploaded_at > 0 AND d.status_type = :st
+                       AND " . l3m_admin_client_sql('d.userid', $admin_client, $saran_cohort_id),
+                    ['st' => 'pending']
+                ), 'userid'
+            ));
         } catch (Exception $e) {}
-        echo json_encode(['ok' => true, 'count' => $count]);
+        echo json_encode(['ok' => true, 'count' => count($userids), 'userids' => $userids]);
         exit;
     }
 
@@ -1496,6 +1562,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             unset($unlocks_ds[$uid_ds]);
             set_config('module_unlock_overrides', json_encode($unlocks_ds), 'local_l3madmin');
 
+            // Idem pour l'exception de deblocage ponctuel par Sequence (voir
+            // l3m_seq_student_unlock_*() dans l3m_referentiel.php) — meme
+            // principe, nouvelle cle.
+            $sequnlocks_ds = json_decode(get_config('local_l3madmin', 'seq_unlock_overrides') ?: '{}', true) ?: [];
+            unset($sequnlocks_ds[$uid_ds]);
+            set_config('seq_unlock_overrides', json_encode($sequnlocks_ds), 'local_l3madmin');
+
+            // Documents administratifs (l3m_docs) : sans ce nettoyage, un
+            // document encore "en attente" reste orphelin et impossible a
+            // retrouver/traiter une fois l'eleve supprime, tout en continuant
+            // a compter dans le badge "Documents" — question du 09/10/2026
+            // "je vois toujours 1 dans doc".
+            $docs_ds = $DB->get_records('l3m_docs', ['userid' => $uid_ds]);
+            if ($docs_ds) {
+                $fs_ds = get_file_storage();
+                $ctx_ds = context_user::instance($uid_ds, IGNORE_MISSING);
+                foreach ($docs_ds as $doc_ds) {
+                    if ($ctx_ds) {
+                        $fs_ds->delete_area_files($ctx_ds->id, 'local_l3madmin', 'l3m_doc', $doc_ds->id);
+                        $fs_ds->delete_area_files($ctx_ds->id, 'local_l3madmin', 'l3m_doc_signed', $doc_ds->id);
+                    }
+                }
+                $DB->delete_records('l3m_docs', ['userid' => $uid_ds]);
+            }
+
             echo json_encode(['ok' => true]);
         } catch (Exception $e) {
             echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
@@ -1664,6 +1755,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // Supprime la conversation (cote admin uniquement — mecanisme natif
+    // Moodle, l'autre participant garde la sienne jusqu'a ce qu'il la
+    // supprime lui-meme a son tour) et retire le contact associe, pour que
+    // la ligne disparaisse vraiment de l'inbox plutot que de revenir au
+    // prochain message de l'eleve. Question du 09/10/2026, icone de
+    // suppression par contact.
+    if ($action === 'msg_delete_conversation') {
+        $convid_md = required_param('convid', PARAM_INT);
+        $studentid_md = required_param('userid', PARAM_INT);
+        try {
+            if ($convid_md && \core_message\api::can_delete_conversation($USER->id, $convid_md)) {
+                \core_message\api::delete_conversation_by_id($USER->id, $convid_md);
+            }
+            if ($studentid_md && \core_message\api::is_contact($USER->id, $studentid_md)) {
+                \core_message\api::remove_contact($USER->id, $studentid_md);
+            }
+            if ($convid_md) {
+                $DB->delete_records('l3m_msg_status', ['conversationid' => $convid_md, 'formateur_id' => $USER->id]);
+            }
+            echo json_encode(['ok' => true]);
+        } catch (Exception $e) {
+            echo json_encode(['ok' => false, 'msg' => $e->getMessage()]);
+        }
+        exit;
+    }
+
     if ($action === 'msg_toggle_traite') {
         $convid = required_param('convid', PARAM_INT);
         $row    = $DB->get_record('l3m_msg_status', ['conversationid' => $convid, 'formateur_id' => $USER->id]);
@@ -1767,30 +1884,29 @@ $kpi_teachers = (int)$DB->count_records_sql(
 );
 
 // ===== COMPLETION PAR ÉLÈVE (batch) =====
+// Progression reelle = Programme/Sequences (l3m_progseq_global_pct), pas
+// l'ancienne completion de cours Moodle (course_modules_completion), devenue
+// aveugle depuis que les eleves ne naviguent plus dans de vrais cours Moodle
+// — meme bug deja corrige le 01/10/2026 cote Parcours eleve (espace-eleve.php,
+// "c'est toujours 44%"), mais jamais applique ici, question du 22/10/2026 :
+// "il a fini la sequance 3 mais sa progression reste a 0".
 $student_completion = [];
 $avg_completion = 0;
 if ($course_ids && $student_roleid) {
     list($in_sql_comp, $in_params_comp) = $DB->get_in_or_equal($course_ids, SQL_PARAMS_NAMED, 'compcid');
-    $comp_data = $DB->get_records_sql(
-        "SELECT u.id,
-           COUNT(DISTINCT cm.id) as total_mods,
-           SUM(CASE WHEN cmc.completionstate >= 1 THEN 1 ELSE 0 END) as done_mods
+    $comp_uids = $DB->get_fieldset_sql(
+        "SELECT DISTINCT u.id
          FROM {user} u
          JOIN {user_enrolments} ue ON ue.userid = u.id AND ue.status = 0
          JOIN {enrol} e ON e.id = ue.enrolid
          JOIN {role_assignments} ra ON ra.userid = u.id
          JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid = e.courseid
-         JOIN {course_modules} cm ON cm.course = e.courseid AND cm.completion > 0
-         LEFT JOIN {course_modules_completion} cmc ON cmc.coursemoduleid = cm.id AND cmc.userid = u.id
          WHERE ra.roleid = :rid AND u.deleted = 0 AND e.courseid $in_sql_comp
-           AND " . l3m_admin_client_sql('u.id', $admin_client, $saran_cohort_id) . "
-         GROUP BY u.id",
+           AND " . l3m_admin_client_sql('u.id', $admin_client, $saran_cohort_id),
         array_merge(['rid' => $student_roleid], $in_params_comp)
     );
-    foreach ($comp_data as $c) {
-        $student_completion[$c->id] = $c->total_mods > 0
-            ? min(100, round($c->done_mods / $c->total_mods * 100))
-            : 0;
+    foreach ($comp_uids as $uid) {
+        $student_completion[(int)$uid] = l3m_progseq_global_pct((int)$uid);
     }
     if (count($student_completion) > 0) {
         $avg_completion = round(array_sum($student_completion) / count($student_completion));
@@ -2106,6 +2222,7 @@ foreach ($formateurs_raw as $f) {
         'habs'       => $fmeta['habs'] ?? [],
         'secteur'    => $fmeta['secteur'] ?? '',
         'is_ped_lead' => !empty($fmeta['is_ped_lead']),
+        'cohorts'    => array_values(array_map('intval', $fmeta['cohorts'] ?? [])),
         'events'     => $upcoming_events_map[(int)$f->id] ?? [],
         'classes'    => array_values($classes_per_teacher[(int)$f->id] ?? []),
     ];
@@ -2129,6 +2246,12 @@ if ($course_ids && $student_roleid) {
         array_merge(['rid' => $student_roleid], $in_params_st)
     );
 
+    // Sous-groupes assignes manuellement (admin-lba.php, colonne "SOUS-GROUPE")
+    // — prioritaires sur le calcul automatique par ordre alphabetique
+    // ci-dessous, qui ne reflete pas une vraie repartition (ex. groupes
+    // vehicule) tant que personne n'a ajuste manuellement (question du
+    // 22/10/2026).
+    $subgroup_overrides = json_decode(get_config('local_l3madmin', 'student_subgroup') ?: '{}', true) ?: [];
     $cohort_positions = []; // cohortid => position counter (for sub-group)
     foreach ($students_raw as $s) {
         $pct        = $student_completion[$s->id] ?? 0;
@@ -2146,6 +2269,9 @@ if ($course_ids && $student_roleid) {
             if (!isset($cohort_positions[$student_cohort_id])) $cohort_positions[$student_cohort_id] = 0;
             $cohort_positions[$student_cohort_id]++;
             $sg_num = (int)ceil($cohort_positions[$student_cohort_id] / max(1, (int)$ecsr_params['sous_groupes_taille']));
+        }
+        if (isset($subgroup_overrides[$s->id])) {
+            $sg_num = (int)$subgroup_overrides[$s->id];
         }
 
         $needs_action = !$reglement || $presence < 70 || $is_inactive;
@@ -2291,6 +2417,16 @@ try {
     }
 } catch (Exception $cl_e) { $courses_list = []; }
 
+// ===== LISTE SEQUENCES pour le selecteur "Module (optionnel)" de
+// l'affectation manuelle Lia — remplace le 09/10/2026 l'ancienne liste de
+// cours Moodle (champ purement informatif, jamais consomme par
+// lia_engine.php, voir save_lia_override plus haut) : on n'a plus de cours
+// Moodle a proposer ici, on propose les Sequences du referentiel a la place.
+$seq_options_list = [];
+foreach (l3m_progseq_all() as $sid_opt => $seq_opt) {
+    $seq_options_list[] = ['id' => $sid_opt, 'titre' => $seq_opt['titre'] ?? ("Séquence $sid_opt")];
+}
+
 // ===== MOTEUR LIA (calcul serveur, source unique avec espace-formateur.php) =====
 preg_match_all('/\d+/', $ecsr_params['regroupements_vehicule'], $veh_matches);
 preg_match_all('/\d+/', $ecsr_params['regroupements_salle'], $salle_matches);
@@ -2335,13 +2471,27 @@ foreach ($all_dispos_raw as $row) {
 // ===== JSON pour le JS =====
 $unread_messages = (int)\core_message\api::count_unread_conversations($USER);
 $pending_signed_docs = 0;
+$pending_signed_doc_userids = [];
 try {
-    $pending_signed_docs = (int)$DB->count_records_sql(
-        "SELECT COUNT(*) FROM {l3m_docs}
-         WHERE signed_uploaded_at > 0 AND status_type = :st
-           AND " . l3m_admin_client_sql('userid', $admin_client, $saran_cohort_id),
-        ['st' => 'pending']
-    );
+    // JOIN deleted=0 : exclut les documents orphelins d'un compte eleve
+    // supprime (il reste alors introuvable/impossible a traiter dans la
+    // liste des eleves, le badge ne devait donc plus le compter — voir aussi
+    // le nettoyage ajoute dans l'action 'delete_student' qui evite d'en
+    // recreer, question du 09/10/2026).
+    // Les userid concernes sont aussi exposes (pending_signed_doc_userids,
+    // voir plus bas) pour que l'admin puisse reperer QUEL eleve a un document
+    // a verifier directement dans la liste, sans cliquer sur chacun un par un
+    // (question du 20/10/2026 : le badge "1" seul ne dit pas qui).
+    $pending_signed_doc_userids = array_map('intval', array_column(
+        $DB->get_records_sql(
+            "SELECT DISTINCT d.userid FROM {l3m_docs} d
+             JOIN {user} u ON u.id = d.userid AND u.deleted = 0
+             WHERE d.signed_uploaded_at > 0 AND d.status_type = :st
+               AND " . l3m_admin_client_sql('d.userid', $admin_client, $saran_cohort_id),
+            ['st' => 'pending']
+        ), 'userid'
+    ));
+    $pending_signed_docs = count($pending_signed_doc_userids);
 } catch (Exception $e) {}
 
 $pending_leads = 0;
@@ -2366,6 +2516,7 @@ $admin_data = json_encode([
     'is_ped_lead_viewer'  => l3m_is_ped_lead($USER->id) || is_siteadmin(),
     'admin_client'        => $admin_client,
     'pending_signed_docs' => $pending_signed_docs,
+    'pending_signed_doc_userids' => $pending_signed_doc_userids,
     'unread_messages'     => $unread_messages,
     'pending_leads'       => $pending_leads,
     'beta_testers'        => $beta_testers,
@@ -2384,6 +2535,7 @@ $admin_data = json_encode([
     'date_label'   => userdate(time(), '%A %d %B %Y'),
     'plan_events'  => $plan_events,
     'courses_list' => $courses_list,
+    'seq_options'  => $seq_options_list,
     'formations'   => l3m_get_formations_list($admin_client, $saran_category_id),
     'prog_sequences' => l3m_progseq_for_display($USER->id),
     'lia_people'   => $lia_people,
@@ -2463,6 +2615,24 @@ aside .sep { flex:1; }
 aside .back-link { font-size:11.5px; color:var(--muted); padding:8px 12px; border-top:1px solid var(--line); text-decoration:none; display:block; }
 aside .back-link:hover { color:var(--teal-d); }
 main { flex:1; padding:22px 24px 80px; min-width:0; }
+
+/* ── Menu drawer (navigation mobile) ── */
+.mobile-nav-toggle { display:none; }
+.mobile-nav-backdrop { display:none; }
+@media(max-width:760px){
+  .mobile-nav-toggle {
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+    width:34px; height:34px; border:none; border-radius:9px;
+    background:var(--teal-d); color:#fff; font-size:16px; cursor:pointer;
+  }
+  .mobile-nav-backdrop.on { display:block; position:fixed; inset:0; background:rgba(20,30,35,.45); z-index:55; }
+  aside {
+    position:fixed; top:0; left:0; height:100vh; width:230px; flex:0 0 230px;
+    transform:translateX(-100%); transition:transform .22s ease; z-index:60;
+    box-shadow:2px 0 18px rgba(0,0,0,.2); padding-top:16px;
+  }
+  aside.on { transform:translateX(0); }
+}
 .view { display:none; }
 .view.on { display:block; }
 h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
@@ -2821,6 +2991,21 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .dv-spinner { width:28px; height:28px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--teal); animation:dvspin .7s linear infinite; }
 @keyframes dvspin { to { transform:rotate(360deg); } }
 #ce-iframe { flex:1; width:100%; border:none; opacity:1; transition:opacity .15s; }
+/* ===== Notifications (icone topbar + modal iframe, meme mecanisme que
+   espace-formateur.php/espace-eleve.php) ===== */
+.topbar-bell { position:relative; border:none; background:none; cursor:pointer; font-size:18px; padding:6px 8px; border-radius:10px; color:var(--ink); }
+.topbar-bell:hover { background:var(--bg); }
+.topbar-bell-badge { position:absolute; top:0; right:0; background:var(--red,#D64545); color:#fff; font-size:10px; font-weight:800; border-radius:99px; min-width:16px; height:16px; padding:0 4px; display:none; align-items:center; justify-content:center; }
+.util-modal-bg { position:fixed; inset:0; background:rgba(36,51,60,.45); z-index:200; display:none; align-items:center; justify-content:center; }
+.util-modal-bg.on { display:flex; }
+.util-modal { background:var(--card); border-radius:18px; box-shadow:0 20px 60px rgba(0,0,0,.25); width:720px; max-width:94vw; height:94vh; max-height:920px; display:flex; flex-direction:column; overflow:hidden; }
+.util-modal-head { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--line); flex-shrink:0; }
+.util-modal-head h2 { margin:0; font-size:15px; }
+.util-modal-close { border:none; background:none; font-size:16px; color:var(--muted); cursor:pointer; padding:4px; line-height:1; }
+.util-modal-close:hover { color:var(--ink); }
+.util-modal-body { position:relative; flex:1; overflow:hidden; }
+.util-modal iframe { position:absolute; inset:0; width:100%; height:100%; border:none; opacity:0; transition:opacity .15s; }
+.util-modal iframe.ready { opacity:1; }
 .dv-mobile-back{display:none}
 @media(max-width:760px){
   /* Meme correctif que cote formateur/eleve : liste des sections + apercu
@@ -2905,7 +3090,11 @@ tr.inactive td { background:rgba(214,69,69,.04); }
 .fld select{width:100%;border:1.5px solid var(--line);background:var(--bg);border-radius:10px;padding:9px 13px;font-size:13.5px;font-family:inherit;color:var(--ink);outline:none}
 .fld select:focus{border-color:var(--teal)}
 @media(max-width:760px) {
-  aside { flex-basis:54px; } aside button span { display:none; } .today { display:none; }
+  /* Le menu lateral n'est plus reduit a une colonne d'icones permanente ici
+     (ancien compromis) : il devient un vrai tiroir hors-ecran par defaut,
+     voir le bloc ".mobile-nav-toggle"/"aside.on" plus bas — question du
+     12/10/2026. */
+  .today { display:none; }
   /* Grille KPI "Planning & Lia" forcee a 3 colonnes en dur (voir attribut
      style de #plan-pkpis) : sur mobile chaque carte devient trop etroite et
      "Cohortes planifiees" (liste qui peut s'allonger) deborde/est ecrasee —
@@ -2962,6 +3151,9 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 .msg-contact.unread .msg-contact-preview { color:var(--ink); font-weight:600; }
 .msg-contact-time { font-size:10.5px; color:var(--muted); white-space:nowrap; margin-left:auto; }
 .msg-contact-unread-badge { position:absolute; right:10px; bottom:9px; background:var(--teal); color:#fff; font-size:9.5px; font-weight:800; border-radius:99px; min-width:16px; height:16px; display:flex; align-items:center; justify-content:center; padding:0 4px; }
+.msg-contact-del { flex-shrink:0; width:26px; height:26px; border:none; background:none; border-radius:50%; color:var(--muted); font-size:13px; cursor:pointer; display:flex; align-items:center; justify-content:center; opacity:0; transition:opacity .12s, background .12s, color .12s; }
+.msg-contact:hover .msg-contact-del { opacity:1; }
+.msg-contact-del:hover { background:var(--red-t); color:var(--red); }
 
 .av-c0 { background:var(--violet-t); color:var(--violet-d); }
 .av-c1 { background:var(--orange-t); color:var(--orange-d); }
@@ -3020,6 +3212,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <body>
 <!-- TOPBAR -->
 <div class="top">
+  <button type="button" class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="Ouvrir le menu">&#9776;</button>
   <a class="brand" href="<?= $CFG->wwwroot ?>">
     <?php if (!empty($brand['logo_dark'])): ?>
       <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="height:38px;width:auto">
@@ -3034,6 +3227,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
     <small>· Administration</small>
   </a>
   <div class="today" id="date-label">Chargement…</div>
+  <button type="button" class="topbar-bell" onclick="openUtilModal('notif')" title="Notifications" aria-label="Notifications">🔔<span class="topbar-bell-badge" id="notif-nav-badge">0</span></button>
   <div class="user-wrap">
     <button type="button" class="user" onclick="toggleUserMenu(event)">
       <span class="av"><?= htmlspecialchars($user_initials) ?></span>
@@ -3045,14 +3239,16 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
 </div>
 
+<div class="mobile-nav-backdrop" id="mobile-nav-backdrop" onclick="closeMobileNav()"></div>
+
 <div class="app">
-<aside>
+<aside id="app-aside">
   <button class="on" data-v="dash" onclick="nav(this)">◧ <span>Tableau de bord</span></button>
   <button data-v="leads" onclick="nav(this)">☎ <span>Leads</span><span class="nav-badge" id="leads-nav-badge" style="display:none">0</span></button>
   <button data-v="plan" onclick="nav(this)">▦ <span>Planning &amp; Lia</span></button>
   <button data-v="team" onclick="nav(this)">◉ <span>Intervenants</span></button>
   <button data-v="coh"  onclick="nav(this)">⚑ <span><?= l3m_term_classe($USER->id) ?>s &amp; élèves</span></button>
-  <button data-v="cours" onclick="nav(this)">🎓 <span>Mes modules</span></button>
+  <button data-v="cours" onclick="nav(this)">🎓 <span>Programme</span></button>
   <button data-v="docs"  onclick="nav(this)">☰ <span>Documents</span><span class="nav-badge" id="docs-nav-badge" style="display:none">0</span></button>
   <button data-v="admin" onclick="nav(this)">🗂 <span>Administratif</span></button>
   <button data-v="param" onclick="nav(this)">⚙ <span>Paramètres</span></button>
@@ -3185,7 +3381,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <!-- ===== MES MODULES (Programme + Sequences) — meme contenu que
      espace-formateur.php, question du 02/10/2026 ===== -->
 <div class="view" id="v-cours">
-  <h1>Mes modules</h1>
+  <h1>Programme</h1>
   <?php if (l3m_is_ped_lead($USER->id) || is_siteadmin()): ?>
   <div style="text-align:right;margin-bottom:6px">
     <a href="<?= $CFG->wwwroot ?>/referentiel-editor.php" style="font-size:12.5px;font-weight:800;color:var(--<?= $brand['button_accent'] ?>-d);text-decoration:none">✏️ Éditer le programme</a>
@@ -3213,6 +3409,20 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   <h2 class="section-title">▶ Séquences</h2>
   <p class="sub" id="seq-sub">Chargement…</p>
   <div class="seq-list" id="seq-list"></div>
+</div>
+
+<div class="util-modal-bg" id="util-modal-bg" onclick="if(event.target===this)closeUtilModal()">
+  <div class="util-modal">
+    <div class="util-modal-head">
+      <button type="button" id="util-modal-back" onclick="utilModalGoBack()" aria-label="Retour" title="Retour" style="display:none;background:none;border:none;font-size:14px;font-weight:700;color:var(--teal-d);cursor:pointer;padding:4px 8px 4px 0;margin-right:4px">&#8592; Retour</button>
+      <h2 id="util-modal-title">Notifications</h2>
+      <button type="button" class="util-modal-close" onclick="closeUtilModal()" aria-label="Fermer">&#10005;</button>
+    </div>
+    <div class="util-modal-body">
+      <div class="dv-loading" id="util-modal-loading"><span class="dv-spinner"></span></div>
+      <iframe id="util-modal-iframe" title="Notifications" src="about:blank"></iframe>
+    </div>
+  </div>
 </div>
 
 <div class="modal-bg" id="course-modal-bg" onclick="if(event.target===this)closeCourseIframe()">
@@ -3492,7 +3702,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
       </div>
       <div style="display:flex;gap:8px;margin-top:18px;justify-content:flex-end">
         <button class="btn ghost" onclick="docsCloseForm()">Annuler</button>
-        <button class="btn primary" onclick="docsSaveForm()">Enregistrer</button>
+        <button class="btn primary" id="docs-save-btn" onclick="docsSaveForm()">Enregistrer</button>
       </div>
     </div>
   </div>
@@ -3568,6 +3778,11 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
           <input type="radio" name="fmod-client" value="saran"> Saran
         </label>
       </div>
+    </div>
+    <div class="fld">
+      <label>Cohortes suivies</label>
+      <div id="fmod-cohorts-list" style="display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px"></div>
+      <p style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Détermine quels élèves apparaissent dans son annuaire de messagerie. Aucune cohorte cochée = tous les élèves du client (par défaut).</p>
     </div>
     <div id="fmod-habs-section" class="fld">
       <label>Habilitations</label>
@@ -3820,6 +4035,22 @@ function nav(btn) {
   if (vid === 'v-admin' && !document.getElementById('admin-tool-frame').src) {
     adminToolShow(document.querySelector('#v-admin .admin-tool-card.on'));
   }
+  closeMobileNav();
+}
+
+// ── Menu drawer (navigation mobile) : voir espace-eleve.php, meme
+// mecanisme — question du 12/10/2026.
+function toggleMobileNav() {
+  var isOpen = document.getElementById('app-aside').classList.contains('on');
+  if (isOpen) closeMobileNav(); else openMobileNav();
+}
+function openMobileNav() {
+  document.getElementById('app-aside').classList.add('on');
+  document.getElementById('mobile-nav-backdrop').classList.add('on');
+}
+function closeMobileNav() {
+  document.getElementById('app-aside').classList.remove('on');
+  document.getElementById('mobile-nav-backdrop').classList.remove('on');
 }
 
 /* Bouton "Voir les élèves" d'une alerte Lia : applique le même filtre que
@@ -3863,6 +4094,145 @@ function apiPost(params) {
   body.append('sesskey', SESSKEY);
   return fetch(ADMINURL, { method: 'POST', body: body })
     .then(r => r.json());
+}
+
+/* ===== COMPTEUR NOTIFICATIONS (icone topbar) ===== */
+function loadHeaderCounts() {
+  apiPost({ action: 'header_counts' }).then(function(r) {
+    if (!r.ok) return;
+    var badge = document.getElementById('notif-nav-badge');
+    badge.textContent = r.unread_notifications;
+    badge.style.display = r.unread_notifications > 0 ? 'flex' : 'none';
+  });
+}
+
+/* ===== NOTIFICATIONS (modal iframe, meme mecanisme que espace-formateur.php/espace-eleve.php) ===== */
+var _utilPollT = null;
+var _utilModalNavCount = 0;
+var _utilModalGoingBack = false;
+var UTIL_MODAL_URLS = {
+  notif: { url: WWWROOT + '/message/output/popup/notifications.php', title: 'Notifications', match: '/message/output/popup/notifications.php' },
+};
+
+function utilModalInject() {
+  var iframe = document.getElementById('util-modal-iframe');
+  try {
+    var doc = iframe.contentDocument;
+    if (!doc || !doc.head) return false;
+    if (doc.getElementById('l3m-util-style')) return true;
+    var style = doc.createElement('style');
+    style.id = 'l3m-util-style';
+    <?php
+      $accent   = $brand[$brand['button_accent']];
+      $accent_d = $brand[$brand['button_accent'] . '_d'];
+      $accent_t = $brand[$brand['button_accent'] . '_t'];
+    ?>
+    style.textContent = [
+      '#page-header, #main-header, .navbar, #page-footer, .main-footer, footer,',
+      '.breadcrumb-nav, .breadcrumb, #nav-drawer, .drawer-toggle, .skiplinks,',
+      '#fsmod-header, .secondary-navigation, .tertiary-navigation, .activity-navigation { display:none !important; }',
+      'html, body { background:#fff !important; }',
+      '#page, #page.container-fluid, #region-main, #region-main-box { padding:0 !important; margin:0 !important; max-width:none !important; }',
+      '.btn-primary, .bg-primary { background-color:<?= $accent ?> !important; border-color:<?= $accent ?> !important; }',
+      '.btn-primary:hover { background-color:<?= $accent_d ?> !important; border-color:<?= $accent_d ?> !important; }',
+      '.btn-secondary, .btn.btn-secondary { background:#fff !important; border-color:<?= $accent ?> !important; color:<?= $accent ?> !important; }',
+      '.text-primary { color:<?= $accent ?> !important; }',
+      '.badge-primary, .badge.bg-primary { background-color:<?= $brand['orange'] ?> !important; }',
+      '.list-group-item.active, .list-group-item:focus, .list-group-item:hover { background-color:<?= $accent_t ?> !important; color:<?= $accent ?> !important; }',
+      '#region-main h2 { display:none !important; }',
+      '.notification-area { border:none !important; font-family:inherit !important; }',
+      '.notification-area .control-area { background:#fff !important; }',
+      '.notification-area .content-item-container.notification { position:relative; display:block !important; padding:12px 16px !important; border-bottom:1px solid #E4E1D6 !important; transition:background .12s; }',
+      '.notification-area .content-item-container.notification:hover { background:#F7F6F1 !important; }',
+      '.notification-area .content-item-container.notification, .notification-area .content-item-container.notification .context-link, .notification-area .content-item-container.notification a { -webkit-tap-highlight-color:transparent !important; }',
+      '.notification-area .content-item-container.notification:focus, .notification-area .content-item-container.notification:active, .notification-area .content-item-container.notification .context-link:focus, .notification-area .content-item-container.notification .context-link:active, .notification-area .content-item-container.notification a:focus, .notification-area .content-item-container.notification a:active { background:<?= $accent_t ?> !important; outline:none !important; box-shadow:none !important; color:inherit !important; }',
+      '.notification-area .content-item-container.notification a, .notification-area .content-item-container.notification a:link, .notification-area .content-item-container.notification a:visited, .notification-area .content-item-container.notification .context-link { color:inherit !important; text-decoration:none !important; display:block !important; }',
+      '.notification-area .content-item-container.notification.unread { background:<?= $accent_t ?> !important; }',
+      '.notification-area .content-item-container.notification.unread::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:<?= $accent ?>; }',
+      '.notification-area .notification-message { font-size:13px !important; color:#24333C !important; line-height:1.4 !important; }',
+      '.notification-area .content-item-container.notification.unread .notification-message { font-weight:700 !important; }',
+      '.notification-area .content-item-container .timestamp { font-size:10.5px !important; color:#24333C !important; margin-top:4px !important; }',
+      '.notification-area .content-item-container .view-more { display:none !important; }',
+      '.notification-area .empty-text { color:#68767E !important; font-size:13px !important; font-style:italic !important; }',
+      '.notification-area .content-area .header { background:#fff !important; border-bottom:1px solid #E4E1D6 !important; }',
+      '.notification-area .content-area .header .subject-container { font-size:14.5px !important; font-weight:800 !important; color:#24333C !important; }',
+      '.notification-area .content-area .header .timestamp { font-size:11.5px !important; color:#68767E !important; }',
+      '.notification-area .content-area .toggle-mode .btn-link { color:<?= $accent ?> !important; font-weight:600 !important; background:transparent !important; -webkit-tap-highlight-color:transparent !important; }',
+      '.notification-area .content-area .toggle-mode .btn-link:hover, .notification-area .content-area .toggle-mode .btn-link:focus, .notification-area .content-area .toggle-mode .btn-link:active { color:<?= $accent_d ?> !important; background:transparent !important; outline:none !important; box-shadow:none !important; text-decoration:none !important; }',
+      '.notification-area .content-area .footer a { color:<?= $accent ?> !important; font-weight:700 !important; text-decoration:none !important; }',
+      '.notification-area .content-area [data-region="content"] a { color:<?= $accent ?> !important; }',
+      '.notification-area .content-area [data-region="content"] a:hover { color:<?= $accent_d ?> !important; }',
+      'html { scrollbar-color: <?= $accent ?> #f0f0f0 !important; }',
+      '::-webkit-scrollbar { width: 10px; }',
+      '::-webkit-scrollbar-track { background: #f0f0f0; }',
+      '::-webkit-scrollbar-thumb { background: <?= $accent ?> !important; border-radius: 6px; }',
+      '::-webkit-scrollbar-thumb:hover { background: <?= $accent_d ?> !important; }',
+    ].join('\n');
+    doc.head.appendChild(style);
+    try {
+      doc.defaultView.addEventListener('pagehide', function() {
+        iframe.classList.remove('ready');
+      });
+    } catch (e2) {}
+    return true;
+  } catch (e) { return false; }
+}
+
+function openUtilModal(kind) {
+  var cfg = UTIL_MODAL_URLS[kind];
+  if (!cfg) return;
+  document.getElementById('util-modal-title').textContent = cfg.title;
+  var iframe  = document.getElementById('util-modal-iframe');
+  var loading = document.getElementById('util-modal-loading');
+  iframe.classList.remove('ready');
+  loading.style.display = 'flex';
+  clearInterval(_utilPollT);
+  _utilModalNavCount = 0;
+  document.getElementById('util-modal-back').style.display = 'none';
+
+  var attempts = 0;
+  _utilPollT = setInterval(function() {
+    attempts++;
+    var onRealPage = false;
+    try { onRealPage = iframe.contentWindow.location.href.indexOf(cfg.match) !== -1; } catch (e) {}
+    var injected = utilModalInject();
+    if ((onRealPage && injected) || attempts > 250) {
+      clearInterval(_utilPollT);
+      iframe.classList.add('ready');
+      loading.style.display = 'none';
+    }
+  }, 20);
+  iframe.onload = function() {
+    utilModalInject();
+    iframe.classList.add('ready');
+    loading.style.display = 'none';
+    if (_utilModalGoingBack) {
+      _utilModalGoingBack = false;
+      _utilModalNavCount--;
+    } else {
+      _utilModalNavCount++;
+    }
+    document.getElementById('util-modal-back').style.display = _utilModalNavCount > 1 ? '' : 'none';
+  };
+
+  iframe.src = cfg.url;
+  document.getElementById('util-modal-bg').classList.add('on');
+}
+function utilModalGoBack() {
+  if (_utilModalNavCount <= 1) return;
+  var iframe = document.getElementById('util-modal-iframe');
+  _utilModalGoingBack = true;
+  try { iframe.contentWindow.history.back(); } catch (e) { _utilModalGoingBack = false; }
+}
+function closeUtilModal() {
+  clearInterval(_utilPollT);
+  document.getElementById('util-modal-bg').classList.remove('on');
+  var iframe = document.getElementById('util-modal-iframe');
+  iframe.classList.remove('ready');
+  iframe.src = 'about:blank';
+  document.getElementById('util-modal-loading').style.display = 'none';
+  document.getElementById('util-modal-back').style.display = 'none';
+  loadHeaderCounts();
 }
 
 /* ===== MESSAGERIE (modal, UI custom, vraie messagerie Moodle en arrière-plan) ===== */
@@ -3942,6 +4312,31 @@ function msgFilterList() {
   msgRenderContacts();
 }
 
+// Supprime la conversation ET le contact (voir action 'msg_delete_conversation'
+// cote PHP) : une suppression unique plutot que deux boutons distincts,
+// puisque les deux sont crees ensemble au premier message envoye (question
+// du 09/10/2026, icone de suppression par contact).
+function msgDeleteConversation(convid, uid, nom) {
+  if (!confirm('Supprimer la conversation avec ' + nom + ' ? Cette action est irréversible.')) return;
+  apiPost({ action: 'msg_delete_conversation', convid: convid, userid: uid })
+    .then(function(d) {
+      if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
+      _msg.list = _msg.list.filter(function(c) { return c.userid !== uid; });
+      if (_msg.activeUserId === uid) {
+        _msg.activeUserId = 0;
+        _msg.activeConvId = 0;
+        document.getElementById('msg-thread-head').style.display = 'none';
+        document.getElementById('msg-thread-input').style.display = 'none';
+        document.getElementById('msg-thread-empty').style.display = 'flex';
+        document.getElementById('msg-thread-body').innerHTML = '';
+      }
+      msgRenderContacts();
+      refreshMsgNavBadge();
+      toast('Conversation supprimée');
+    })
+    .catch(function() { toast('Erreur réseau'); });
+}
+
 function msgContactRow(c) {
   var active = (c.userid === _msg.activeUserId) ? ' on' : '';
   var unread = c.unreadcount > 0 ? ' unread' : '';
@@ -3960,6 +4355,8 @@ function msgContactRow(c) {
         '</div>' +
         '<div class="msg-contact-preview">' + preview + '</div>' +
       '</div>' +
+      '<button type="button" class="msg-contact-del" title="Supprimer ce contact et cette conversation" ' +
+        'onclick="event.stopPropagation();msgDeleteConversation(' + c.convid + ',' + c.userid + ',\'' + esc(c.name).replace(/'/g,"\\'") + '\')">🗑</button>' +
       (c.unreadcount > 0 ? '<span class="msg-contact-unread-badge">' + c.unreadcount + '</span>' : '') +
     '</div>'
   );
@@ -4366,6 +4763,20 @@ var _fmodMode = 'edit';
 var _fmodUid  = null;
 var _habColor = 'teal';
 
+// Cohortes suivies — checklist a partir de DATA.classes (deja filtre au
+// client de l'admin connecte), pre-coche selon l'assignation existante.
+function renderFmodCohortsList(selectedIds) {
+  selectedIds = selectedIds || [];
+  var box = document.getElementById('fmod-cohorts-list');
+  var classes = DATA.classes || [];
+  box.innerHTML = classes.length ? classes.map(function(c) {
+    var checked = selectedIds.indexOf(c.id) !== -1 ? ' checked' : '';
+    return '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12.5px;color:var(--ink);text-transform:none;letter-spacing:0;font-weight:500">' +
+      '<input type="checkbox" class="fmod-cohort-cb" value="' + c.id + '"' + checked + '> ' + esc(dispCohName(c.name)) +
+    '</label>';
+  }).join('') : '<span style="color:var(--muted);font-size:11.5px;font-style:italic">Aucune cohorte</span>';
+}
+
 function openAddFormateur() {
   _fmodMode = 'add'; _fmodUid = null;
   document.getElementById('fmod-title').textContent = 'Ajouter un intervenant';
@@ -4375,6 +4786,7 @@ function openAddFormateur() {
   document.getElementById('fmod-client-field').style.display = 'none';
   ['fmod-firstname','fmod-lastname','fmod-email','fmod-role','fmod-secteur'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('fmod-pedlead').checked = false;
+  renderFmodCohortsList([]);
   document.querySelector('input[name="fmod-type"][value="salarie"]').checked = true;
   document.querySelector('input[name="fmod-client"][value="' + (DATA.admin_client || 'lba') + '"]').checked = true;
   document.getElementById('modal-form-bg').classList.add('open');
@@ -4455,6 +4867,7 @@ function editFormateur(uid) {
   if (typeEl) typeEl.checked = true;
   var clientEl = document.querySelector('input[name="fmod-client"][value="' + (f.client || 'lba') + '"]');
   if (clientEl) clientEl.checked = true;
+  renderFmodCohortsList(f.cohorts || []);
   renderHabsList(uid);
   document.getElementById('modal-form-bg').classList.add('open');
   document.getElementById('fmod-role').focus();
@@ -4518,6 +4931,7 @@ function saveFormateurModal() {
   var type = typeEl ? typeEl.value : 'salarie';
   var clientEl = document.querySelector('input[name="fmod-client"]:checked');
   var client = clientEl ? clientEl.value : 'lba';
+  var cohorts = Array.prototype.map.call(document.querySelectorAll('.fmod-cohort-cb:checked'), function(cb){ return parseInt(cb.value, 10); });
   var btn = document.getElementById('fmod-save-btn');
   btn.disabled = true; btn.textContent = 'Enregistrement…';
 
@@ -4526,7 +4940,7 @@ function saveFormateurModal() {
     var ln = document.getElementById('fmod-lastname').value.trim();
     var em = document.getElementById('fmod-email').value.trim();
     if (!fn || !ln || !em) { btn.disabled = false; btn.textContent = 'Enregistrer'; toast('Tous les champs sont requis'); return; }
-    apiPost({ action: 'add_intervenant', firstname: fn, lastname: ln, email: em, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0 })
+    apiPost({ action: 'add_intervenant', firstname: fn, lastname: ln, email: em, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0, cohorts: JSON.stringify(cohorts) })
       .then(r => {
         btn.disabled = false; btn.textContent = 'Enregistrer';
         if (r.ok) {
@@ -4545,13 +4959,13 @@ function saveFormateurModal() {
       })
       .catch(() => { btn.disabled = false; btn.textContent = 'Enregistrer'; toast('Erreur réseau'); });
   } else {
-    apiPost({ action: 'save_formateur_meta', userid: _fmodUid, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0 })
+    apiPost({ action: 'save_formateur_meta', userid: _fmodUid, role_label: role_label, type: type, client: client, secteur: secteur, is_ped_lead: is_ped_lead ? 1 : 0, cohorts: JSON.stringify(cohorts) })
       .then(r => {
         btn.disabled = false; btn.textContent = 'Enregistrer';
         if (r.ok) {
           var f = DATA.formateurs.find(x => x.id === _fmodUid);
           if (f) {
-            f.role_label = role_label; f.type = type; f.client = client; f.secteur = secteur; f.is_ped_lead = is_ped_lead;
+            f.role_label = role_label; f.type = type; f.client = client; f.secteur = secteur; f.is_ped_lead = is_ped_lead; f.cohorts = cohorts;
             f.capacity = type === 'vacataire' ? 20 : 28;
             f.pct_load = f.capacity > 0 ? Math.min(100, Math.round((f.hours_avg || 0) / f.capacity * 100)) : 0;
           }
@@ -5069,10 +5483,19 @@ function renderStudentsTable() {
     var rowCls = s.needs_action ? ' style="background:rgba(214,69,69,.04)"' : '';
     var inactivePill = s.inactive ? ' <span class="chip c-ko">inactif &gt;7j</span>' : '';
 
-    // Sous-groupe
+    // Sous-groupe — editable (etait un simple badge calcule par ordre
+    // alphabetique, ne reflete pas une vraie repartition, question du
+    // 22/10/2026).
     var cohObj = DATA.classes.find(c => c.id === s.cohort_id);
     var letter = cohObj ? classLetter(cohObj.name) : '';
-    var sgLabel = (letter && s.sg_num) ? '<span class="sgchip">' + letter + s.sg_num + '</span>' : '<span style="color:var(--muted)">—</span>';
+    var sgMax = parseInt((DATA.ecsr_params || {}).sous_groupes_nb, 10) || 4;
+    var sgLabel = letter
+      ? '<select data-uid="' + s.id + '" onchange="assignSubgroup(this)" style="font-size:12px;padding:4px 6px">' +
+          Array.from({length: sgMax}, function(_, i) { return i + 1; }).map(function(n) {
+            return '<option value="' + n + '"' + (s.sg_num === n ? ' selected' : '') + '>' + letter + n + '</option>';
+          }).join('') +
+        '</select>'
+      : '<span style="color:var(--muted)">—</span>';
 
     // Classe (affectation)
     var classSelectHtml = '<select data-uid="' + s.id + '" data-current="' + (s.cohort_id || 0) + '" onchange="assignToClass(this)" style="font-size:12px;padding:4px 6px">' +
@@ -5243,7 +5666,7 @@ function liaAffectOnClassChange() {
   document.getElementById('lia-type').value  = e ? e.type : 'visio';
   document.getElementById('lia-h').value     = e ? e.h : 2;
   document.getElementById('lia-label').value = e ? e.label : '';
-  document.getElementById('lia-course').value = e && e.courseid ? e.courseid : '';
+  document.getElementById('lia-seq').value = e && e.seqid ? e.seqid : '';
   document.getElementById('lia-delete-btn').style.display = e ? '' : 'none';
 }
 
@@ -5261,8 +5684,8 @@ function openLiaAffectModal(pid, w, coh) {
     LIA_PEOPLE.map(function(p) { return '<option value="'+p.id+'"'+(pid===p.id?' selected':'')+'>'+esc(p.nom)+'</option>'; }).join('');
   document.getElementById('lia-coh').innerHTML = '<option value="">Choisir</option>' +
     LIA_COHORTS.map(function(c) { return '<option value="'+c.L+'"'+(defaultCoh===c.L?' selected':'')+'>'+TERM_CLASSE+' '+esc(c.L)+'</option>'; }).join('');
-  document.getElementById('lia-course').innerHTML = '<option value="">—</option>' +
-    (DATA.courses_list || []).map(function(c) { return '<option value="'+c.id+'">'+esc(c.shortname)+' – '+esc(c.fullname)+'</option>'; }).join('');
+  document.getElementById('lia-seq').innerHTML = '<option value="">—</option>' +
+    (DATA.seq_options || []).map(function(s) { return '<option value="'+s.id+'">'+esc(s.titre)+'</option>'; }).join('');
 
   document.getElementById('lia-title').textContent = 'Affectation manuelle : S' + w;
   document.getElementById('lia-sub').textContent = 'Semaine du ' + liaFmtDate(w);
@@ -5274,11 +5697,11 @@ function closeLiaAffectModal() {
   document.getElementById('modal-lia-bg').classList.remove('on');
 }
 
-function liaApplyLocalOverride(pid, w, coh, type, label, h) {
+function liaApplyLocalOverride(pid, w, coh, type, label, h, seqid) {
   if (!LIA_PLAN.grid[pid]) LIA_PLAN.grid[pid] = {};
   if (!LIA_PLAN.grid[pid][w]) LIA_PLAN.grid[pid][w] = [];
   LIA_PLAN.grid[pid][w] = LIA_PLAN.grid[pid][w].filter(function(e) { return e.coh !== coh; });
-  if (h > 0) LIA_PLAN.grid[pid][w].push({ coh: coh, type: type, label: label, h: h, fix: true, manual: true });
+  if (h > 0) LIA_PLAN.grid[pid][w].push({ coh: coh, type: type, label: label, h: h, fix: true, manual: true, seqid: seqid || '' });
 }
 
 function saveLiaAffect() {
@@ -5287,18 +5710,18 @@ function saveLiaAffect() {
   var type     = document.getElementById('lia-type').value;
   var h        = parseFloat(document.getElementById('lia-h').value);
   var label    = document.getElementById('lia-label').value.trim();
-  var courseid = parseInt(document.getElementById('lia-course').value) || 0;
+  var seqid    = document.getElementById('lia-seq').value || '';
   var w        = _liaAffectW;
 
   if (!pid || !coh || !label || !(h > 0)) { alert('Remplir le formateur, la ' + TERM_CLASSE_LC + ', le module et un nombre d\'heures.'); return; }
 
   var btn = document.querySelector('#modal-lia .btn.primary');
   btn.disabled = true; btn.textContent = 'Enregistrement...';
-  apiPost({ action: 'save_lia_override', pid: pid, w: w, coh: coh, type: type, label: label, h: h, courseid: courseid })
+  apiPost({ action: 'save_lia_override', pid: pid, w: w, coh: coh, type: type, label: label, h: h, seqid: seqid })
     .then(function(d) {
       btn.disabled = false; btn.textContent = 'Enregistrer';
       if (!d.ok) { alert('Erreur : ' + (d.msg || 'inconnue')); return; }
-      liaApplyLocalOverride(pid, w, coh, type, label, h);
+      liaApplyLocalOverride(pid, w, coh, type, label, h, seqid);
       closeLiaAffectModal();
       liaRender();
       toast('Affectation enregistrée');
@@ -5364,6 +5787,20 @@ function saveNote(input) {
   if (s && s.note === note) return;
   apiPost({ action: 'save_note', userid: uid, note: note })
     .then(r => { if (r.ok && s) s.note = note; });
+}
+
+function assignSubgroup(sel) {
+  var uid = parseInt(sel.dataset.uid, 10);
+  var sg  = parseInt(sel.value, 10) || 0;
+  apiPost({ action: 'save_subgroup', userid: uid, subgroup: sg })
+    .then(function(r) {
+      if (r.ok) {
+        var s = DATA.students.find(function(x){ return x.id === uid; });
+        if (s) s.sg_num = sg;
+        toast('Sous-groupe mis à jour');
+      } else { toast('Erreur : ' + (r.msg || '?')); }
+    })
+    .catch(function() { toast('Erreur réseau'); });
 }
 
 function assignToClass(sel) {
@@ -6123,9 +6560,20 @@ var _docsSelectedUser = null;
 function docsInitStudentList() {
   var list = document.getElementById('docs-slist');
   if (!list) return;
+  // Repere visuel "a verifier" sur le/les eleve(s) dont le badge "Documents"
+  // compte un document deja signe par l'eleve mais pas encore marque verifie
+  // par l'admin — sans ca, le badge "1" dans le menu ne disait pas QUI
+  // (question du 20/10/2026).
+  var toVerify = DATA.pending_signed_doc_userids || [];
+  var search = document.getElementById('docs-search');
+  var q = search ? search.value.toLowerCase() : '';
   list.innerHTML = DATA.students.map(function(s) {
-    return '<div class="docs-si" data-uid="' + s.id + '" onclick="docsSelectStudent(' + s.id + ',this)">' +
-      '<div class="docs-si-name">' + esc(s.nom) + '</div>' +
+    var flag = toVerify.indexOf(s.id) !== -1
+      ? '<span style="float:right;color:var(--red);font-size:11px;font-weight:700">⚠ À vérifier</span>' : '';
+    var visible = (!q || s.nom.toLowerCase().includes(q)) ? '' : ' style="display:none"';
+    var selected = _docsSelectedUser && _docsSelectedUser.id === s.id ? ' on' : '';
+    return '<div class="docs-si' + selected + '" data-uid="' + s.id + '" onclick="docsSelectStudent(' + s.id + ',this)"' + visible + '>' +
+      '<div class="docs-si-name">' + esc(s.nom) + flag + '</div>' +
       '<div class="docs-si-sub">' + (s.cohort_name ? esc(dispCohName(s.cohort_name)) : 'Sans ' + TERM_CLASSE_LC) + '</div>' +
     '</div>';
   }).join('');
@@ -6168,7 +6616,9 @@ function refreshDocsNavBadge() {
   apiPost({action: 'count_pending_signed_docs'}).then(function(d) {
     if (!d.ok) return;
     DATA.pending_signed_docs = d.count;
+    DATA.pending_signed_doc_userids = d.userids || [];
     updateDocsNavBadge();
+    docsInitStudentList(); // reaffiche le repere "a verifier" dans la liste
   });
 }
 
@@ -6421,6 +6871,9 @@ function docsRenderRight(docs) {
       html += '<span class="doc-adm-status ' + sClass + '">' + sIcon + esc(doc.status_label || sDefaultLbl[doc.status_type] || doc.status_type) + '</span>';
       if (doc.signed_uploaded_at > 0) {
         html += '<a class="btn mini" style="color:var(--teal-d);border-color:var(--teal)" href="' + WWWROOT + '/l3m_doc_file.php?docid=' + doc.id + '&type=signed" target="_blank" rel="noopener">📎 Document signé reçu</a>';
+        if (doc.status_type === 'pending') {
+          html += '<button class="btn mini primary" onclick="docsAckSigned(' + doc.id + ')">✓ Marquer comme vérifié</button>';
+        }
       }
       html += '<button class="btn mini ghost doc-adm-edit-btn" onclick="docsEditDoc(' + JSON.stringify(doc).replace(/"/g,'&quot;') + ')" title="Modifier" aria-label="Modifier">&#9998;&#65039;</button>';
       html += '<button class="btn mini ghost" style="color:var(--red)" onclick="docsDeleteDoc(' + doc.id + ')">✕</button>';
@@ -6432,6 +6885,9 @@ function docsRenderRight(docs) {
 
 function docsOpenForm(doc) {
   if (!_docsSelectedUser) { toast('Sélectionnez d\'abord un élève.'); return; }
+  var saveBtn = document.getElementById('docs-save-btn');
+  saveBtn.disabled = false;
+  saveBtn.textContent = 'Enregistrer';
   document.getElementById('docs-form-title').textContent = doc ? 'Modifier le document' : 'Nouveau document';
   document.getElementById('docs-form-eleve').textContent = 'Élève : ' + _docsSelectedUser.nom;
   document.getElementById('df-docid').value   = doc ? doc.id : 0;
@@ -6474,6 +6930,12 @@ function docsStatusPreset() {
 }
 
 function docsSaveForm() {
+  var btn = document.getElementById('docs-save-btn');
+  // Sans ce garde-fou, un double/triple-clic (l'utilisateur ne voit aucun
+  // retour immediat pendant l'appel reseau) declenchait autant d'appels
+  // "save_doc" independants, donc autant de documents crees (signale le
+  // 19/10/2026 : "un seul clic entraine l'ajout de trois documents").
+  if (btn.disabled) return;
   var title = document.getElementById('df-title').value.trim();
   if (!title) { toast('Le titre est obligatoire.'); return; }
   var params = {
@@ -6488,8 +6950,10 @@ function docsSaveForm() {
     is_blocking: document.getElementById('df-blocking').checked ? 1 : 0,
     blocking_msg: document.getElementById('df-bmsg').value,
   };
+  btn.disabled = true;
+  btn.textContent = 'Enregistrement…';
   apiPost(params).then(function(d) {
-    if (!d.ok) { toast('Erreur: ' + (d.msg || '')); return; }
+    if (!d.ok) { toast('Erreur: ' + (d.msg || '')); btn.disabled = false; btn.textContent = 'Enregistrer'; return; }
     var docid = d.doc.id;
     var file = document.getElementById('df-file').files[0];
     if (!file) {
@@ -6510,7 +6974,13 @@ function docsSaveForm() {
       refreshDocsNavBadge();
       if (!u.ok) { toast('Document enregistré, mais échec de l\'upload : ' + (u.msg || '')); return; }
       toast('Document et fichier enregistrés.');
+    }).catch(function() {
+      btn.disabled = false; btn.textContent = 'Enregistrer';
+      toast('Document enregistré, mais erreur réseau pendant l\'upload du fichier.');
     });
+  }).catch(function() {
+    btn.disabled = false; btn.textContent = 'Enregistrer';
+    toast('Erreur réseau, réessaie.');
   });
 }
 
@@ -6521,6 +6991,15 @@ function docsDeleteDoc(docid) {
     docsLoadDocs(_docsSelectedUser.id);
     refreshDocsNavBadge();
     toast('Document supprimé.');
+  });
+}
+
+function docsAckSigned(docid) {
+  apiPost({action: 'ack_signed_doc', docid: docid}).then(function(d) {
+    if (!d.ok) { toast('Erreur : ' + (d.msg || '?')); return; }
+    docsLoadDocs(_docsSelectedUser.id);
+    refreshDocsNavBadge();
+    toast('Document marqué comme vérifié.');
   });
 }
 
@@ -6539,6 +7018,7 @@ document.addEventListener('DOMContentLoaded', function() {
   updateLeadsNavBadge();
   updateMsgNavBadge();
   renderBetaTesters();
+  loadHeaderCounts();
 });
 
 /* ===== Testeurs bêta ===== */
@@ -6652,8 +7132,8 @@ function removeBetaTester(uid) {
     </div>
     <label>Module / intitulé</label>
     <input type="text" id="lia-label" placeholder="Ingénierie et construction de séance">
-    <label>Module (optionnel)</label>
-    <select id="lia-course"><option value="">—</option></select>
+    <label>Séquence (optionnel)</label>
+    <select id="lia-seq"><option value="">—</option></select>
     <div class="lia-foot">
       <button class="btn danger-btn" id="lia-delete-btn" onclick="deleteLiaAffect()" style="display:none">Supprimer cette affectation</button>
       <button class="btn ghost" onclick="closeLiaAffectModal()">Annuler</button>

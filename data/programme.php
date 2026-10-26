@@ -10,6 +10,7 @@
 require_once(__DIR__ . '/../config.php');
 require_once(__DIR__ . '/l3m_branding.php');
 require_once(__DIR__ . '/l3m_referentiel.php');
+require_once(__DIR__ . '/lia_engine.php'); // l3m_send_notification() — alerte eleves au deverrouillage force
 require_login();
 
 // Restructuration Sequences/Programme generalisee a tous les comptes le
@@ -29,6 +30,14 @@ $is_formateur = $DB->record_exists_sql(
 // au Responsable pedagogique — un formateur simple garde Programme en
 // lecture seule (voir l3m_is_ped_lead() dans l3m_branding.php).
 $is_ped_lead = l3m_is_ped_lead($USER->id) || is_siteadmin();
+
+// Journal d'activite (voir l3m_log_activity() dans l3m_branding.php) —
+// alimente la feuille d'emargement LBA (emargement.php), seulement pour un
+// eleve reel consultant la page (pas un formateur) et pas sur les appels
+// AJAX de cette meme page (deja comptes a l'ouverture).
+if ($is_student && $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    l3m_log_activity($USER->id, 'Programme');
+}
 
 $brand = l3m_get_branding_for_user($USER->id);
 $backurl = $is_student ? '/espace-eleve.php' : '/espace-formateur.php';
@@ -53,11 +62,126 @@ $highlight = optional_param('highlight', '', PARAM_TEXT);
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && optional_param('action', '', PARAM_ALPHANUMEXT) === 'set_override') {
     require_sesskey();
     header('Content-Type: application/json');
-    if (!$is_ped_lead) { echo json_encode(['ok' => false, 'msg' => 'Réservé au responsable pédagogique.']); exit; }
     $dbid  = required_param('dbid', PARAM_ALPHANUMEXT);
+    // Le Responsable pedagogique peut tout deverrouiller ; un formateur
+    // simple seulement s'il a un acces "edition" (voir Pedagogie) sur LA
+    // Sequence qui porte ce dbid precisement (question du 07/10/2026).
+    if (!$is_ped_lead && !l3m_seq_formateur_can_edit_dbid($USER->id, $dbid)) {
+        echo json_encode(['ok' => false, 'msg' => 'Réservé au responsable pédagogique ou à un formateur autorisé sur cette séquence.']); exit;
+    }
     $value = required_param('value', PARAM_ALPHA);
     if (!in_array($value, ['auto', 'open', 'locked'], true)) { echo json_encode(['ok' => false, 'msg' => 'Valeur invalide.']); exit; }
+    $old_override_sov = l3m_seq_doc_override($dbid);
     l3m_seq_doc_set_override($dbid, $value === 'auto' ? null : $value);
+
+    // Alerte les eleves concernes uniquement au passage en "Forcer
+    // disponible" (pas a chaque reglage) — plus de cours Moodle a surveiller
+    // pour savoir qu'un support vient de s'ouvrir, question du 07/10/2026.
+    if ($value === 'open' && $old_override_sov !== 'open') {
+        $student_roleid_sov = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+        if ($student_roleid_sov) {
+            $label_sov = l3m_resolve_dbid_label($dbid);
+            $students_sov = $DB->get_records_sql(
+                "SELECT DISTINCT u.id
+                 FROM {user} u
+                 JOIN {role_assignments} ra ON ra.userid = u.id
+                 JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50
+                 WHERE ra.roleid = :rid AND u.deleted = 0",
+                ['rid' => $student_roleid_sov]
+            );
+            foreach ($students_sov as $s_sov) {
+                if ($DB->record_exists('local_l3madmin_seq_state', ['userid' => (int)$s_sov->id, 'sequenceid' => $dbid, 'completed' => 1])) continue;
+                l3m_send_notification(
+                    $USER->id, (int)$s_sov->id, 'Support débloqué : ' . $label_sov,
+                    'Le support "' . $label_sov . '" a été débloqué dans Programme.',
+                    $CFG->wwwroot . '/espace-eleve.php#cours', 'Voir Programme'
+                );
+            }
+        }
+    }
+
+    echo json_encode(['ok' => true]);
+    exit;
+}
+
+// ── Upload direct d'un PDF pour une Unite sans Etape (voir l3m_unite_doc_*()
+//    dans l3m_referentiel.php) — reserve au Responsable pedagogique, question
+//    du 07/10/2026 "ajouter le pdf ici dans Programme". ──
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && optional_param('action', '', PARAM_ALPHANUMEXT) === 'upload_unite_doc') {
+    require_sesskey();
+    header('Content-Type: application/json');
+    if (!$is_ped_lead) { echo json_encode(['ok' => false, 'msg' => 'Réservé au responsable pédagogique.']); exit; }
+    $code = required_param('code', PARAM_TEXT);
+    if (!l3m_referentiel_unite($code)) { echo json_encode(['ok' => false, 'msg' => 'Unité inconnue.']); exit; }
+    if (empty($_FILES['document']) || $_FILES['document']['error'] !== UPLOAD_ERR_OK) {
+        echo json_encode(['ok' => false, 'msg' => 'Fichier manquant ou erreur d\'upload.']); exit;
+    }
+    $tmp = $_FILES['document']['tmp_name'];
+    if ($_FILES['document']['size'] > 20 * 1024 * 1024) {
+        echo json_encode(['ok' => false, 'msg' => 'Fichier trop volumineux (20 Mo max).']); exit;
+    }
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $mime = finfo_file($finfo, $tmp);
+    finfo_close($finfo);
+    if ($mime !== 'application/pdf') {
+        echo json_encode(['ok' => false, 'msg' => 'Seuls les fichiers PDF sont acceptés.']); exit;
+    }
+    $dir = l3m_unite_doc_dir();
+    if (!is_dir($dir)) { mkdir($dir, 0755, true); }
+    if (!move_uploaded_file($tmp, l3m_unite_doc_path($code))) {
+        echo json_encode(['ok' => false, 'msg' => 'Échec de l\'enregistrement du fichier.']); exit;
+    }
+    echo json_encode(['ok' => true]);
+    exit;
+}
+
+// ── Telechargement/visualisation d'un document direct par Unite (voir
+//    ci-dessus) : meme verification de deverrouillage que pour un document
+//    d'Etape, le formateur/Responsable pedagogique garde toujours acces pour
+//    controle. "mode=view" (bouton "Visualiser" du Responsable pedagogique)
+//    ouvre le PDF dans l'onglet au lieu de forcer un telechargement —
+//    question du 09/10/2026 "3 boutons : visualisation, edition, suppression". ──
+if (optional_param('action', '', PARAM_ALPHANUMEXT) === 'download_unite_doc') {
+    $code = required_param('code', PARAM_TEXT);
+    $mode = optional_param('mode', 'attachment', PARAM_ALPHA);
+    $path = l3m_unite_doc_path($code);
+    if (!is_file($path)) {
+        http_response_code(404);
+        header('Content-Type: text/plain');
+        echo "Ce support n'est pas encore disponible.";
+        exit;
+    }
+    if (!$is_formateur) {
+        $st = l3m_prog_statut_unite($code, $USER->id, false);
+        if ($st['etat'] !== 'deverrouille') {
+            http_response_code(403);
+            header('Content-Type: text/plain');
+            echo ($st['override'] ?? null) === 'locked'
+                ? "Ce support a ete verrouille par le formateur."
+                : "Ce support n'est pas encore disponible.";
+            exit;
+        }
+    }
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: ' . ($mode === 'view' ? 'inline' : 'attachment') . '; filename="' . basename($path) . '"');
+    header('Content-Length: ' . filesize($path));
+    readfile($path);
+    exit;
+}
+
+// ── Suppression d'un document direct par Unite — reserve au Responsable
+//    pedagogique, question du 09/10/2026. Remet l'Unite a l'etat "Pas encore
+//    programmee" et efface l'eventuel override (sinon une nouvelle
+//    Unite re-uploadee plus tard heriterait a tort d'un ancien
+//    deverrouillage force). ──
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && optional_param('action', '', PARAM_ALPHANUMEXT) === 'delete_unite_doc') {
+    require_sesskey();
+    header('Content-Type: application/json');
+    if (!$is_ped_lead) { echo json_encode(['ok' => false, 'msg' => 'Réservé au responsable pédagogique.']); exit; }
+    $code = required_param('code', PARAM_TEXT);
+    $path = l3m_unite_doc_path($code);
+    if (is_file($path)) { unlink($path); }
+    l3m_seq_doc_set_override(l3m_unite_doc_dbid($code), null);
     echo json_encode(['ok' => true]);
     exit;
 }
@@ -86,6 +210,7 @@ foreach ($matieres as $mid => $matiere) {
                 'etat' => $st['etat'], 'label' => $st['label'],
                 'seqid' => $st['seqid'] ?? null, 'etapeid' => $st['etapeid'] ?? null,
                 'dbid' => $st['dbid'] ?? null, 'override' => $st['override'] ?? null,
+                'direct' => $st['direct'] ?? false,
             ];
         }
         $sm_nodes[] = [
@@ -198,6 +323,16 @@ foreach ($matieres as $mid => $matiere) {
   .pill-available{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--radius-pill);font-size:13px;font-weight:600;background:var(--amber-bg);color:var(--amber);margin-right:8px;}
   .row-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
   .ovr-select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:11.5px;font-family:inherit;background:#fff;color:var(--ink);}
+  /* Actions en icones seules, groupees en haut a droite de la carte (meme
+     esprit que les icones crayon/poubelle des cartes "Intervenants" cote
+     admin-lba.php) — remplace les boutons texte empiles qui alourdissaient
+     la carte, question du 12/10/2026. */
+  .card-icon-actions{position:absolute;top:16px;right:16px;display:flex;gap:4px;align-items:center;}
+  .card.has-icon-actions .card-id,.card.has-icon-actions .card-title{padding-right:84px;}
+  .card-icon-btn{border:none;background:none;color:var(--ink-soft);cursor:pointer;font-size:15px;padding:5px;line-height:1;border-radius:7px;transition:background .12s,color .12s;}
+  .card-icon-btn:hover{background:var(--bg);color:var(--ink);}
+  .card-icon-btn.danger:hover{background:#FBE7E7;color:#D64545;}
+  .card-icon-btn:disabled{opacity:.5;cursor:default;}
 
   .chevron{position:absolute;top:20px;right:18px;color:#C7CCD4;font-size:18px;}
 
@@ -406,22 +541,6 @@ function buildCard(node){
     pill.innerHTML = (unlocked ? '🔓 ' : '🔒 ') + esc(node.label || '');
     row.appendChild(pill);
 
-    // "Faire l'étape" vit desormais exclusivement dans "Sequences" (voir
-    // progNodeCardHtml() dans espace-eleve.php/formateur.php) — Programme ne
-    // sert plus qu'a consulter/telecharger le support une fois l'etape
-    // terminee ailleurs, les deux sont relies par le meme statut de
-    // deverrouillage (question du 01/10/2026 : "Faire l'étape" deplace vers
-    // Sequences, Programme ne debloque que les PDF).
-    if(unlocked){
-      const dl = document.createElement('a');
-      dl.className = 'btn btn-download';
-      dl.href = PLAYERURL + '?action=download_document&seq=' + node.seqid + '&etape=' + node.etapeid;
-      dl.target = '_blank';
-      dl.innerHTML = '⬇ Télécharger';
-      dl.onclick = (e) => { e.stopPropagation(); };
-      row.appendChild(dl);
-    }
-
     if(IS_PED_LEAD && node.dbid){
       const sel = document.createElement('select');
       sel.className = 'ovr-select';
@@ -438,6 +557,78 @@ function buildCard(node){
     }
 
     card.appendChild(row);
+
+    // Actions en icones seules, groupees en haut a droite de la carte (voir
+    // ".card-icon-actions" plus haut) — remplace les boutons texte "Faire
+    // l'étape" (deplace vers Sequences, question du 01/10/2026), puis
+    // "Visualiser"/"Télécharger"/"Remplacer"/"Supprimer" en texte empile
+    // (question du 12/10/2026, "icones comme la carte Intervenants"). Une
+    // Unite "direct" (sans Etape QCM, voir l3m_unite_doc_*()) peut en plus
+    // etre deposee/remplacee/supprimee par le Responsable pedagogique.
+    const icons = document.createElement('div');
+    icons.className = 'card-icon-actions';
+    icons.onclick = (e) => e.stopPropagation();
+
+    function iconBtn(tag, icon, label) {
+      const el = document.createElement(tag);
+      if (tag === 'button') el.type = 'button';
+      el.className = 'card-icon-btn';
+      el.innerHTML = icon;
+      el.title = label;
+      el.setAttribute('aria-label', label);
+      return el;
+    }
+
+    const baseUrl = node.direct
+      ? (PAGEURL + '?action=download_unite_doc&code=' + encodeURIComponent(node.code))
+      : (PLAYERURL + '?action=download_document&seq=' + node.seqid + '&etape=' + node.etapeid);
+    const canPedLeadPreview = IS_PED_LEAD && node.direct && node.dbid;
+
+    // "Visualiser" : un seul bouton, qu'il vienne du deverrouillage normal
+    // (tout le monde) ou de l'acces de controle du Responsable pedagogique
+    // quand c'est encore verrouille pour les eleves (jamais les deux a la
+    // fois, evite le doublon vu sur la carte "Continuum éducatif").
+    if (unlocked || canPedLeadPreview) {
+      const view = iconBtn('a', '👁', 'Visualiser');
+      view.href = baseUrl + '&mode=view';
+      view.target = '_blank';
+      icons.appendChild(view);
+    }
+    // "Télécharger" : meme logique que "Visualiser" ci-dessus — le
+    // Responsable pedagogique doit pouvoir le recuperer pour controle meme
+    // si le support est encore verrouille pour les eleves (question du
+    // 12/10/2026, "je ne vois pas l'icone télécharger").
+    if (unlocked || canPedLeadPreview) {
+      const dl = iconBtn('a', '⬇', 'Télécharger');
+      dl.href = baseUrl;
+      dl.target = '_blank';
+      icons.appendChild(dl);
+    }
+
+    if (IS_PED_LEAD && node.direct) {
+      const fileInp = document.createElement('input');
+      fileInp.type = 'file';
+      fileInp.accept = 'application/pdf';
+      fileInp.style.display = 'none';
+      icons.appendChild(fileInp);
+
+      const triggerBtn = iconBtn('button', node.dbid ? '✏️' : '📤', node.dbid ? 'Remplacer le PDF' : 'Déposer le PDF');
+      triggerBtn.onclick = () => fileInp.click();
+      fileInp.onchange = () => uploadUniteDoc(node.code, fileInp, triggerBtn);
+      icons.appendChild(triggerBtn);
+
+      if (node.dbid) {
+        const delBtn = iconBtn('button', '🗑', 'Supprimer le PDF');
+        delBtn.classList.add('danger');
+        delBtn.onclick = () => deleteUniteDoc(node.code, delBtn);
+        icons.appendChild(delBtn);
+      }
+    }
+
+    if (icons.children.length) {
+      card.classList.add('has-icon-actions');
+      card.appendChild(icons);
+    }
   }
 
   return card;
@@ -458,6 +649,41 @@ function setOverride(sel) {
   fetch(PAGEURL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     .then(function(r){ return r.json(); })
     .then(function(r){ if (r.ok) location.reload(); else { alert(r.msg || 'Erreur'); sel.disabled = false; } });
+}
+
+function uploadUniteDoc(code, fileInp, btn) {
+  if (!fileInp.files || !fileInp.files[0]) { alert('Choisissez un fichier PDF d\'abord.'); return; }
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'upload_unite_doc');
+  fd.append('code', code);
+  fd.append('document', fileInp.files[0]);
+  btn.disabled = true;
+  var label = btn.textContent;
+  btn.textContent = 'Envoi…';
+  fetch(PAGEURL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (r.ok) { location.reload(); }
+      else { alert(r.msg || 'Erreur'); btn.disabled = false; btn.textContent = label; }
+    })
+    .catch(function(){ alert('Erreur réseau.'); btn.disabled = false; btn.textContent = label; });
+}
+
+function deleteUniteDoc(code, btn) {
+  if (!confirm('Supprimer ce document ? Cette action est irréversible.')) return;
+  var fd = new FormData();
+  fd.append('sesskey', SESSKEY);
+  fd.append('action', 'delete_unite_doc');
+  fd.append('code', code);
+  btn.disabled = true;
+  fetch(PAGEURL, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    .then(function(r){ return r.json(); })
+    .then(function(r){
+      if (r.ok) { location.reload(); }
+      else { alert(r.msg || 'Erreur'); btn.disabled = false; }
+    })
+    .catch(function(){ alert('Erreur réseau.'); btn.disabled = false; });
 }
 
 render();

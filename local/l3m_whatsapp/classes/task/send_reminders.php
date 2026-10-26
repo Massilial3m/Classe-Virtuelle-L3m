@@ -75,7 +75,9 @@ class send_reminders extends \core\task\scheduled_task {
             'message' => $message,
         ]);
 
-        $ch = curl_init('http://151.80.61.51:3001/send');
+        // Reseau Docker interne (voir observer.php::BOT_URL) plutot que l'IP
+        // publique, pour ne pas exposer ce service sur internet.
+        $ch = curl_init('http://l3m_whatsapp:3001/send');
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $payload,

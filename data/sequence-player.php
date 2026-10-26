@@ -100,6 +100,21 @@ if (!$content) {
     die('Contenu de sequence introuvable.');
 }
 
+// Journal d'activite (voir l3m_log_activity() dans l3m_branding.php) —
+// alimente la feuille d'emargement (cote LBA, voir emargement.php) a la fois
+// a l'ouverture de la page ET sur chaque interaction reelle plus bas (POST
+// save_state/save_qcm/save_ecrit/save_collecte), pour que la session
+// reconstruite couvre toute la duree passee sur l'etape, pas seulement son
+// premier instant. Seulement pour un eleve reel (pas un formateur qui
+// previsualise), sinon la feuille compterait du temps de preparation
+// pedagogique comme du temps de formation.
+$student_roleid_log = (int)$DB->get_field('role', 'id', ['shortname' => 'student']);
+$is_student_log = $student_roleid_log && $DB->record_exists('role_assignments', ['userid' => $USER->id, 'roleid' => $student_roleid_log]);
+$etape_label_log = (l3m_seq_sequences()[$seqid]['titre'] ?? ('Séquence ' . $seqid)) . ' · ' . ($etape['titre'] ?: 'Partie ' . $etapeid);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST' && $is_student_log) {
+    l3m_log_activity($USER->id, $etape_label_log);
+}
+
 // ── Etat de progression (table local_l3madmin_seq_state) ──
 function l3m_seq_get_state($userid, $sequenceid) {
     global $DB;
@@ -171,27 +186,85 @@ function l3m_seq_find_qcm_question($content, $qid) {
     return [null, null];
 }
 
-// Notifie une liste ciblee de formateurs (par identifiant Moodle), plutot
-// que tous les editingteacher du client — accord du 16/09/2026 : Sebastien
-// (referent pedagogique reel) + le compte de test formateur de Latifa, pour
-// que les alertes de test n'atterrissent plus chez tous les formateurs LBA.
-// A remplacer par une vraie notion de "formateur assigne a la sequence" le
-// jour ou elle existera.
-function l3m_seq_alert_recipients_usernames(): array {
-    return ['sebastien.delahaye', 'latifa.faida3'];
+// Notifie tous les Responsables pedagogiques du MEME client que l'eleve
+// (pas tous les editingteacher du client) — remplace le 19/10/2026 l'ancienne
+// liste d'identifiants codee en dur (accord du 16/09/2026 : Sebastien + le
+// compte de test formateur de Latifa), devenue obsolete des que ce compte de
+// test a ete supprime (plus aucune alerte ne partait que vers Sebastien).
+function l3m_seq_alert_recipients_userids(string $client): array {
+    global $DB;
+    $meta = json_decode(get_config('local_l3madmin', 'formateur_meta') ?: '{}', true) ?: [];
+    $out = [];
+    foreach ($meta as $uid => $m) {
+        if (empty($m['is_ped_lead'])) continue;
+        $uid = (int)$uid;
+        if (!$DB->record_exists('user', ['id' => $uid, 'deleted' => 0])) continue;
+        if (l3m_get_user_client($uid) !== $client) continue;
+        $out[] = $uid;
+    }
+    return $out;
 }
 function l3m_seq_notify_formateurs_alert(int $studentid, string $etapetitre, int $seqid, int $etapeid) {
     global $DB, $CFG;
     $student = $DB->get_record('user', ['id' => $studentid]);
     if (!$student) return;
     $resultsurl = $CFG->wwwroot . '/sequence-results.php?seq=' . $seqid . '&etape=' . $etapeid;
-    foreach (l3m_seq_alert_recipients_usernames() as $username) {
-        $teacher = $DB->get_record('user', ['username' => $username, 'deleted' => 0]);
-        if (!$teacher) continue; // compte pas (encore) present sur cette instance, on ignore silencieusement
+    $client = l3m_get_user_client($studentid);
+    foreach (l3m_seq_alert_recipients_userids($client) as $teacherid) {
         l3m_send_notification(
-            $studentid, (int)$teacher->id,
-            'Alerte séquence : seuil non atteint',
+            $studentid, $teacherid,
+            'Alerte séquence : ' . fullname($student) . ' — seuil non atteint sur « ' . $etapetitre . ' »',
             fullname($student) . " n'a pas atteint le seuil requis après remédiation sur « " . $etapetitre . " ».",
+            $resultsurl, 'Voir les résultats'
+        );
+    }
+}
+
+// Alerte formateur des l'ENTREE dans le 2e passage du QCM (donc echec au 1er)
+// — distincte de l3m_seq_notify_formateurs_alert() ci-dessus, qui n'alerte
+// que si le 2e passage echoue AUSSI. Question du 22/10/2026 : le formateur
+// veut etre prevenu des qu'un eleve doit repasser un QCM, pas seulement s'il
+// echoue deux fois de suite.
+// Comptes ayant reellement acces a admin-lba.php pour le client donne : les
+// managers (role systeme) de ce client, PLUS les site admins (globaux, tous
+// clients confondus — memes conditions que l'auth d'admin-lba.php, voir le
+// meme principe dans espace-eleve.php pour "Document signé reçu").
+function l3m_admin_recipients_userids(string $client): array {
+    global $DB;
+    $out = [];
+    $manager_roleid = $DB->get_field('role', 'id', ['shortname' => 'manager']);
+    if ($manager_roleid) {
+        $ctx_sys = context_system::instance();
+        $managers = $DB->get_records_sql(
+            "SELECT DISTINCT ra.userid FROM {role_assignments} ra WHERE ra.roleid = :rid AND ra.contextid = :ctxid",
+            ['rid' => $manager_roleid, 'ctxid' => $ctx_sys->id]
+        );
+        foreach ($managers as $m) {
+            $uid = (int)$m->userid;
+            if (l3m_get_user_client($uid) === $client) $out[] = $uid;
+        }
+    }
+    foreach (get_admins() as $admin) { $out[] = (int)$admin->id; }
+    return $out;
+}
+
+function l3m_seq_notify_formateurs_retake(int $studentid, string $etapetitre, int $seqid, int $etapeid) {
+    global $DB, $CFG;
+    $student = $DB->get_record('user', ['id' => $studentid]);
+    if (!$student) return;
+    $resultsurl = $CFG->wwwroot . '/sequence-results.php?seq=' . $seqid . '&etape=' . $etapeid;
+    $client = l3m_get_user_client($studentid);
+    // Formateurs responsables pedagogiques ET admin (question du 22/10/2026 :
+    // "je veux que admin aussi recois ça") — union dedupliquee des deux listes.
+    $recipients = array_unique(array_merge(
+        l3m_seq_alert_recipients_userids($client),
+        l3m_admin_recipients_userids($client)
+    ));
+    foreach ($recipients as $teacherid) {
+        l3m_send_notification(
+            $studentid, $teacherid,
+            'QCM à repasser : ' . fullname($student) . ' — sur « ' . $etapetitre . ' »',
+            fullname($student) . " n'a pas atteint le seuil requis au 1er passage et repasse le QCM sur « " . $etapetitre . " ».",
             $resultsurl, 'Voir les résultats'
         );
     }
@@ -202,6 +275,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_sesskey();
     $action = optional_param('action', '', PARAM_ALPHANUMEXT);
     header('Content-Type: application/json');
+
+    // Voir le commentaire plus haut : seules les actions qui traduisent une
+    // vraie interaction de l'eleve avec le contenu comptent pour l'emargement
+    // (pas les simples requetes de lecture comme get_remediation_summary).
+    if ($is_student_log && in_array($action, ['save_state', 'save_qcm', 'save_ecrit', 'save_collecte'], true)) {
+        l3m_log_activity($USER->id, $etape_label_log);
+    }
 
     if ($action === 'save_ecrit') {
         $screenid = required_param('screenid', PARAM_TEXT);
@@ -234,6 +314,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $answer   = required_param('answer', PARAM_TEXT);
         // Aucune IA, aucune correction : stockage tel quel (voir 4.8 dans le storyboard).
         l3m_seq_save_answer($USER->id, $sequenceid, $screenid . '_' . $champid, 'collecte', $answer, null, null, null, 1);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    // ── Verrou anti-triche du QCM — empeche d'ouvrir le MEME bloc QCM dans un
+    //    second onglet/navigateur/appareil pendant qu'il est deja en cours
+    //    (question du 16/10/2026 : l'eleve ne doit pas pouvoir aller chercher
+    //    la reponse ailleurs pendant un QCM note). Verrou par (userid,
+    //    sequenceid, blockcle), identifie par un jeton aleatoire genere cote
+    //    client a chaque ouverture d'onglet (sessionStorage, jamais partage
+    //    entre onglets). Expire tout seul si plus de rafraichi depuis
+    //    QCM_LOCK_STALE_S (onglet ferme/plante) pour ne jamais bloquer
+    //    definitivement un eleve de bonne foi.
+    if ($action === 'qcm_lock_acquire' || $action === 'qcm_lock_heartbeat') {
+        $blockcle = required_param('blockcle', PARAM_ALPHANUMEXT);
+        $token    = required_param('token', PARAM_ALPHANUM);
+        $now = time();
+        $stale_s = 60;
+        $row = $DB->get_record('local_l3madmin_qcm_lock', ['userid' => $USER->id, 'sequenceid' => $sequenceid, 'blockcle' => $blockcle]);
+        if ($row && $row->token !== $token && ($now - $row->timemodified) < $stale_s) {
+            echo json_encode(['ok' => true, 'locked' => true]);
+            exit;
+        }
+        if ($row) {
+            $row->token = $token;
+            $row->timemodified = $now;
+            $DB->update_record('local_l3madmin_qcm_lock', $row);
+        } else {
+            $DB->insert_record('local_l3madmin_qcm_lock', (object)[
+                'userid' => $USER->id, 'sequenceid' => $sequenceid, 'blockcle' => $blockcle,
+                'token' => $token, 'timecreated' => $now, 'timemodified' => $now,
+            ]);
+        }
+        echo json_encode(['ok' => true, 'locked' => false]);
+        exit;
+    }
+
+    if ($action === 'qcm_lock_release') {
+        $blockcle = required_param('blockcle', PARAM_ALPHANUMEXT);
+        $token    = required_param('token', PARAM_ALPHANUM);
+        // Ne libere que si c'est bien CE jeton qui detient le verrou (sinon
+        // un onglet perime pourrait liberer le verrou d'un onglet actif).
+        $DB->delete_records('local_l3madmin_qcm_lock', ['userid' => $USER->id, 'sequenceid' => $sequenceid, 'blockcle' => $blockcle, 'token' => $token]);
         echo json_encode(['ok' => true]);
         exit;
     }
@@ -333,6 +456,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    // Alerte formateur : le stagiaire ENTAME un 2e passage du QCM (echec au
+    // 1er) — question du 22/10/2026. Suffixe "_retake" sur le bloccle pour ne
+    // pas entrer en collision avec l'alerte d'echec final ci-dessus, qui
+    // partage la meme cle unique (userid, sequenceid, bloccle).
+    if ($action === 'report_qcm_retake') {
+        $blocCle = required_param('blocCle', PARAM_ALPHANUMEXT);
+        $retakeCle = $blocCle . '_retake';
+        $already = $DB->record_exists('local_l3madmin_seq_alerts', ['userid' => $USER->id, 'sequenceid' => $sequenceid, 'bloccle' => $retakeCle]);
+        if (!$already) {
+            $DB->insert_record('local_l3madmin_seq_alerts', (object)[
+                'userid' => $USER->id, 'sequenceid' => $sequenceid, 'bloccle' => $retakeCle,
+                'resolved' => 0, 'timecreated' => time(),
+            ]);
+            l3m_seq_notify_formateurs_retake($USER->id, $content['titre'] ?? $sequenceid, $seqid, $etapeid);
+        }
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
     if ($action === 'save_state') {
         $fields = [];
         foreach (['currentscreen', 'phase3passed', 'phase6passed', 'completed'] as $f) {
@@ -361,6 +503,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // l'equipe pedagogique, identique pour tous, qui se debloque une fois
 // l'etape terminee — voir doc_expli.pdf et l3m_referentiel.php.
 if (optional_param('action', '', PARAM_ALPHANUMEXT) === 'download_document') {
+    // "mode=view" (bouton "Visualiser" cote eleve/formateur) ouvre le PDF
+    // dans l'onglet au lieu de forcer un telechargement — question du
+    // 09/10/2026, meme mecanisme que l'action 'download_unite_doc' de
+    // programme.php.
+    $mode = optional_param('mode', 'attachment', PARAM_ALPHA);
     if (!l3m_seq_document_deverrouille_pour($USER->id, $sequenceid, $seqid, $etapeid)) {
         $verrouille_manuel = l3m_seq_doc_override($sequenceid) === 'locked';
         http_response_code(403);
@@ -378,7 +525,7 @@ if (optional_param('action', '', PARAM_ALPHANUMEXT) === 'download_document') {
         exit;
     }
     header('Content-Type: application/pdf');
-    header('Content-Disposition: attachment; filename="' . basename($docpath) . '"');
+    header('Content-Disposition: ' . ($mode === 'view' ? 'inline' : 'attachment') . '; filename="' . basename($docpath) . '"');
     header('Content-Length: ' . filesize($docpath));
     readfile($docpath);
     exit;
@@ -449,7 +596,10 @@ textarea { width:100%; min-height:70px; border:1px solid var(--line); border-rad
 .btn:disabled { opacity:.4; cursor:not-allowed; }
 .btn.ghost { background:var(--card); color:var(--teal-d); border:1.5px solid var(--teal); }
 .footer-nav { display:flex; justify-content:flex-end; gap:10px; margin-top:8px; }
-.progress { font-size:11px; color:var(--muted); margin-bottom:6px; }
+.progress { font-size:11px; color:var(--muted); margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.back-btn { padding:6px 14px; font-size:12px; }
+.back-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; background:#FFF3DC; border:1px solid #F2D98C; border-radius:10px; padding:10px 14px; margin-bottom:14px; font-size:13px; color:var(--ink); }
+.back-banner .btn { padding:8px 16px; font-size:12px; white-space:nowrap; }
 .opt { display:flex; align-items:flex-start; gap:8px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; cursor:pointer; }
 .opt.sel { border-color:var(--teal); background:var(--teal-t); }
 .opt.correcte { border-color:#2E9488; background:#E3F2EF; }
@@ -488,6 +638,10 @@ var SESSKEY   = <?= json_encode($sesskey) ?>;
 var SEQIDSTR  = <?= json_encode($sequenceid) ?>; // id cote base (ex. "seq2_etape1"), pour debug uniquement
 var SEQNUM    = <?= json_encode($seqid) ?>;
 var ETAPENUM  = <?= json_encode($etapeid) ?>;
+// Partie suivante de la meme Sequence (null si c'est la derniere) — permet
+// d'enchainer automatiquement les Parties d'une Sequence sans repasser par
+// "Mes sequences" (voir l3m_seq_etape_suivante_id()).
+var NEXT_ETAPE_ID = <?= json_encode(l3m_seq_etape_suivante_id($seqid, $etapeid)) ?>;
 var PAGEURL   = <?= json_encode($CFG->wwwroot . '/sequence-player.php') ?>;
 // Racine du site — pour construire l'URL des images d'ecran (voir
 // sequence-editor.php, champ "Image" : chemin relatif du type
@@ -578,30 +732,158 @@ function buildSteps() {
 var STEPS = buildSteps();
 function stepIndexById(id) { for (var i=0;i<STEPS.length;i++) if (STEPS[i].id === id) return i; return 0; }
 var CUR = stepIndexById(STATE.currentscreen);
+// Ecran reellement le plus avance (progression persistee) — distinct de CUR
+// des qu'on consulte un ecran precedent (goBack()) : CUR bouge pour
+// l'affichage, MAXCUR ne bouge que par une vraie progression (goTo()).
+var MAXCUR = CUR;
 
-// Progression a sens unique : une fois un ecran atteint (ex. le debut du
-// QCM), impossible d'y revenir pour relire l'exposition ou re-changer une
-// reponse deja validee — goTo() refuse tout deplacement vers un index
-// anterieur a CUR. Sans danger pour les usages existants : tous les appels
-// reels (goNext(), scoreContinue(), goToRemediationSummary(), startRetake())
-// avancent uniquement, jamais de retour arriere legitime dans ce lecteur.
+// Progression a sens unique pour la VRAIE avancee (ex. impossible de
+// re-changer une reponse QCM deja validee) — goTo() refuse tout deplacement
+// anterieur a MAXCUR et ne sert qu'aux appels qui avancent reellement
+// (goNext(), scoreContinue(), goToRemediationSummary(), startRetake()).
+// La consultation en lecture seule d'un ecran deja passe passe par goBack()
+// plus bas, qui ne touche jamais MAXCUR ni l'etat sauvegarde.
 function goTo(idx) {
-  if (idx < CUR) return;
+  if (idx < MAXCUR) return;
   CUR = idx;
+  MAXCUR = idx;
   var step = STEPS[CUR];
   apiPost({ action: 'save_state', currentscreen: step.id });
   render();
 }
-function goNext() { goTo(Math.min(CUR + 1, STEPS.length - 1)); }
+// Types d'ecran jamais consultables en arriere : une fois le QCM entame, la
+// reponse est definitive et on ne doit jamais pouvoir revoir/retraverser ces
+// ecrans (seule exception a "retour en arriere possible partout ailleurs").
+var ECRANS_SANS_RETOUR = ['qcm', 'qcm_score', 'remediation_summary'];
+function peutRevenirA(idx) {
+  return idx >= 0 && ECRANS_SANS_RETOUR.indexOf(STEPS[idx].type) === -1;
+}
+function goNext() {
+  // Bouton "Continuer"/"Valider la suite" clique depuis un ecran consulte en
+  // arriere (CUR < MAXCUR) : on ne ré-avance jamais depuis cette position
+  // artificielle, on ramene simplement l'eleve a son vrai ecran actuel.
+  if (CUR < MAXCUR) { CUR = MAXCUR; render(); return; }
+  if (CUR >= STEPS.length - 1) {
+    // Dernier ecran de cette Partie : les Parties avec un bloc "cloture"
+    // redige proposent deja "Continuer vers la partie suivante" sur l'ecran
+    // "document" qui suit (voir render()) — mais une Partie dont le contenu
+    // n'a pas encore ce bloc (voir l3m_seq_new_bloc('cloture',...)) se
+    // terminait sur un simple "Continuer" qui ne menait nulle part, sans
+    // jamais marquer la Partie terminee. Sans ce filet, l'enchainement
+    // automatique ET la progression affichee cote admin ne fonctionnaient que
+    // pour les Parties "completes" (question du 20/10/2026 et du 22/10/2026).
+    finishEtape();
+    return;
+  }
+  goTo(Math.min(CUR + 1, STEPS.length - 1));
+}
+function goBack() {
+  if (!peutRevenirA(CUR) || !peutRevenirA(CUR - 1)) return;
+  CUR--;
+  render();
+}
+function goToCurrent() {
+  CUR = MAXCUR;
+  render();
+}
+
+function goToNextEtape() {
+  if (!NEXT_ETAPE_ID) return;
+  location.href = PAGEURL + '?seq=' + SEQNUM + '&etape=' + NEXT_ETAPE_ID;
+}
+
+// ── Verrou anti-triche du QCM (voir l'action "qcm_lock_acquire" cote
+//    serveur) : empeche d'avoir le MEME bloc QCM ouvert dans un second
+//    onglet/navigateur/appareil pendant qu'il est en cours. Le jeton vit en
+//    sessionStorage (jamais partage entre onglets, mais survit a un simple
+//    F5 du meme onglet) pour distinguer "je recharge ma page" de "je l'ouvre
+//    ailleurs". ──
+var QCM_ZONE_TYPES = ['qcm', 'qcm_score', 'remediation_summary'];
+var qcmLock = { blockcle: null, token: null, timer: null, blocked: false };
+function qcmTokenFor(blocCle) {
+  var key = 'l3m_qcm_token_' + SEQIDSTR + '_' + blocCle;
+  var t;
+  try { t = sessionStorage.getItem(key); } catch (e) { t = null; }
+  if (!t) {
+    t = 'tk' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { sessionStorage.setItem(key, t); } catch (e) {}
+  }
+  return t;
+}
+function stopQcmHeartbeat() {
+  if (qcmLock.timer) { clearInterval(qcmLock.timer); qcmLock.timer = null; }
+}
+function releaseQcmLock() {
+  if (qcmLock.blockcle && qcmLock.token && !qcmLock.blocked) {
+    apiPost({ action: 'qcm_lock_release', blockcle: qcmLock.blockcle, token: qcmLock.token });
+  }
+  stopQcmHeartbeat();
+  qcmLock = { blockcle: null, token: null, timer: null, blocked: false };
+}
+function ensureQcmLock(blocCle) {
+  var token = qcmTokenFor(blocCle);
+  apiPost({ action: 'qcm_lock_acquire', blockcle: blocCle, token: token }).then(function(r) {
+    qcmLock.blockcle = blocCle;
+    qcmLock.token = token;
+    qcmLock.blocked = !!r.locked;
+    if (!qcmLock.blocked) {
+      stopQcmHeartbeat();
+      qcmLock.timer = setInterval(function() {
+        apiPost({ action: 'qcm_lock_heartbeat', blockcle: blocCle, token: token }).then(function(hr) {
+          if (hr.locked && !qcmLock.blocked) { qcmLock.blocked = true; stopQcmHeartbeat(); render(); }
+        });
+      }, 20000);
+    }
+    render();
+  }).catch(function() {
+    // Reseau indisponible : ne jamais bloquer l'eleve par precaution, le
+    // prochain heartbeat/retry tentera a nouveau.
+    qcmLock.blockcle = blocCle; qcmLock.token = token; qcmLock.blocked = false;
+    render();
+  });
+}
+function retryQcmLock() {
+  qcmLock.blockcle = null; // force une nouvelle tentative au prochain render()
+  render();
+}
+function renderQcmLockedOverlay() {
+  return '<div class="card" style="text-align:center">' +
+    '<h2>🔒 QCM déjà en cours ailleurs</h2>' +
+    '<p class="texte">Ce QCM est déjà ouvert dans un autre onglet, un autre navigateur ou un autre appareil. ' +
+    'Ferme-le avant de continuer ici — ou patiente une minute si cet autre onglet a été fermé par erreur.</p>' +
+    '<div class="footer-nav" style="justify-content:center"><button class="btn" onclick="retryQcmLock()">Réessayer</button></div>' +
+    '</div>';
+}
 
 function render() {
   var step = STEPS[CUR];
   var app = document.getElementById('app');
+
+  if (step.blocCle && QCM_ZONE_TYPES.indexOf(step.type) !== -1) {
+    if (qcmLock.blockcle !== step.blocCle) {
+      app.innerHTML = '<div class="card" style="text-align:center"><p class="texte">Vérification…</p></div>';
+      ensureQcmLock(step.blocCle);
+      return;
+    }
+    if (qcmLock.blocked) {
+      app.innerHTML = renderQcmLockedOverlay();
+      updateNavLock(step);
+      return;
+    }
+  } else if (qcmLock.blockcle) {
+    releaseQcmLock();
+  }
   var pct = Math.round((CUR / (STEPS.length - 1)) * 100);
   // "Écran" (pas "Étape") : depuis le 15/09/2026, "Étape" designe une portion
   // d'une Sequence (voir l3m_referentiel.php) — reutiliser le meme mot ici
   // pour le numero d'ecran affiche pretait a confusion (question du 16/09).
-  var html = '<div class="progress">Écran ' + (CUR+1) + ' / ' + STEPS.length + '</div>';
+  var html = '<div class="progress"><span>Écran ' + (CUR+1) + ' / ' + STEPS.length + '</span>' +
+    (peutRevenirA(CUR) && peutRevenirA(CUR - 1) ? '<button type="button" class="btn ghost back-btn" onclick="goBack()">← Écran précédent</button>' : '') +
+    '</div>';
+  if (CUR < MAXCUR) {
+    html += '<div class="back-banner">👁 Écran déjà vu — consultation seule, tes réponses ne peuvent plus être modifiées.' +
+      '<button type="button" class="btn" onclick="goToCurrent()">Revenir à mon écran actuel →</button></div>';
+  }
 
   if (step.type === 'ouverture') {
     html += '<div class="card"><span class="badge-nonnote">Introduction</span><h2>' + esc(step.data.titre) + '</h2>' +
@@ -629,16 +911,21 @@ function render() {
     html += renderRemediationSummary(step);
 
   } else if (step.type === 'cloture') {
-    html += '<div class="card" style="text-align:center"><h2>🎉 Séquence terminée</h2><p class="texte">' + esc(step.data.texte) + '</p>' +
+    var clotureTitre = NEXT_ETAPE_ID ? '✅ Partie terminée' : '🎉 Séquence terminée';
+    html += '<div class="card" style="text-align:center"><h2>' + clotureTitre + '</h2><p class="texte">' + esc(step.data.texte) + '</p>' +
       '<div class="footer-nav" style="justify-content:center"><button class="btn" onclick="goNext()">Voir mon support</button></div></div>';
     apiPost({ action: 'save_state', completed: 1 });
 
   } else if (step.type === 'document') {
+    var suite = NEXT_ETAPE_ID
+      ? '<button class="btn" onclick="goToNextEtape()">Continuer vers la partie suivante →</button>'
+      : '';
     if (DOC_DISPONIBLE) {
       html += '<div class="card" style="text-align:center"><p class="texte">🔓 Ton support « ' + esc(step.data.document.nom_affiche) + ' » vient de se débloquer.</p>' +
-        '<div class="footer-nav" style="justify-content:center"><a class="btn" href="' + PAGEURL + '?action=download_document&seq=' + SEQNUM + '&etape=' + ETAPENUM + '" target="_blank">⬇ Télécharger le support</a></div></div>';
+        '<div class="footer-nav" style="justify-content:center"><a class="btn ghost" href="' + PAGEURL + '?action=download_document&seq=' + SEQNUM + '&etape=' + ETAPENUM + '" target="_blank">⬇ Télécharger le support</a>' + suite + '</div></div>';
     } else {
-      html += '<div class="card" style="text-align:center"><p class="texte">Ton support « ' + esc(step.data.document.nom_affiche) + ' » est en cours de préparation par l\'équipe pédagogique. Il apparaîtra ici et dans « Programme » dès qu\'il sera disponible.</p></div>';
+      html += '<div class="card" style="text-align:center"><p class="texte">Ton support « ' + esc(step.data.document.nom_affiche) + ' » est en cours de préparation par l\'équipe pédagogique. Il apparaîtra ici et dans « Programme » dès qu\'il sera disponible.</p>' +
+        (suite ? '<div class="footer-nav" style="justify-content:center">' + suite + '</div>' : '') + '</div>';
     }
   }
 
@@ -703,7 +990,7 @@ function renderExposition(step) {
     var draftAttr = saved ? '' : ' oninput="_draftAnswers[' + jsStr(qid) + ']=this.value"';
     html += '<div class="question-lbl">' + esc(q.question) + '</div>' +
       '<textarea id="ta_' + qid + '" placeholder="Ta réponse…" ' + (saved ? 'disabled' : '') + draftAttr + '>' + esc(saved ? saved.answertext : (_draftAnswers[qid] || '')) + '</textarea>' +
-      (!saved ? '<div style="margin-top:6px"><button class="btn ghost" onclick="submitEcrit(' + jsStr(qid) + ', ' + jsStr(q.question) + ', ' + jsStr(q.reponse_reference || '') + ')">Valider</button></div>' : '') +
+      (!saved ? '<div style="margin-top:6px"><button class="btn ghost" id="btn_' + qid + '" onclick="submitEcrit(' + jsStr(qid) + ', ' + jsStr(q.question) + ', ' + jsStr(q.reponse_reference || '') + ', this)">Valider</button></div>' : '') +
       '<div class="echo-box' + (saved && saved.aiecho ? ' on' : '') + '" id="echo_' + qid + '">' + (saved ? esc(saved.aiecho) : '') + '</div>' +
       (q.reponse_reference && saved ? '<div class="ref-box on">✓ ' + esc(q.reponse_reference) + '</div>' : '');
   });
@@ -720,15 +1007,23 @@ function renderExposition(step) {
   }
 
   var allAnswered = questions.every(function(q){ return !!ANSWERS[q.id_question || step.id]; });
-  html += '<div class="footer-nav"><button class="btn" ' + (allAnswered ? '' : 'disabled') + ' onclick="goNext()">Continuer</button></div></div>';
+  var label = (CUR >= STEPS.length - 1 && NEXT_ETAPE_ID) ? 'Continuer vers la partie suivante →' : 'Continuer';
+  html += '<div class="footer-nav"><button class="btn" ' + (allAnswered ? '' : 'disabled') + ' onclick="goNext()">' + label + '</button></div></div>';
   return html;
 }
 
-function submitEcrit(qid, question, reponse_reference) {
+function submitEcrit(qid, question, reponse_reference, btn) {
+  // L'appel serveur interroge Gemini pour l'echo (voir action "save_ecrit")
+  // et peut prendre plusieurs secondes : sans ce garde-fou, le bouton restait
+  // cliquable pendant l'attente (aucun retour visuel), ce qui poussait a
+  // cliquer plusieurs fois et declenchait autant d'appels redondants.
+  if (btn.disabled) return;
   var ta = document.getElementById('ta_' + qid);
   var answer = ta.value.trim();
   if (!answer) { alert('Écris une réponse avant de valider.'); ta.focus(); return; }
   ta.disabled = true;
+  btn.disabled = true;
+  btn.textContent = 'Validation…';
   apiPost({ action: 'save_ecrit', screenid: qid, question: question, answer: answer, reponse_reference: reponse_reference }).then(function(r) {
     ANSWERS[qid] = { answertext: answer, aiecho: r.echo || '' };
     delete _draftAnswers[qid];
@@ -738,6 +1033,8 @@ function submitEcrit(qid, question, reponse_reference) {
     // erreur) : on redonne la main pour reessayer plutot que de rester
     // coince sans aucune action possible.
     ta.disabled = false;
+    btn.disabled = false;
+    btn.textContent = 'Valider';
     alert("Une erreur est survenue, réessaie.");
   });
 }
@@ -850,7 +1147,20 @@ function renderQcmScore(step) {
   html += '</div>';
   return html;
 }
+// Marque la Partie terminee et enchaine vers la suivante si elle existe —
+// utilise a la fois par goNext() (dernier ecran reellement atteint) et par
+// scoreContinue() ci-dessous quand "nextafter" ne pointe nulle part de valide
+// (bloc suivant corrompu/incomplet dans le contenu source : nextBlocFirstId()
+// renvoie alors null, et stepIndexById(null) retombait silencieusement sur
+// l'ecran 0, bloque par le garde-fou anti-retour-arriere de goTo() — question
+// du 22/10/2026 : "il a fini la sequance 3 mais sa progression reste a 0").
+function finishEtape() {
+  apiPost({ action: 'save_state', completed: 1 });
+  if (NEXT_ETAPE_ID) { goToNextEtape(); }
+}
+
 function scoreContinue(step) {
+  if (!step.nextafter) { finishEtape(); return; }
   goTo(stepIndexById(step.nextafter));
 }
 function reportRemediationFailureAndContinue(step) {
@@ -899,6 +1209,7 @@ function goToRemediationSummary(scoreStep) {
   goNext();
 }
 function startRetake(blocCle) {
+  apiPost({ action: 'report_qcm_retake', blocCle: blocCle }); // alerte formateur, voir l3m_seq_notify_formateurs_retake()
   var bloc = findBlocByCle(blocCle);
   var bi = blocIndexByCle(blocCle);
   var insertAt = CUR;

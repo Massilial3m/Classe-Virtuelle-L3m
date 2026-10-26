@@ -179,41 +179,66 @@ function l3m_progseq_resolve_module(string $ref): ?array {
     return null;
 }
 
-// Liste aplatie de toutes les Etapes du registre QCM existant (voir
-// "Registre des Sequences" plus haut, l3m_seq_sequences()) — sert au picker
-// "Etape liee" de sequences-config.php : une Sequence de "Mes modules" porte
-// AU PLUS UNE Etape, dont le statut pilote l'UNIQUE bouton "Faire l'etape"
-// affiche a cote de son titre (question du 01/10/2026 : un seul bouton par
-// Sequence, pas un par module).
+// Liste des Sequences du registre QCM existant (voir "Registre des
+// Sequences" plus haut, l3m_seq_sequences()) — sert au picker "Contenu du
+// Programme lie" de sequences-config.php : une Sequence de "Mes modules" lie
+// desormais une Sequence de Programme ENTIERE (toutes ses Parties
+// s'enchainent automatiquement, voir l3m_progseq_etape_resolue()), pas une
+// seule Partie figee — question du 19/10/2026 : un formateur devait "choisir
+// quelle partie" au lieu de lier la Sequence entiere.
 function l3m_progseq_etapes_picker(): array {
     $out = [];
     foreach (l3m_seq_sequences() as $seqid => $seq) {
-        foreach (($seq['etapes'] ?? []) as $etapeid => $etape) {
-            $out[] = [
-                'seqid' => (int)$seqid, 'etapeid' => (int)$etapeid,
-                'label' => 'Séquence ' . $seqid . ' · Étape ' . $etapeid . ' · ' . ($etape['titre'] ?: '(sans titre)'),
-                'publiee' => l3m_seq_etape_est_publiee($etape),
-            ];
-        }
+        if (empty($seq['etapes'])) continue;
+        $out[] = [
+            'seqid' => (int)$seqid,
+            // "Programme · " en prefixe : cette Sequence de positionnement
+            // (voir sequence-select.php) et la Sequence de planning ("Mes
+            // modules", voir sequences-config.php) partagent le meme mot
+            // "Sequence" dans leur titre libre tape par le Responsable
+            // pedagogique — sans ce prefixe, un formateur confondait les deux
+            // dans ce menu (question du 19/10/2026).
+            'label' => 'Programme · ' . ($seq['titre'] ?: 'Séquence ' . $seqid),
+            'publiee' => !empty(l3m_seq_etapes_publiees_ids($seq)),
+        ];
     }
     return $out;
 }
 
-// Statut de l'Etape liee a une Sequence de "Mes modules", pour le userid
-// donne — null si aucune Etape n'est liee, si elle a ete supprimee depuis,
-// ou si elle n'est pas publiee (un eleve ne doit jamais voir une Etape en
-// brouillon, meme a travers "Sequences" — meme regle que l3m_prog_statut_unite()
-// dans programme.php).
+// Partie a utiliser MAINTENANT, pour un eleve precis, d'une Sequence de
+// Programme liee a une Sequence de "Mes modules" — la premiere Partie
+// publiee non terminee (reprise), ou la premiere si tout est termine (voir
+// l3m_seq_sequence_etape_a_lancer(), meme logique que sequence-select.php).
+// Remplace l'ancien champ fige 'etape_etapeid' : une Sequence de "Mes
+// modules" ne pointe plus qu'une Sequence de Programme entiere
+// ('etape_seqid'), jamais une Partie precise.
+function l3m_progseq_etape_resolue(int $prog_seqid, int $userid): ?array {
+    $seq = l3m_seq_sequences()[$prog_seqid] ?? null;
+    if (!$seq) return null;
+    $lancer = l3m_seq_sequence_etape_a_lancer($userid, $prog_seqid, $seq);
+    if (!$lancer) return null;
+    return ['seqid' => $prog_seqid, 'etapeid' => $lancer['etapeid']];
+}
+
+// Statut de la Sequence de Programme liee a une Sequence de "Mes modules",
+// pour le userid donne — null si aucune n'est liee, si elle a ete supprimee
+// depuis, ou si elle n'a aucune Partie publiee (un eleve ne doit jamais voir
+// une Partie en brouillon, meme a travers "Sequences" — meme regle que
+// l3m_prog_statut_unite() dans programme.php).
 // 'dbid'/'override' : meme mecanisme de deverrouillage manuel (global, pas
 // par eleve) que le <select> du Responsable pedagogique dans programme.php,
 // pour pouvoir le piloter aussi depuis "Sequences" (question du 02/10/2026).
-// 'completed' utilise directement l3m_seq_document_deverrouille_pour() — la
-// MEME fonction que Programme pour decider si le support est disponible —
-// pour qu'un deblocage manuel ('open') fasse aussi disparaitre le bouton
-// "Commencer la sequence" ici, pas seulement debloquer le PDF la-bas
-// (question du 02/10/2026 : les deux doivent rester coherents).
-function l3m_progseq_etape_status(?int $seqid, ?int $etapeid, int $userid): ?array {
-    if (!$seqid || !$etapeid) return null;
+// 'completed' utilise directement l3m_seq_document_deverrouille_pour() sur la
+// Partie resolue — vrai seulement quand TOUTES les Parties sont terminees,
+// puisque la resolution retombe sur la 1ere Partie (forcement terminee dans
+// ce cas) une fois qu'il n'en reste aucune en cours (question du 02/10/2026 :
+// un deblocage manuel ('open') doit aussi faire disparaitre le bouton
+// "Commencer la sequence" ici, pas seulement debloquer le PDF la-bas).
+function l3m_progseq_etape_status(?int $prog_seqid, int $userid): ?array {
+    if (!$prog_seqid) return null;
+    $resolu = l3m_progseq_etape_resolue($prog_seqid, $userid);
+    if (!$resolu) return null;
+    $seqid = $resolu['seqid']; $etapeid = $resolu['etapeid'];
     $etape = l3m_seq_etape($seqid, $etapeid);
     if (!$etape || !l3m_seq_etape_est_publiee($etape)) return null;
     $dbid = l3m_seq_db_id($seqid, $etapeid);
@@ -260,7 +285,7 @@ function l3m_progseq_for_display(int $userid): array {
                 $action = $cv_url ? ['kind' => 'cv', 'url' => $cv_url] : null;
             }
         } else {
-            $etape = l3m_progseq_etape_status($seq['etape_seqid'] ?? null, $seq['etape_etapeid'] ?? null, $userid);
+            $etape = l3m_progseq_etape_status($seq['etape_seqid'] ?? null, $userid);
             $action = $etape ? array_merge(['kind' => 'etape'], $etape) : null;
         }
         $out[] = [
@@ -342,6 +367,54 @@ function l3m_seq_etape_est_publiee(array $etape): bool {
     return ($etape['statut'] ?? 'brouillon') === 'publiee';
 }
 
+// Identifiants d'etapes publiees d'une Sequence, tries par numero croissant
+// — ordre d'enchainement cote eleve (voir sequence-select.php/sequence-player.php,
+// une Sequence a plusieurs Etapes s'enchaine desormais automatiquement en un
+// seul parcours plutot que d'afficher un bouton "Lancer" par Etape).
+function l3m_seq_etapes_publiees_ids(array $seq): array {
+    $etapes = $seq['etapes'] ?? [];
+    $ids = array_map('intval', array_keys($etapes));
+    sort($ids);
+    return array_values(array_filter($ids, fn($id) => l3m_seq_etape_est_publiee($etapes[$id])));
+}
+
+// Etape suivante (numero superieur, publiee) dans la meme Sequence, ou null
+// si $etapeid est la derniere etape publiee — utilise par sequence-player.php
+// pour proposer "Continuer vers la partie suivante" en fin d'etape au lieu
+// de s'arreter.
+function l3m_seq_etape_suivante_id(int $seqid, int $etapeid): ?int {
+    $sequences = l3m_seq_sequences();
+    $seq = $sequences[$seqid] ?? null;
+    if (!$seq) return null;
+    foreach (l3m_seq_etapes_publiees_ids($seq) as $id) {
+        if ($id > $etapeid) return $id;
+    }
+    return null;
+}
+
+// Sur quelle Etape pointer l'unique bouton de lancement d'une Sequence cote
+// eleve : la premiere Etape publiee non terminee (reprise), ou la premiere
+// Etape publiee si tout est termine (pour "Revoir"). Retourne null si la
+// Sequence n'a aucune Etape publiee (rien a lancer).
+function l3m_seq_sequence_etape_a_lancer(int $userid, int $seqid, array $seq): ?array {
+    global $DB;
+    $publiees = l3m_seq_etapes_publiees_ids($seq);
+    if (!$publiees) return null;
+    $done = 0;
+    $premiere_non_finie = null;
+    foreach ($publiees as $id) {
+        $dbid = l3m_seq_db_id($seqid, $id);
+        $complete = $DB->record_exists('local_l3madmin_seq_state', ['userid' => $userid, 'sequenceid' => $dbid, 'completed' => 1]);
+        if ($complete) { $done++; } elseif ($premiere_non_finie === null) { $premiere_non_finie = $id; }
+    }
+    return [
+        'etapeid'  => $premiere_non_finie ?? $publiees[0],
+        'total'    => count($publiees),
+        'done'     => $done,
+        'terminee' => $done === count($publiees),
+    ];
+}
+
 // Prochain identifiant numerique libre (max+1, ou 1 si vide) — utilise pour
 // les nouvelles sequences/etapes ET pour le referentiel (voir
 // referentiel-editor.php).
@@ -384,6 +457,72 @@ function l3m_seq_create_etape(int $seqid, string $titre, array $unites): ?int {
     ];
     file_put_contents(__DIR__ . '/' . $contentfile, json_encode($content, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
     return $etapeid;
+}
+
+// Supprime une etape (et ses fichiers contenu/support), ainsi que les
+// reglages globaux qui la referencent par dbid (override de verrouillage,
+// exceptions ponctuelles par eleve) pour ne pas laisser de configuration
+// orpheline. Ne touche pas aux tables de progression/reponses des eleves
+// (historique conserve meme si l'etape disparait). Retourne false si la
+// sequence/etape n'existe pas.
+function l3m_seq_delete_etape(int $seqid, int $etapeid): bool {
+    $sequences = l3m_seq_sequences();
+    if (!isset($sequences[$seqid]['etapes'][$etapeid])) return false;
+    $etape = $sequences[$seqid]['etapes'][$etapeid];
+    foreach (['contentfile', 'documentfile'] as $f) {
+        if (!empty($etape[$f])) {
+            $path = __DIR__ . '/' . $etape[$f];
+            if (file_exists($path)) unlink($path);
+        }
+    }
+    unset($sequences[$seqid]['etapes'][$etapeid]);
+    l3m_seq_save_sequences($sequences);
+
+    $dbid = l3m_seq_db_id($seqid, $etapeid);
+    l3m_seq_doc_set_override($dbid, null);
+    $all = l3m_seq_student_unlock_overrides_all();
+    $changed = false;
+    foreach ($all as $uid => $list) {
+        $idx = array_search($dbid, $list, true);
+        if ($idx !== false) {
+            array_splice($list, $idx, 1);
+            if ($list) { $all[$uid] = array_values($list); } else { unset($all[$uid]); }
+            $changed = true;
+        }
+    }
+    if ($changed) set_config('seq_unlock_overrides', json_encode($all), 'local_l3madmin');
+
+    return true;
+}
+
+// Supprime une Sequence ENTIERE (toutes ses Parties, et la Sequence
+// elle-meme) — le bouton "Supprimer" de chaque Partie (voir
+// l3m_seq_delete_etape()) ne retirait que cette Partie, pas la Sequence qui
+// la contient (question du 19/10/2026). Reutilise le meme nettoyage par
+// Partie (fichiers, override global, exceptions par eleve), puis delie toute
+// Sequence de "Mes modules" qui la referencait (etape_seqid) pour ne pas
+// laisser de lien mort.
+function l3m_seq_delete_sequence(int $seqid): bool {
+    $sequences = l3m_seq_sequences();
+    if (!isset($sequences[$seqid])) return false;
+    foreach (array_keys($sequences[$seqid]['etapes'] ?? []) as $etapeid) {
+        l3m_seq_delete_etape($seqid, $etapeid);
+    }
+    $sequences = l3m_seq_sequences(); // relue : l3m_seq_delete_etape() a deja sauvegarde
+    unset($sequences[$seqid]);
+    l3m_seq_save_sequences($sequences);
+
+    $progseq = l3m_progseq_all();
+    $changed = false;
+    foreach ($progseq as $sid => $seq) {
+        if ((int)($seq['etape_seqid'] ?? 0) === $seqid) {
+            unset($progseq[$sid]['etape_seqid']);
+            $changed = true;
+        }
+    }
+    if ($changed) l3m_progseq_save($progseq);
+
+    return true;
 }
 
 // ============================================================
@@ -548,13 +687,53 @@ function l3m_progseq_contexte_ia(int $seqid): ?array {
     $parts = [];
     if ($modules_noms) $parts[] = 'Modules de cette séquence : ' . implode(', ', $modules_noms) . '.';
     $type = $seq['type'] ?? 'etape';
-    if ($type === 'etape' && !empty($seq['etape_seqid']) && !empty($seq['etape_etapeid'])) {
-        $txt = l3m_seq_etape_texte_brut((int)$seq['etape_seqid'], (int)$seq['etape_etapeid']);
-        if ($txt !== '') $parts[] = "Contenu pédagogique de l'étape liée :\n" . $txt;
+    if ($type === 'etape' && !empty($seq['etape_seqid'])) {
+        // Concatene TOUTES les Parties publiees de la Sequence de Programme
+        // liee (pas seulement la 1ere) : ce contexte est global (pas par
+        // eleve), donc pas de notion de "partie en cours" ici.
+        $prog_seq = l3m_seq_sequences()[(int)$seq['etape_seqid']] ?? null;
+        if ($prog_seq) {
+            $txts = [];
+            foreach (l3m_seq_etapes_publiees_ids($prog_seq) as $eid) {
+                $t = l3m_seq_etape_texte_brut((int)$seq['etape_seqid'], $eid);
+                if ($t !== '') $txts[] = $t;
+            }
+            if ($txts) $parts[] = "Contenu pédagogique de la séquence liée :\n" . implode("\n\n", $txts);
+        }
     } elseif ($type === 'classe_virtuelle') {
         $parts[] = "C'est une classe virtuelle (visioconférence en direct) : pas de contenu écrit associé.";
     }
     return ['titre' => $titre, 'texte' => trim(implode("\n\n", $parts))];
+}
+
+// ── Document PDF directement rattache a une Unite, independant de toute
+// Etape QCM — la grande majorite des Unites du referentiel n'ont pas (encore)
+// d'Etape de positionnement derriere elles (voir "Pas encore programmee"
+// dans Programme), ce qui empechait jusqu'ici tout depot de support. Permet
+// au Responsable pedagogique d'uploader directement un PDF pour une Unite
+// depuis Programme, sans creer d'Etape complete. Le verrouillage reste gere
+// par le meme mecanisme d'override que les Etapes (l3m_seq_doc_override),
+// sur un dbid dedie — question du 07/10/2026. Format du dbid compatible
+// PARAM_ALPHANUMEXT (pas de ':' ni de '.', voir le handler set_override
+// existant dans programme.php).
+function l3m_unite_doc_dir(): string {
+    return __DIR__ . '/unite_documents';
+}
+
+function l3m_unite_doc_filename(string $code): string {
+    return preg_replace('/[^A-Za-z0-9_-]/', '_', $code) . '.pdf';
+}
+
+function l3m_unite_doc_path(string $code): string {
+    return l3m_unite_doc_dir() . '/' . l3m_unite_doc_filename($code);
+}
+
+function l3m_unite_doc_disponible(string $code): bool {
+    return is_file(l3m_unite_doc_path($code));
+}
+
+function l3m_unite_doc_dbid(string $code): string {
+    return 'unite_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $code);
 }
 
 // Identifiant utilisé cote base de donnees (colonne "sequenceid" des tables
@@ -649,7 +828,42 @@ function l3m_seq_document_deverrouille_pour(int $userid, string $sequenceid, int
     if ($override === 'locked') return false;
     if ($override === 'open') return true;
     global $DB;
-    return $DB->record_exists('local_l3madmin_seq_state', ['userid' => $userid, 'sequenceid' => $sequenceid, 'completed' => 1]);
+    if ($DB->record_exists('local_l3madmin_seq_state', ['userid' => $userid, 'sequenceid' => $sequenceid, 'completed' => 1])) {
+        return true;
+    }
+    return l3m_seq_student_unlock_override($userid, $sequenceid);
+}
+
+// ── Deblocage ponctuel d'une Sequence pour un eleve precis (exception
+// manuelle, Responsable pedagogique) — remplace le 07/10/2026 l'ancien
+// "deblocage ponctuel de module" base sur les cours Moodle (verrouillage
+// sequentiel par completion de cours, devenu sans objet cote Sequences).
+// Stocke separement de la vraie completion (local_l3madmin_seq_state) pour
+// ne jamais fausser la progression reelle affichee ailleurs
+// (l3m_progseq_global_pct) : seul l'ACCES (le support telechargeable) est
+// deverrouille par cette exception, pas la completion de l'etape elle-meme —
+// meme principe que l'ancien "module_unlock_overrides", juste reporte sur un
+// dbid de Sequence plutot qu'un id de cours Moodle.
+function l3m_seq_student_unlock_overrides_all(): array {
+    return json_decode(get_config('local_l3madmin', 'seq_unlock_overrides') ?: '{}', true) ?: [];
+}
+
+function l3m_seq_student_unlock_override(int $userid, string $sequenceid): bool {
+    $all = l3m_seq_student_unlock_overrides_all();
+    return in_array($sequenceid, $all[$userid] ?? [], true);
+}
+
+function l3m_seq_student_unlock_toggle(int $userid, string $sequenceid, bool $enable): void {
+    $all = l3m_seq_student_unlock_overrides_all();
+    $list = $all[$userid] ?? [];
+    $idx = array_search($sequenceid, $list, true);
+    if ($enable && $idx === false) {
+        $list[] = $sequenceid;
+    } elseif (!$enable && $idx !== false) {
+        array_splice($list, $idx, 1);
+    }
+    if ($list) { $all[$userid] = array_values($list); } else { unset($all[$userid]); }
+    set_config('seq_unlock_overrides', json_encode($all), 'local_l3madmin');
 }
 
 // Liste des (seqid, etapeid) dont l'etape couvre une unite donnee du
@@ -691,8 +905,8 @@ function l3m_progseq_sequences_for_unite(string $code): array {
         if (!in_array($ref, $seq['modules'] ?? [], true)) continue;
         $type = $seq['type'] ?? 'etape';
         if ($type === 'etape') {
-            if (empty($seq['etape_seqid']) || empty($seq['etape_etapeid'])) continue;
-            $out[] = ['sid' => (int)$sid, 'kind' => 'etape', 'etape_seqid' => (int)$seq['etape_seqid'], 'etape_etapeid' => (int)$seq['etape_etapeid']];
+            if (empty($seq['etape_seqid'])) continue;
+            $out[] = ['sid' => (int)$sid, 'kind' => 'etape', 'etape_seqid' => (int)$seq['etape_seqid']];
         } elseif ($type === 'classe_virtuelle') {
             $done_modules = $seq['cv_done_modules'] ?? [];
             $out[] = ['sid' => (int)$sid, 'kind' => 'cv', 'cv_done' => in_array($ref, $done_modules, true)];
@@ -714,10 +928,16 @@ function l3m_prog_statut_unite(string $code, int $userid, bool $voir_brouillons 
     if ($seqs_etape) {
         $valides = [];
         foreach ($seqs_etape as $s) {
-            $etape = l3m_seq_etape($s['etape_seqid'], $s['etape_etapeid']);
+            // Resolu par eleve : la Partie "en cours" de la Sequence de
+            // Programme liee (premiere non terminee, ou la 1ere si tout est
+            // fait) — plus une Partie figee par Sequence de "Mes modules"
+            // depuis que toutes les Parties s'enchainent automatiquement.
+            $resolu = l3m_progseq_etape_resolue($s['etape_seqid'], $userid);
+            if (!$resolu) continue;
+            $etape = l3m_seq_etape($resolu['seqid'], $resolu['etapeid']);
             if (!$etape) continue;
             if (!$voir_brouillons && !l3m_seq_etape_est_publiee($etape)) continue;
-            $valides[] = ['s' => $s, 'etape' => $etape];
+            $valides[] = ['resolu' => $resolu, 'etape' => $etape];
         }
         if (!$valides) {
             return ['etat' => 'aucune', 'label' => 'Pas encore programmée'];
@@ -727,7 +947,7 @@ function l3m_prog_statut_unite(string $code, int $userid, bool $voir_brouillons 
         if (!$canon) {
             return ['etat' => 'en_preparation', 'label' => '🚧 Brouillon (non publiée)'];
         }
-        $seqid = $canon['s']['etape_seqid']; $etapeid = $canon['s']['etape_etapeid'];
+        $seqid = $canon['resolu']['seqid']; $etapeid = $canon['resolu']['etapeid'];
         $dbid = l3m_seq_db_id($seqid, $etapeid);
         $dispo = l3m_seq_etape_document_disponible($seqid, $etapeid);
         $override = l3m_seq_doc_override($dbid);
@@ -746,12 +966,13 @@ function l3m_prog_statut_unite(string $code, int $userid, bool $voir_brouillons 
         global $DB;
         $toutes_ok = true;
         foreach ($valides as $v) {
-            $sid2 = $v['s']['etape_seqid']; $eid2 = $v['s']['etape_etapeid'];
+            $sid2 = $v['resolu']['seqid']; $eid2 = $v['resolu']['etapeid'];
             $dbid2 = l3m_seq_db_id($sid2, $eid2);
             $ov2 = l3m_seq_doc_override($dbid2);
             if ($ov2 === 'locked') { $toutes_ok = false; break; }
             if ($ov2 === 'open') continue;
-            if (!$DB->record_exists('local_l3madmin_seq_state', ['userid' => $userid, 'sequenceid' => $dbid2, 'completed' => 1])) {
+            if (!$DB->record_exists('local_l3madmin_seq_state', ['userid' => $userid, 'sequenceid' => $dbid2, 'completed' => 1])
+                && !l3m_seq_student_unlock_override($userid, $dbid2)) {
                 $toutes_ok = false; break;
             }
         }
@@ -773,7 +994,20 @@ function l3m_prog_statut_unite(string $code, int $userid, bool $voir_brouillons 
         $etapes = array_values(array_filter($etapes, fn($e) => l3m_seq_etape_est_publiee($e['etape'])));
     }
     if (!$etapes) {
-        return ['etat' => 'aucune', 'label' => 'Pas encore programmée'];
+        // Aucune Etape ne couvre cette Unite : on retombe sur un document
+        // depose directement (voir l3m_unite_doc_*() ci-dessus) — permet au
+        // Responsable pedagogique de fournir un support sans passer par une
+        // Etape QCM complete.
+        if (!l3m_unite_doc_disponible($code)) {
+            return ['etat' => 'aucune', 'label' => 'Pas encore programmée', 'direct' => true];
+        }
+        $dbid_u = l3m_unite_doc_dbid($code);
+        $override_u = l3m_seq_doc_override($dbid_u);
+        $base_u = ['dbid' => $dbid_u, 'direct' => true, 'override' => $override_u];
+        if ($override_u === 'open') {
+            return array_merge($base_u, ['etat' => 'deverrouille', 'label' => 'Débloqué par le formateur']);
+        }
+        return array_merge($base_u, ['etat' => 'verrouille', 'label' => 'À débloquer']);
     }
     $e = $etapes[0]; // une unite est en pratique couverte par une seule etape pour l'instant
     $seqid = $e['seqid']; $etapeid = $e['etapeid'];
@@ -801,6 +1035,93 @@ function l3m_prog_statut_unite(string $code, int $userid, bool $voir_brouillons 
         return array_merge($base, ['etat' => 'deverrouille', 'label' => 'Support disponible']);
     }
     return array_merge($base, ['etat' => 'verrouille', 'label' => 'À débloquer']);
+}
+
+// ── Acces formateur par Sequence (table l3m_seq_formateur_access, voir son
+// auto-creation dans espace-formateur.php) — remplace le 07/10/2026
+// l'ancienne matrice par cours Moodle (role editingteacher/teacher), les
+// Sequences n'ayant pas d'equivalent Moodle natif. "view" = la Sequence
+// apparait pour ce formateur dans "Programme" (lecture seule) ; "edit" = en
+// plus, il peut utiliser les controles de deverrouillage/upload
+// habituellement reserves au Responsable pedagogique, sur cette Sequence
+// precisement (pas sequences-config.php, toujours reserve au Responsable
+// pedagogique). ──
+function l3m_seq_formateur_access_all(): array {
+    global $DB;
+    $rows = $DB->get_records('l3m_seq_formateur_access');
+    $out = [];
+    foreach ($rows as $r) {
+        $out[(int)$r->userid][(string)$r->seqid] = $r->level;
+    }
+    return $out;
+}
+
+function l3m_seq_formateur_access_level(int $userid, $seqid): string {
+    global $DB;
+    $row = $DB->get_record('l3m_seq_formateur_access', ['userid' => $userid, 'seqid' => (string)$seqid]);
+    return $row ? $row->level : 'none';
+}
+
+// Un formateur avec acces "edit" sur une Sequence de type "etape" peut
+// deverrouiller/verrouiller manuellement le dbid de l'Etape qu'elle porte
+// (meme <select> que le Responsable pedagogique, voir programme.php) —
+// cherche parmi toutes les Sequences laquelle (le cas echeant) porte ce dbid
+// et si ce formateur y a un acces "edit".
+function l3m_seq_formateur_can_edit_dbid(int $userid, string $dbid): bool {
+    foreach (l3m_progseq_all() as $sid => $seq) {
+        if (($seq['type'] ?? 'etape') !== 'etape') continue;
+        if (empty($seq['etape_seqid'])) continue;
+        // Une Sequence de "Mes modules" lie une Sequence de Programme ENTIERE
+        // (toutes ses Parties, voir l3m_progseq_etape_resolue()) : on cherche
+        // le dbid parmi TOUTES ses Parties, plus une seule figee.
+        $prog_seq = l3m_seq_sequences()[(int)$seq['etape_seqid']] ?? null;
+        if (!$prog_seq) continue;
+        $porte_ce_dbid = false;
+        foreach (array_keys($prog_seq['etapes'] ?? []) as $eid) {
+            if (l3m_seq_db_id((int)$seq['etape_seqid'], (int)$eid) === $dbid) { $porte_ce_dbid = true; break; }
+        }
+        if (!$porte_ce_dbid) continue;
+        if (l3m_seq_formateur_access_level($userid, $sid) === 'edit') return true;
+    }
+    return false;
+}
+
+// Libelle lisible d'un dbid de support ("seq{X}_etape{Y}" ou "unite_...",
+// voir l3m_seq_db_id()/l3m_unite_doc_dbid()) — pour que les notifications
+// ("Support débloqué") disent QUEL support plutot qu'un message generique,
+// question du 09/10/2026 "il faut qu'il donne plus de détail". Le format
+// "unite_..." n'est pas reversible directement (caracteres remplaces par des
+// underscores), on retrouve donc le code en recalculant le dbid de chaque
+// Unite du referentiel jusqu'a trouver celle qui correspond.
+function l3m_resolve_dbid_label(string $dbid): string {
+    if (preg_match('/^seq(\d+)_etape(\d+)$/', $dbid, $m)) {
+        $etape = l3m_seq_etape((int)$m[1], (int)$m[2]);
+        if ($etape) return $etape['titre'] ?? 'ce support';
+    }
+    if (strpos($dbid, 'unite_') === 0) {
+        foreach (l3m_referentiel_unites_aplati() as $code => $u) {
+            if (l3m_unite_doc_dbid($code) === $dbid) return $u['nom'];
+        }
+    }
+    return 'ce support';
+}
+
+function l3m_seq_formateur_set_access(int $userid, $seqid, string $level): void {
+    global $DB;
+    $existing = $DB->get_record('l3m_seq_formateur_access', ['userid' => $userid, 'seqid' => (string)$seqid]);
+    if ($level === 'none') {
+        if ($existing) $DB->delete_records('l3m_seq_formateur_access', ['id' => $existing->id]);
+        return;
+    }
+    if ($existing) {
+        $existing->level = $level;
+        $existing->timemodified = time();
+        $DB->update_record('l3m_seq_formateur_access', $existing);
+    } else {
+        $DB->insert_record('l3m_seq_formateur_access', (object)[
+            'userid' => $userid, 'seqid' => (string)$seqid, 'level' => $level, 'timemodified' => time(),
+        ]);
+    }
 }
 
 // Progression (unites deverrouillees / total) d'une Sous-matiere du

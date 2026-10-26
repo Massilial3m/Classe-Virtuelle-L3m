@@ -190,6 +190,26 @@ function l3m_get_user_client($userid) {
     return $row ? 'saran' : 'lba';
 }
 
+// Journal d'activite dedie au Programme/Sequences (table
+// local_l3madmin_seq_activity) — remplace, pour les eleves du client LBA
+// uniquement, le suivi par logs Moodle (logstore_standard_log) devenu
+// aveugle depuis que les eleves ne naviguent plus dans de vrais cours Moodle
+// (tout se passe desormais dans des pages autonomes : sequence-player.php,
+// programme.php...). Utilise par emargement.php pour reconstruire les
+// sessions de presence (Qualiopi/financeurs). Scope LBA uniquement (question
+// du 20/10/2026 : "on touche pas Saran") — Saran garde le suivi par logs
+// Moodle existant, inchange.
+function l3m_log_activity(int $userid, string $label): void {
+    global $DB;
+    if (l3m_get_user_client($userid) !== 'lba') return;
+    $DB->insert_record('local_l3madmin_seq_activity', (object)[
+        'userid'      => $userid,
+        'timecreated' => time(),
+        'ip'          => getremoteaddr(),
+        'label'       => $label,
+    ]);
+}
+
 // Rattache l'utilisateur à un seul client à la fois (retire de l'autre
 // cohorte client si besoin avant d'ajouter à la nouvelle).
 function l3m_set_user_client($userid, $client) {

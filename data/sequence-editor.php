@@ -95,6 +95,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array(optional_param('action', '
         $dir = required_param('dir', PARAM_ALPHA); // 'up' | 'down'
         $target = $dir === 'up' ? $bi - 1 : $bi + 1;
         if (!isset($blocs[$bi]) || !isset($blocs[$target])) { echo json_encode(['ok' => false, 'msg' => 'Déplacement impossible.']); exit; }
+        // L'Ouverture et la Clôture bornent toujours la sequence diffusee a
+        // l'eleve (sequence-player.php parcourt les blocs dans l'ordre brut,
+        // sans traitement particulier pour ces deux types) — on interdit donc
+        // tout echange qui les deplacerait de leur position ou ferait passer
+        // un autre bloc devant/derriere elles.
+        $types_proteges = ['ouverture', 'cloture'];
+        if (in_array($blocs[$bi]['type'], $types_proteges, true) || in_array($blocs[$target]['type'], $types_proteges, true)) {
+            echo json_encode(['ok' => false, 'msg' => 'L\'Ouverture reste toujours en premier et la Clôture toujours en dernier.']); exit;
+        }
         $tmp = $blocs[$bi]; $blocs[$bi] = $blocs[$target]; $blocs[$target] = $tmp;
 
     } elseif ($action === 'add_ecran') {
@@ -363,9 +372,13 @@ body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--b
 // Controles de structure (deplacer/supprimer un bloc) affiches dans chaque
 // phase-head — AJAX, voir JS plus bas. Le onclick est mis en stopPropagation
 // pour ne pas re-basculer l'accordeon phase-head en meme temps.
-function blocCtrls($bi, $total) {
-    $up = $bi > 0 ? '<button type="button" onclick="event.stopPropagation();moveBloc(' . $bi . ',\'up\')" title="Monter">↑</button>' : '';
-    $down = $bi < $total - 1 ? '<button type="button" onclick="event.stopPropagation();moveBloc(' . $bi . ',\'down\')" title="Descendre">↓</button>' : '';
+function blocCtrls($bi, $total, $blocs) {
+    $types_proteges = ['ouverture', 'cloture'];
+    $self_protege = in_array($blocs[$bi]['type'], $types_proteges, true);
+    $up = ($bi > 0 && !$self_protege && !in_array($blocs[$bi - 1]['type'], $types_proteges, true))
+        ? '<button type="button" onclick="event.stopPropagation();moveBloc(' . $bi . ',\'up\')" title="Monter">↑</button>' : '';
+    $down = ($bi < $total - 1 && !$self_protege && !in_array($blocs[$bi + 1]['type'], $types_proteges, true))
+        ? '<button type="button" onclick="event.stopPropagation();moveBloc(' . $bi . ',\'down\')" title="Descendre">↓</button>' : '';
     $del = '<button type="button" onclick="event.stopPropagation();deleteBloc(' . $bi . ')" title="Supprimer ce bloc">🗑</button>';
     return '<div class="bloc-ctrls">' . $up . $down . $del . '</div>';
 }
@@ -374,7 +387,7 @@ function blocCtrls($bi, $total) {
 $nb_blocs = count($content['blocs']);
 foreach ($content['blocs'] as $bi => $bloc) {
     $bpath = "blocs.$bi";
-    $ctrls = blocCtrls($bi, $nb_blocs);
+    $ctrls = blocCtrls($bi, $nb_blocs, $content['blocs']);
 
     if ($bloc['type'] === 'ouverture') {
         echo '<div class="phase open"><div class="phase-head" onclick="this.parentElement.classList.toggle(\'open\')"><span>Ouverture ▾</span>' . $ctrls . '</div><div class="phase-body">';

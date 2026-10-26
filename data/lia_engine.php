@@ -284,6 +284,11 @@ function lia_apply_overrides(array &$grid, array $overrides): void {
             $e->h      = $h;
             $e->fix    = true;
             $e->manual = true;
+            // Jamais lu par le moteur lui-meme, juste redescendu jusqu'a la
+            // modale "Affectation manuelle" (admin-lba.php) pour pre-remplir
+            // le selecteur "Sequence (optionnel)" si deja renseigne
+            // auparavant (champ purement informatif).
+            $e->seqid  = (string)($ov['seqid'] ?? '');
             $grid[$pid][$w][] = $e;
         }
     }

@@ -28,6 +28,12 @@ $is_formateur = $DB->record_exists_sql(
 // simple garde "Résultats" (lecture) mais pas "Éditer".
 $is_ped_lead = l3m_is_ped_lead($USER->id) || is_siteadmin();
 
+// Journal d'activite (voir l3m_log_activity() dans l3m_branding.php) —
+// alimente la feuille d'emargement LBA (emargement.php).
+if ($is_student && $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    l3m_log_activity($USER->id, 'Mes séquences');
+}
+
 // ── Creation de sequences/etapes (constructeur de blocs, partie B) — appels
 //    AJAX depuis les formulaires "+ Nouvelle sequence"/"+ Nouvelle etape"
 //    plus bas. Reservee au Responsable pedagogique. ──
@@ -51,6 +57,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $etapeid = l3m_seq_create_etape($seqid, $titre, $unites);
         if ($etapeid === null) { echo json_encode(['ok' => false, 'msg' => 'Séquence introuvable.']); exit; }
         echo json_encode(['ok' => true, 'seqid' => $seqid, 'etapeid' => $etapeid]);
+        exit;
+    }
+    if ($action === 'delete_etape') {
+        $seqid = required_param('seqid', PARAM_INT);
+        $etapeid = required_param('etapeid', PARAM_INT);
+        $ok = l3m_seq_delete_etape($seqid, $etapeid);
+        echo json_encode($ok ? ['ok' => true] : ['ok' => false, 'msg' => 'Étape introuvable.']);
+        exit;
+    }
+    if ($action === 'delete_sequence') {
+        $seqid = required_param('seqid', PARAM_INT);
+        $ok = l3m_seq_delete_sequence($seqid);
+        echo json_encode($ok ? ['ok' => true] : ['ok' => false, 'msg' => 'Séquence introuvable.']);
         exit;
     }
     echo json_encode(['ok' => false, 'msg' => 'Action inconnue.']);
@@ -81,7 +100,9 @@ h1 { font-size:19px; margin:0 0 4px; }
 .sub { color:var(--muted); font-size:13px; margin:0 0 8px; }
 .ref-note { color:var(--muted); font-size:11.5px; margin:0 0 20px; }
 .seq-card { background:var(--card); border:1px solid var(--line); border-radius:14px; margin-bottom:16px; overflow:hidden; }
-.seq-head { padding:14px 18px; background:#FAFAF7; border-bottom:1px solid var(--line); font-weight:800; font-size:14px; }
+.seq-head { padding:14px 18px; background:#FAFAF7; border-bottom:1px solid var(--line); font-weight:800; font-size:14px; display:flex; align-items:center; gap:8px; }
+.seq-del { margin-left:auto; background:none; border:none; color:#D64545; cursor:pointer; font-size:13px; padding:4px 8px; opacity:.7; }
+.seq-del:hover { opacity:1; }
 .row { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
 .row:last-child { border-bottom:none; }
 .row .nom { flex:1; }
@@ -94,6 +115,7 @@ h1 { font-size:19px; margin:0 0 4px; }
 .btn.primary { background:var(--teal); color:#fff; }
 .btn.ghost { background:var(--card); color:var(--teal-d); border:1.5px solid var(--teal); }
 .btn.disabled { background:#EEE; color:#AAA; pointer-events:none; }
+.btn.danger { background:var(--card); color:#D64545; border:1.5px solid #D64545; }
 .empty-state { text-align:center; padding:40px 20px; color:var(--muted); font-size:13px; }
 .addbar { display:flex; gap:8px; margin-bottom:20px; }
 .addbar input[type=text] { flex:1; border:1px dashed var(--line); border-radius:8px; padding:10px 12px; font-size:13px; font-family:inherit; background:var(--card); }
@@ -147,14 +169,37 @@ h1 { font-size:19px; margin:0 0 4px; }
       if (!$a_au_moins_une_etape_visible) continue;
   ?>
   <div class="seq-card">
-    <div class="seq-head"><?= htmlspecialchars($seq['titre'], ENT_QUOTES) ?></div>
-    <?php foreach ($seq['etapes'] as $eid => $et):
+    <div class="seq-head">
+      <span><?= htmlspecialchars($seq['titre'], ENT_QUOTES) ?></span>
+      <?php if ($is_ped_lead): ?>
+      <button type="button" class="seq-del" onclick="deleteSequence(<?= $sid ?>, this)" title="Supprimer toute la séquence">🗑 Supprimer la séquence</button>
+      <?php endif; ?>
+    </div>
+    <?php if ($is_student):
+        // Une Sequence a plusieurs Etapes s'enchaine desormais automatiquement
+        // en un seul parcours (voir sequence-player.php, "Continuer vers la
+        // partie suivante") — un seul bouton de lancement par Sequence plutot
+        // qu'un bouton "Lancer" par Etape, pointant vers la reprise.
+        $lancer = l3m_seq_sequence_etape_a_lancer($USER->id, $sid, $seq);
+        if ($lancer):
+          $etape_cible = l3m_seq_etape($sid, $lancer['etapeid']);
+          $label = $lancer['terminee'] ? 'Revoir' : ($lancer['done'] > 0 ? 'Continuer' : 'Lancer');
+    ?>
+    <div class="row">
+      <div class="nom">
+        <b><?= $lancer['terminee'] ? 'Séquence terminée' : htmlspecialchars('Partie en cours : ' . $etape_cible['titre'], ENT_QUOTES) ?></b>
+        <div class="unites"><?= $lancer['done'] ?>/<?= $lancer['total'] ?> partie(s) terminée(s)</div>
+      </div>
+      <span class="status ready"><?= $lancer['terminee'] ? '✓ Terminée' : '✓ Disponible' ?></span>
+      <a class="btn primary" href="<?= $CFG->wwwroot ?>/sequence-player.php?seq=<?= $sid ?>&etape=<?= $lancer['etapeid'] ?>"><?= $label ?></a>
+    </div>
+    <?php endif; endif; ?>
+    <?php if ($is_formateur): foreach ($seq['etapes'] as $eid => $et):
         // Une etape en brouillon (pas encore publiee par le Responsable
         // pedagogique) est totalement invisible des eleves — seuls les
         // formateurs la voient, avec un badge distinct, pour la previsualiser
         // avant publication (voir l3m_seq_etape_est_publiee()).
         $publiee = l3m_seq_etape_est_publiee($et);
-        if (!$publiee && !$is_formateur) continue;
         $contentfile = __DIR__ . '/' . $et['contentfile'];
         $ready = file_exists($contentfile);
         $unite_noms = l3m_seq_etape_unites_noms($et);
@@ -164,25 +209,19 @@ h1 { font-size:19px; margin:0 0 4px; }
         <b><?= htmlspecialchars($et['titre'], ENT_QUOTES) ?></b>
         <?php if ($unite_noms): ?><div class="unites">Unité(s) : <?= htmlspecialchars(implode(', ', $unite_noms), ENT_QUOTES) ?></div><?php endif; ?>
       </div>
-      <?php if ($is_formateur && !$publiee): ?>
+      <?php if (!$publiee): ?>
         <span class="status empty">🚧 Brouillon</span>
-      <?php elseif ($is_formateur): ?>
-        <span class="status <?= $ready ? 'ready' : 'empty' ?>"><?= $ready ? '✓ Contenu prêt' : 'À compléter' ?></span>
       <?php else: ?>
-        <span class="status <?= $ready ? 'ready' : 'empty' ?>"><?= $ready ? '✓ Disponible' : 'Bientôt disponible' ?></span>
+        <span class="status <?= $ready ? 'ready' : 'empty' ?>"><?= $ready ? '✓ Contenu prêt' : 'À compléter' ?></span>
       <?php endif; ?>
-      <?php if ($is_student): ?>
-        <a class="btn <?= $ready ? 'primary' : 'disabled' ?>" href="<?= $CFG->wwwroot ?>/sequence-player.php?seq=<?= $sid ?>&etape=<?= $eid ?>">Lancer</a>
-      <?php endif; ?>
-      <?php if ($is_formateur): ?>
         <a class="btn ghost" href="<?= $CFG->wwwroot ?>/sequence-player.php?seq=<?= $sid ?>&etape=<?= $eid ?>">👁 Prévisualiser</a>
         <a class="btn ghost" href="<?= $CFG->wwwroot ?>/sequence-results.php?seq=<?= $sid ?>&etape=<?= $eid ?>">Résultats</a>
         <?php if ($is_ped_lead): ?>
         <a class="btn ghost" href="<?= $CFG->wwwroot ?>/sequence-editor.php?seq=<?= $sid ?>&etape=<?= $eid ?>">Éditer</a>
+        <button type="button" class="btn danger" onclick="deleteEtape(<?= $sid ?>, <?= $eid ?>, this)">Supprimer</button>
         <?php endif; ?>
-      <?php endif; ?>
     </div>
-    <?php endforeach; ?>
+    <?php endforeach; endif; ?>
     <?php if ($is_ped_lead): ?>
     <div class="new-etape">
       <input type="text" id="new_etape_titre_<?= $sid ?>" placeholder="Titre de la nouvelle étape…">
@@ -234,6 +273,18 @@ function createEtape(seqid) {
   post('create_etape', { seqid: seqid, titre: titre, unites: unites }).then(function(r){
     if (r.ok) location.href = PAGEURL.replace('sequence-select.php', 'sequence-editor.php') + '?seq=' + r.seqid + '&etape=' + r.etapeid;
     else alert(r.msg || 'Erreur');
+  });
+}
+function deleteSequence(seqid, btn) {
+  if (!confirm('Supprimer TOUTE la séquence et toutes ses parties ? Cette action est définitive.')) return;
+  post('delete_sequence', { seqid: seqid }).then(function(r){
+    if (r.ok) location.reload(); else alert(r.msg || 'Erreur');
+  });
+}
+function deleteEtape(seqid, etapeid, btn) {
+  if (!confirm('Supprimer cette étape ? Cette action est définitive.')) return;
+  post('delete_etape', { seqid: seqid, etapeid: etapeid }).then(function(r){
+    if (r.ok) location.reload(); else alert(r.msg || 'Erreur');
   });
 }
 </script>

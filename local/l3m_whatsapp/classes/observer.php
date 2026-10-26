@@ -6,8 +6,12 @@ defined('MOODLE_INTERNAL') || die();
 class observer {
 
     const GROUP_ID       = '120363410662880898@g.us';
-    const BOT_URL        = 'http://151.80.61.51:3001/send';
-    const BOT_INVITE_URL = 'http://151.80.61.51:3001/invite-link';
+    // Reseau Docker interne (meme reseau "moodle_net" que moodle_app) plutot
+    // que l'IP publique du serveur : evite d'exposer ce service sur internet
+    // (question de securite du 23/10/2026, suite a Node2Shell CVE-2026-111497
+    // qui a pousse a verifier l'exposition reseau de tous les services).
+    const BOT_URL        = 'http://l3m_whatsapp:3001/send';
+    const BOT_INVITE_URL = 'http://l3m_whatsapp:3001/invite-link';
     const API_TOKEN      = '957127c92c7233b642f1e885a6c46f91be5475bc8c7d6195bf4fe6b5aa840683';
     const ECSR_COURSES   = [2,3,4,5,6,7,8,9,10,11,12];
 

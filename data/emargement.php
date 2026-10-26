@@ -20,7 +20,12 @@ $gap_secs  = 30 * 60;
 $student_roleid = $DB->get_field('role', 'id', ['shortname' => 'student']);
 $all_courses    = $DB->get_records_select('course', 'id > 1', [], 'id ASC', 'id,fullname,shortname');
 
-// Liste des etudiants
+// Liste des etudiants — filtree au client de l'admin connecte (meme principe
+// que l3m_admin_client_sql() dans admin-lba.php) : les deux clients LBA et
+// Saran partagent la meme instance Moodle, donc sans ce filtre un admin LBA
+// voyait aussi les eleves Saran (et inversement) dans "Sélectionner un
+// apprenant" — question du 20/10/2026.
+$admin_client = l3m_get_user_client($USER->id);
 $sql_students = "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email
     FROM {user} u
     JOIN {user_enrolments} ue ON ue.userid = u.id
@@ -29,7 +34,10 @@ $sql_students = "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email
     JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid = e.courseid
     WHERE ra.roleid = :roleid AND u.deleted = 0
     ORDER BY u.lastname, u.firstname";
-$all_students = $DB->get_records_sql($sql_students, ['roleid' => $student_roleid]);
+$all_students = array_filter(
+    (array)$DB->get_records_sql($sql_students, ['roleid' => $student_roleid]),
+    fn($s) => l3m_get_user_client($s->id) === $admin_client
+);
 
 // Localisation approximative d'une IP au niveau region/departement (pas la
 // ville : la base GeoIP gratuite localise le point de rattachement reseau
@@ -120,13 +128,79 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
         'ip'      => $sess_ip,
     ];
 
-    // Enrichir avec noms de cours + identifiants/localisation pour l'audit
-    // (Qualiopi / financeurs) : IP et heure exacte proviennent des logs
-    // Moodle (colonne "ip" de logstore_standard_log — Moodle ne conserve pas
-    // d'historique des sessions PHP passees, donc pas de vrai "id de
-    // session" ; on genere une reference stable et deterministe a la place).
-    // La localisation utilise la base MaxMind si configuree
-    // (Site admin > Serveur > Emplacement IP), sinon reste vide.
+    // Noms de cours (specifique logs Moodle) — l'enrichissement commun avec
+    // les sessions reconstruites depuis le journal d'activite LBA (duree
+    // formatee, ID de session, localisation) vit dans l3m_enrich_sessions()
+    // ci-dessous, partagee par les deux sources.
+    foreach ($sessions as &$s) {
+        $names = [];
+        foreach (array_keys($s['courses']) as $cid) {
+            if (isset($all_courses[$cid])) $names[] = $all_courses[$cid]->shortname;
+        }
+        $s['course_names'] = implode(', ', $names);
+    }
+    unset($s);
+    return l3m_enrich_sessions($sessions, $userid);
+}
+
+// Reconstruction des sessions depuis le journal d'activite dedie Programme/
+// Sequences (table local_l3madmin_seq_activity, voir l3m_log_activity() dans
+// l3m_branding.php) — pour les eleves du client LBA UNIQUEMENT (Saran garde
+// l3m_get_sessions() ci-dessus, inchange). Remplace le suivi par logs Moodle
+// devenu aveugle depuis que les eleves ne naviguent plus dans de vrais cours
+// Moodle (tout se passe desormais dans des pages autonomes) — question du
+// 20/10/2026 : la colonne "Module(s)" affichait d'anciens cours Moodle sans
+// rapport avec l'activite reelle recente de l'eleve sur Programme/Sequences.
+// Meme algorithme de regroupement par trou de 30 min que l3m_get_sessions(),
+// meme forme de tableau en sortie (reutilise l3m_enrich_sessions()).
+function l3m_get_sessions_from_activity($DB, $userid, $gap_secs) {
+    $logs = array_values($DB->get_records_sql(
+        "SELECT id, timecreated, ip, label FROM {local_l3madmin_seq_activity}
+          WHERE userid = :uid ORDER BY timecreated ASC",
+        ['uid' => $userid]
+    ));
+    if (empty($logs)) return [];
+
+    $sessions = [];
+    $sess_start  = $logs[0]->timecreated;
+    $sess_end    = $logs[0]->timecreated;
+    $sess_secs   = 0;
+    $sess_labels = [$logs[0]->label => true];
+    $sess_ip     = $logs[0]->ip;
+
+    for ($i = 1; $i < count($logs); $i++) {
+        $diff = $logs[$i]->timecreated - $logs[$i-1]->timecreated;
+        if ($diff > $gap_secs) {
+            $sessions[] = [
+                'start' => $sess_start, 'end' => $sess_end, 'secs' => $sess_secs,
+                'course_names' => implode(', ', array_keys($sess_labels)), 'ip' => $sess_ip,
+            ];
+            $sess_start  = $logs[$i]->timecreated;
+            $sess_secs   = 0;
+            $sess_labels = [];
+            $sess_ip     = $logs[$i]->ip;
+        } else {
+            $sess_secs += $diff;
+        }
+        $sess_end = $logs[$i]->timecreated;
+        $sess_labels[$logs[$i]->label] = true;
+        if (!empty($logs[$i]->ip)) $sess_ip = $logs[$i]->ip;
+    }
+    $sessions[] = [
+        'start' => $sess_start, 'end' => $sess_end, 'secs' => $sess_secs,
+        'course_names' => implode(', ', array_keys($sess_labels)), 'ip' => $sess_ip,
+    ];
+
+    return l3m_enrich_sessions($sessions, $userid);
+}
+
+// Identifiants/localisation pour l'audit (Qualiopi / financeurs) : IP et
+// heure exacte proviennent de la source brute (logs Moodle ou journal
+// d'activite dedie selon le client) — ni l'une ni l'autre ne conserve un
+// vrai "id de session", on genere donc une reference stable et deterministe
+// a la place. La localisation utilise la base MaxMind si configuree (Site
+// admin > Serveur > Emplacement IP), sinon reste vide.
+function l3m_enrich_sessions(array $sessions, int $userid): array {
     require_once($GLOBALS['CFG']->dirroot . '/iplookup/lib.php');
 
     // Positions GPS envoyees par le navigateur de l'eleve (avec son
@@ -137,11 +211,6 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
     $geoloc_buffer = 30 * 60; // tolerance autour du debut/fin de session
 
     foreach ($sessions as &$s) {
-        $names = [];
-        foreach (array_keys($s['courses']) as $cid) {
-            if (isset($all_courses[$cid])) $names[] = $all_courses[$cid]->shortname;
-        }
-        $s['course_names'] = implode(', ', $names);
         $h = floor($s['secs'] / 3600);
         $m = floor(($s['secs'] % 3600) / 60);
         $s['duration_fmt'] = $h > 0 ? $h . 'h ' . $m . 'min' : ($m > 0 ? $m . ' min' : '< 1 min');
@@ -171,12 +240,20 @@ function l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) {
             $s['location_source'] = 'gps';
         }
     }
+    unset($s);
     return $sessions;
 }
 
 $student     = $userid > 0 ? ($all_students[$userid] ?? null) : null;
 $course_ids  = $courseid > 0 ? [$courseid] : array_keys((array)$all_courses);
-$sessions_all = $student ? l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses) : [];
+// LBA : journal d'activite Programme/Sequences (voir l3m_get_sessions_from_activity()).
+// Saran : inchange, logs Moodle (voir l3m_get_sessions()) — question du
+// 20/10/2026 : "pour info cette modif juste pour lba on touche pas saran".
+$is_lba_student = $student && l3m_get_user_client($student->id) === 'lba';
+$sessions_all = !$student ? [] : ($is_lba_student
+    ? l3m_get_sessions_from_activity($DB, $userid, $gap_secs)
+    : l3m_get_sessions($DB, $userid, $course_ids, $gap_secs, $all_courses));
+$modules_col_label = $is_lba_student ? 'Séquence / Partie' : 'Module(s)';
 
 // Apply date filter
 $ts_from = $date_from ? strtotime($date_from . ' 00:00:00') : 0;
@@ -199,7 +276,7 @@ if ($export === 'pdf' && $student) {
         'debut'     => 'Heure début',
         'fin'       => 'Heure fin',
         'duree'     => 'Durée',
-        'modules'   => 'Module(s)',
+        'modules'   => $modules_col_label,
         'ip'        => 'Adresse IP',
         'timestamp' => 'Timestamp',
         'heure_exacte' => 'Heure exacte',
@@ -233,7 +310,7 @@ if ($export === 'excel' && $student) {
         'debut'     => 'Heure début',
         'fin'       => 'Heure fin',
         'duree'     => 'Durée',
-        'modules'   => 'Module(s)',
+        'modules'   => $modules_col_label,
         'ip'        => 'Adresse IP',
         'timestamp' => 'Timestamp',
         'heure_exacte' => 'Heure exacte',
@@ -339,6 +416,14 @@ a{color:#2E9488;}
           </option>
         <?php endforeach; ?>
       </select>
+      <?php if ($admin_client !== 'lba'): ?>
+      <!-- Filtre par cours Moodle : n'a plus de sens pour un admin LBA (tous
+           ses eleves sont forcement LBA, voir le filtre de $all_students plus
+           haut ; plus de navigation dans de vrais cours Moodle depuis
+           Programme/Sequences, voir l3m_get_sessions_from_activity()) —
+           masque sur le client de l'admin, pas sur l'eleve selectionne, pour
+           disparaitre meme avant qu'un eleve soit choisi (question du
+           20/10/2026). Reste visible pour Saran, inchange. -->
       <select name="courseid" style="background:#F7F6F1!important;color:#24333C!important">
         <option value="0"<?php echo $courseid == 0 ? ' selected' : ''; ?>>— Tous les modules —</option>
         <?php foreach ($all_courses as $c): ?>
@@ -347,6 +432,9 @@ a{color:#2E9488;}
           </option>
         <?php endforeach; ?>
       </select>
+      <?php else: ?>
+      <input type="hidden" name="courseid" value="0">
+      <?php endif; ?>
       <input type="date" name="date_from" value="<?php echo $date_from; ?>" title="Du">
       <input type="date" name="date_to"   value="<?php echo $date_to; ?>"   title="Au">
       <button type="submit" class="btn-export" style="background:<?= $accent_color ?>;color:#fff;">🔍 Filtrer</button>
@@ -391,7 +479,7 @@ a{color:#2E9488;}
           <th>Début</th>
           <th>Fin</th>
           <th>Durée</th>
-          <th>Module(s)</th>
+          <th><?php echo htmlspecialchars($modules_col_label); ?></th>
           <th>Heure exacte</th>
           <th>Timestamp</th>
           <th>Adresse IP</th>

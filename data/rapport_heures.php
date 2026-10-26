@@ -1,6 +1,7 @@
 <?php
 require('/var/data/www/config.php');
 require_once($CFG->libdir . '/adminlib.php');
+require_once(__DIR__ . '/l3m_branding.php');
 
 require_login();
 require_capability('moodle/course:viewparticipants', context_system::instance());
@@ -10,6 +11,17 @@ $export    = optional_param('export', '', PARAM_ALPHA); // 'excel' or 'pdf'
 $embed     = optional_param('embed', 0, PARAM_INT);
 $target_h  = 100;
 $gap_secs  = 30 * 60;
+
+// Client de l'admin connecte (meme principe que l3m_admin_client_sql() dans
+// admin-lba.php) : LBA et Saran partagent la meme instance Moodle, donc sans
+// ce filtre un admin LBA voyait aussi les heures des eleves Saran, et
+// inversement — question du 20/10/2026 (meme correctif que emargement.php).
+// Pour un admin LBA, les heures sont calculees depuis le journal d'activite
+// dedie Programme/Sequences (voir l3m_log_activity()) plutot que les logs de
+// cours Moodle, devenus aveugles depuis que les eleves n'y naviguent plus —
+// le decoupage "par module" n'a alors plus de sens et est masque.
+$admin_client = l3m_get_user_client($USER->id);
+$is_lba_admin = $admin_client === 'lba';
 
 $all_courses    = $DB->get_records_select('course', 'id > 1', [], 'id ASC', 'id,fullname,shortname');
 $student_roleid = $DB->get_field('role', 'id', ['shortname' => 'student']);
@@ -31,6 +43,22 @@ function l3m_calc_hours_user($DB, $userid, $course_ids, $gap_secs) {
     return ['total' => $total_secs, 'per_course' => $per_course];
 }
 
+// Equivalent pour un eleve LBA : meme algorithme (trous > 30 min exclus),
+// source = journal d'activite dedie au lieu des logs de cours Moodle. Pas de
+// decoupage "per_course" (aucune notion de module Moodle ici).
+function l3m_calc_hours_user_from_activity($DB, $userid, $gap_secs) {
+    $logs = $DB->get_fieldset_select(
+        'local_l3madmin_seq_activity', 'timecreated',
+        'userid = :uid', ['uid' => $userid], 'timecreated ASC'
+    );
+    $secs = 0;
+    for ($i = 1; $i < count($logs); $i++) {
+        $diff = $logs[$i] - $logs[$i-1];
+        if ($diff > 0 && $diff <= $gap_secs) $secs += $diff;
+    }
+    return ['total' => $secs, 'per_course' => []];
+}
+
 function l3m_fmt($secs) {
     $h = floor($secs / 3600);
     $m = floor(($secs % 3600) / 60);
@@ -48,11 +76,16 @@ $sql = "SELECT DISTINCT u.id, u.firstname, u.lastname, u.email
         JOIN {context} ctx ON ctx.id = ra.contextid AND ctx.contextlevel = 50 AND ctx.instanceid = e.courseid
         WHERE ra.roleid = ? AND e.courseid IN ($placeholders) AND u.deleted = 0
         ORDER BY u.lastname, u.firstname";
-$students = $DB->get_records_sql($sql, array_merge([$student_roleid], $course_ids));
+$students = array_filter(
+    (array)$DB->get_records_sql($sql, array_merge([$student_roleid], $course_ids)),
+    fn($s) => l3m_get_user_client($s->id) === $admin_client
+);
 
 $data = [];
 foreach ($students as $s) {
-    $hours = l3m_calc_hours_user($DB, $s->id, $course_ids, $gap_secs);
+    $hours = $is_lba_admin
+        ? l3m_calc_hours_user_from_activity($DB, $s->id, $gap_secs)
+        : l3m_calc_hours_user($DB, $s->id, $course_ids, $gap_secs);
     $total_h = $hours['total'] / 3600;
     $data[] = [
         'user'       => $s,
@@ -72,8 +105,10 @@ if ($export === 'excel' || $export === 'pdf') {
         'total'   => 'Total heures',
         'seuil'   => 'Facturable (' . $target_h . 'h)',
     ];
-    foreach ($all_courses as $c) {
-        $columns['cours_' . $c->id] = $c->shortname;
+    if (!$is_lba_admin) {
+        foreach ($all_courses as $c) {
+            $columns['cours_' . $c->id] = $c->shortname;
+        }
     }
 
     $rows = [];
@@ -85,9 +120,11 @@ if ($export === 'excel' || $export === 'pdf') {
             'total'  => l3m_fmt($row['total_secs']),
             'seuil'  => $row['reached'] ? 'OUI' : 'NON (' . round($row['total_secs']/3600, 1) . 'h)',
         ];
-        foreach ($all_courses as $c) {
-            $secs = $row['per_course'][$c->id] ?? 0;
-            $r['cours_' . $c->id] = $secs > 0 ? l3m_fmt($secs) : '-';
+        if (!$is_lba_admin) {
+            foreach ($all_courses as $c) {
+                $secs = $row['per_course'][$c->id] ?? 0;
+                $r['cours_' . $c->id] = $secs > 0 ? l3m_fmt($secs) : '-';
+            }
         }
         $rows[] = $r;
     }
@@ -152,6 +189,11 @@ if ($embed) {
   <div class="l3m-filters">
     <form method="get" style="display:contents">
       <?php if ($embed): ?><input type="hidden" name="embed" value="1"><?php endif; ?>
+      <?php if (!$is_lba_admin): ?>
+      <!-- Filtre par cours Moodle : n'a plus de sens pour un eleve LBA (plus
+           de navigation dans de vrais cours Moodle depuis Programme/Sequences)
+           — masque dans ce cas, voir l3m_calc_hours_user_from_activity().
+           Reste visible pour Saran, inchange. -->
       <select name="courseid" onchange="this.form.submit()">
         <option value="0"<?php echo $courseid == 0 ? ' selected' : ''; ?>>— Tous les modules —</option>
         <?php foreach ($all_courses as $c): ?>
@@ -160,6 +202,7 @@ if ($embed) {
           </option>
         <?php endforeach; ?>
       </select>
+      <?php endif; ?>
     </form>
     <a class="btn-export btn-excel" href="?courseid=<?php echo $courseid; ?>&export=excel">
       📊 Excel
@@ -180,7 +223,7 @@ if ($embed) {
         <th style="color:#68767E !important;">Total heures</th>
         <th style="color:#68767E !important;">Progression</th>
         <th style="color:#68767E !important;">Facturable</th>
-        <?php if ($courseid == 0): foreach ($all_courses as $c): ?>
+        <?php if (!$is_lba_admin && $courseid == 0): foreach ($all_courses as $c): ?>
           <th class="course-col" style="color:#68767E !important;"><?php echo htmlspecialchars($c->shortname); ?></th>
         <?php endforeach; endif; ?>
       </tr>
@@ -208,7 +251,7 @@ if ($embed) {
                 <span class="badge-no"><?php echo $total_h; ?>h / <?php echo $target_h; ?>h</span>
               <?php endif; ?>
             </td>
-            <?php if ($courseid == 0): foreach ($all_courses as $c): ?>
+            <?php if (!$is_lba_admin && $courseid == 0): foreach ($all_courses as $c): ?>
               <?php $secs = $row['per_course'][$c->id] ?? 0; ?>
               <td class="course-col" style="color:<?php echo $secs > 0 ? '#24333C' : '#B9B29E'; ?>">
                 <?php echo $secs > 0 ? l3m_fmt($secs) : '—'; ?>

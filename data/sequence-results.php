@@ -14,13 +14,6 @@ require_once(__DIR__ . '/l3m_branding.php');
 require_once(__DIR__ . '/l3m_referentiel.php');
 require_login();
 
-// Restructuration en cours — reserve aux testeurs beta le temps du chantier
-// (voir sequence-select.php pour le detail). Gate serveur, en plus du lien
-// d'entree deja masque.
-if (!l3m_is_beta_tester($USER->id)) {
-    redirect(new moodle_url('/my/'));
-}
-
 $teacher_shortnames = ['editingteacher', 'teacher', 'manager'];
 list($insql, $inparams) = $DB->get_in_or_equal($teacher_shortnames);
 $is_formateur = $DB->record_exists_sql(

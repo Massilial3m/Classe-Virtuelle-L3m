@@ -285,6 +285,12 @@ if (!$student_roleid || !$DB->record_exists('role_assignments', ['userid' => $US
 
 $sesskey = sesskey();
 
+// Journal d'activite (voir l3m_log_activity() dans l3m_branding.php) —
+// alimente la feuille d'emargement LBA (emargement.php).
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    l3m_log_activity($USER->id, 'Mon espace');
+}
+
 // ── ACTIONS POST (AJAX) — messagerie (vraie messagerie Moodle, UI custom) ──
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_sesskey();
@@ -624,7 +630,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         foreach (array_keys($recipients) as $rid) {
             l3m_send_notification(
-                $USER->id, $rid, 'Document signé reçu',
+                $USER->id, $rid, 'Document signé reçu : ' . $doc->title . ' (' . fullname($USER) . ')',
                 fullname($USER) . ' a envoyé le document signé : ' . $doc->title,
                 $CFG->wwwroot . '/admin-lba.php#docs', 'Voir les documents'
             );
@@ -636,20 +642,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // ── Chat IA "Demander a Lia" — questions libres sur le contenu d'un
     // module, historique conserve par eleve+cours. Generalise a tous les
-    // comptes (etait reserve aux testeurs beta). ──
+    // comptes (etait reserve aux testeurs beta). Accepte en plus un 'seqid'
+    // (Sequence de "Mes modules", voir l3m_progseq_contexte_ia() dans
+    // l3m_referentiel.php) depuis le 06/10/2026 : le FAB "Demander a Lia"
+    // n'etait plus accessible qu'en passant par l'ancien lecteur de cours
+    // (v-detail), rarement ouvert depuis le retrait de la grille "Mes
+    // modules" — rebranche ici sur Sequences, en plus de l'ancien mecanisme
+    // par cours (garde pour v-detail, toujours utilise par Parcours/les
+    // devoirs en attente). La colonne "courseid" de
+    // local_l3madmin_chat_messages stocke alors l'id de Sequence (meme
+    // reutilisation deja en place cote espace-formateur.php). ──
     if ($action === 'lia_chat_history' || $action === 'lia_chat_send') {
+        $seqid_chat = optional_param('seqid', 0, PARAM_INT);
         $courseid_chat = optional_param('courseid', 0, PARAM_INT);
-        // Securite : l'eleve doit reellement etre inscrit a ce cours.
-        $enrolled_chat = $courseid_chat && is_enrolled(context_course::instance($courseid_chat, IGNORE_MISSING), $USER->id);
-        if (!$enrolled_chat) {
-            echo json_encode(['ok' => false, 'msg' => 'Cours introuvable ou acces non autorise']);
-            exit;
+        $ctxinfo_chat = null;
+        if ($seqid_chat) {
+            $ctxinfo_chat = l3m_progseq_contexte_ia($seqid_chat);
+            if (!$ctxinfo_chat) { echo json_encode(['ok' => false, 'msg' => 'Séquence introuvable']); exit; }
+            $chatkey_chat = $seqid_chat;
+        } else {
+            // Securite : l'eleve doit reellement etre inscrit a ce cours.
+            $enrolled_chat = $courseid_chat && is_enrolled(context_course::instance($courseid_chat, IGNORE_MISSING), $USER->id);
+            if (!$enrolled_chat) {
+                echo json_encode(['ok' => false, 'msg' => 'Cours introuvable ou acces non autorise']);
+                exit;
+            }
+            $chatkey_chat = $courseid_chat;
         }
 
         if ($action === 'lia_chat_history') {
             $rows_chat = $DB->get_records_select(
                 'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
-                [$USER->id, $courseid_chat], 'timecreated ASC', 'id, role, content', 0, 50
+                [$USER->id, $chatkey_chat], 'timecreated ASC', 'id, role, content', 0, 50
             );
             $out_chat = array_map(fn($r) => ['role' => $r->role, 'content' => $r->content], array_values($rows_chat));
             echo json_encode(['ok' => true, 'messages' => $out_chat], JSON_UNESCAPED_UNICODE);
@@ -661,25 +685,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($message_chat === '') { echo json_encode(['ok' => false, 'msg' => 'Message vide']); exit; }
         if (mb_strlen($message_chat) > 1000) $message_chat = mb_substr($message_chat, 0, 1000);
 
-        // Meme extraction de contenu que lia_remediate (toutes les pages de
-        // cours du module), pour ancrer les reponses sur le vrai contenu.
-        $minfo_chat = get_fast_modinfo($courseid_chat);
-        $ctx_chat = '';
-        foreach ($minfo_chat->get_cms() as $cm_chat) {
-            if ($cm_chat->modname !== 'page') continue;
-            $page_chat = $DB->get_record('page', ['id' => $cm_chat->instance]);
-            if ($page_chat && $page_chat->content) {
-                $ctx_chat .= "\n\n" . trim(strip_tags($page_chat->content));
+        if ($ctxinfo_chat) {
+            $ctx_chat = $ctxinfo_chat['texte'];
+        } else {
+            // Meme extraction de contenu que lia_remediate (toutes les pages de
+            // cours du module), pour ancrer les reponses sur le vrai contenu.
+            $minfo_chat = get_fast_modinfo($courseid_chat);
+            $ctx_chat = '';
+            foreach ($minfo_chat->get_cms() as $cm_chat) {
+                if ($cm_chat->modname !== 'page') continue;
+                $page_chat = $DB->get_record('page', ['id' => $cm_chat->instance]);
+                if ($page_chat && $page_chat->content) {
+                    $ctx_chat .= "\n\n" . trim(strip_tags($page_chat->content));
+                }
             }
+            $ctx_chat = trim(preg_replace('/\s+/u', ' ', $ctx_chat));
+            if (mb_strlen($ctx_chat) > 6000) $ctx_chat = mb_substr($ctx_chat, 0, 6000);
         }
-        $ctx_chat = trim(preg_replace('/\s+/u', ' ', $ctx_chat));
-        if (mb_strlen($ctx_chat) > 6000) $ctx_chat = mb_substr($ctx_chat, 0, 6000);
 
         // Historique recent (5 derniers echanges) pour garder le fil de la
         // conversation sans faire grossir le prompt indefiniment.
         $hist_rows_chat = $DB->get_records_select(
             'local_l3madmin_chat_messages', 'userid = ? AND courseid = ?',
-            [$USER->id, $courseid_chat], 'timecreated DESC', 'role, content', 0, 10
+            [$USER->id, $chatkey_chat], 'timecreated DESC', 'role, content', 0, 10
         );
         $hist_rows_chat = array_reverse(array_values($hist_rows_chat));
         $hist_txt_chat = '';
@@ -687,14 +715,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $hist_txt_chat .= ($h->role === 'user' ? 'Eleve : ' : 'Lia : ') . $h->content . "\n";
         }
 
+        $sujet_chat = $ctxinfo_chat ? ('la séquence "' . $ctxinfo_chat['titre'] . '"') : 'le module qu\'il est en train de suivre';
         $prompt_chat = "Tu es Lia, l'assistante pedagogique d'une formation professionnelle (ECSR, moniteur auto-ecole). "
-            . "Un eleve te pose une question sur le module qu'il est en train de suivre. Voici le contenu du module concerne :\n\n"
-            . ($ctx_chat !== '' ? $ctx_chat : '(pas de contenu texte disponible pour ce module)')
+            . "Un eleve te pose une question sur " . $sujet_chat . ". Voici ce qu'on sait dessus :\n\n"
+            . ($ctx_chat !== '' ? $ctx_chat : '(pas de contenu texte disponible)')
             . ($hist_txt_chat !== '' ? "\n\nDerniers echanges de la conversation :\n" . $hist_txt_chat : '')
             . "\n\nNouvelle question de l'eleve : " . $message_chat
             . "\n\nReponds de facon claire et concise (quelques phrases), en tutoyant l'eleve, en t'appuyant sur le contenu "
-            . "du module ci-dessus. Si la question sort du cadre du module, dis-le simplement et recentre poliment sur le "
-            . "contenu du cours.\n\nReponds UNIQUEMENT avec un objet JSON valide de cette forme exacte : {\"reply\": \"...\"}";
+            . "ci-dessus. Si la question sort du cadre, dis-le simplement et recentre poliment.\n\nReponds UNIQUEMENT "
+            . "avec un objet JSON valide de cette forme exacte : {\"reply\": \"...\"}";
 
         $result_chat = l3m_call_gemini($prompt_chat);
         $reply_chat = $result_chat['ok'] && !empty($result_chat['data']['reply'])
@@ -703,11 +732,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $now_chat = time();
         $DB->insert_record('local_l3madmin_chat_messages', (object)[
-            'userid' => $USER->id, 'courseid' => $courseid_chat, 'role' => 'user',
+            'userid' => $USER->id, 'courseid' => $chatkey_chat, 'role' => 'user',
             'content' => $message_chat, 'timecreated' => $now_chat,
         ]);
         $DB->insert_record('local_l3madmin_chat_messages', (object)[
-            'userid' => $USER->id, 'courseid' => $courseid_chat, 'role' => 'assistant',
+            'userid' => $USER->id, 'courseid' => $chatkey_chat, 'role' => 'assistant',
             'content' => $reply_chat, 'timecreated' => $now_chat + 1,
         ]);
 
@@ -1134,10 +1163,22 @@ $prog_sequences = l3m_progseq_for_display($USER->id);
 // ids de noeuds de Programme) : utilisee par Parcours pour afficher un
 // pourcentage base sur le referentiel au lieu de l'ancien pourcentage
 // d'avancement Moodle (question du 06/10/2026).
+$ref_matieres = l3m_referentiel_matieres();
 $ref_sm_pct = [];
-foreach (l3m_referentiel_matieres() as $mid => $matiere) {
+foreach ($ref_matieres as $mid => $matiere) {
     foreach ($matiere['sous_matieres'] as $sid => $sm) {
         $ref_sm_pct["sm-$mid-$sid"] = l3m_progseq_sm_stats((int)$mid, (int)$sid, $USER->id);
+    }
+}
+
+// "Module Commun" de Parcours genere dynamiquement depuis les Sous-matieres
+// de la Matiere 1 du referentiel, au lieu d'une liste figee dans le code
+// (question du 09/10/2026 : toute Sous-matiere ajoutee/retiree dans
+// Programme doit apparaitre/disparaitre ici automatiquement).
+$module_commun_sm = [];
+if (isset($ref_matieres[1])) {
+    foreach ($ref_matieres[1]['sous_matieres'] as $sid => $sm) {
+        $module_commun_sm[] = ['ref' => "sm-1-$sid", 'nom' => $sm['nom']];
     }
 }
 
@@ -1147,6 +1188,7 @@ $eleve_data = json_encode([
     'courses'         => $my_courses,
     'prog_sequences'  => $prog_sequences,
     'ref_sm_pct'      => $ref_sm_pct,
+    'module_commun_sm' => $module_commun_sm,
     'global_pct'      => $global_pct,
     'pending_assigns' => $pending_assigns,
     'events'          => $my_events,
@@ -1206,6 +1248,36 @@ aside .nav-av-lbl { font-size:7px; color:rgba(255,255,255,.45); text-align:cente
 .nav-user-menu-item:hover { background:var(--bg); }
 .nav-user-menu-item.danger { color:var(--red); }
 main { flex:1; padding:24px 28px 80px; min-width:0; overflow-x:hidden; }
+
+/* ── Menu drawer (navigation mobile) ── */
+.mobile-nav-toggle { display:none; }
+.mobile-nav-backdrop { display:none; }
+@media(max-width:760px){
+  .mobile-nav-toggle {
+    display:flex; align-items:center; justify-content:center;
+    position:fixed; top:14px; left:14px; z-index:70;
+    width:38px; height:38px; border:none; border-radius:10px;
+    background:var(--teal-d); color:#fff; font-size:18px; cursor:pointer;
+    box-shadow:0 2px 10px rgba(0,0,0,.25);
+  }
+  .mobile-nav-backdrop.on { display:block; position:fixed; inset:0; background:rgba(20,30,35,.45); z-index:55; }
+  aside {
+    position:fixed; top:0; left:0; height:100vh; width:220px; flex:0 0 220px;
+    transform:translateX(-100%); transition:transform .22s ease; z-index:60;
+    box-shadow:2px 0 18px rgba(0,0,0,.2);
+  }
+  aside.on { transform:translateX(0); }
+  /* Les boutons passent d'icones empilees a icone+libelle sur une ligne,
+     plus lisibles/tactiles une fois le tiroir large ouvert (72px suffisait
+     en permanent a l'ecran, pas pour un tiroir qu'on doit lire vite). */
+  aside button { flex-direction:row; justify-content:flex-start; gap:10px; padding:10px 14px; font-size:12.5px; text-transform:none; letter-spacing:0; }
+  aside button .nav-ico { font-size:17px; }
+  aside .nb-label, aside .cls-chip { display:inline-block; }
+  aside .nav-brand { text-align:left; padding:14px 14px 10px; }
+  aside .nav-av-btn { flex-direction:row; justify-content:flex-start; gap:10px; padding:0 14px; }
+  aside .nav-av { margin:0; } /* "margin:auto" du mode colonne (desktop replie) ecartait l'avatar du nom en ligne */
+  aside .nav-av-lbl { font-size:11px; text-align:left; }
+}
 
 .view { display:none; }
 .view.on { display:block; }
@@ -1412,16 +1484,11 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .parc-body { flex:1; min-width:0; }
 .parc-name { font-size:13.5px; font-weight:600; color:var(--ink); }
 .parc-sub-lbl { font-size:11.5px; color:var(--muted); margin-top:2px; }
-.parc-badges { display:flex; gap:5px; flex-wrap:wrap; margin-top:5px; }
 .parc-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .pi-done { width:22px; height:22px; border-radius:50%; background:var(--teal); display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
 .pi-cur  { width:22px; height:22px; border-radius:50%; background:var(--violet); flex-shrink:0; }
 .pi-ns   { width:22px; height:22px; border-radius:50%; border:2px solid var(--line); background:var(--card); flex-shrink:0; }
 .parc-exam { background:#24333C; color:#fff; padding:14px 18px; }
-.badge { display:inline-block; padding:2px 9px; border-radius:99px; font-size:10.5px; font-weight:700; }
-.b-el    { background:rgba(124,111,221,.12); color:#5a50b8; }
-.b-visio { background:rgba(46,148,136,.14); color:var(--teal-d); }
-.b-pres  { background:rgba(242,160,61,.15); color:#b07020; }
 .strip-inner { display:flex; gap:3px; align-items:flex-end; padding:10px 0 0; min-width:520px; min-height:80px; }
 .strip-bar { flex:1; border-radius:4px 4px 0 0; min-width:9px; cursor:default; transition:filter .12s; }
 .strip-bar:hover { filter:brightness(.85); }
@@ -1429,8 +1496,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .strip-lbl { display:flex; gap:3px; min-width:520px; padding:3px 0 1px; }
 .strip-lbl span { flex:1; font-size:8px; color:var(--muted); text-align:center; font-variant-numeric:tabular-nums; }
 .strip-lbl span.cur-lbl { color:var(--violet); font-weight:800; }
-.parc-legend { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-bottom:12px; align-items:center; }
-.psw { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:3px; vertical-align:-1px; }
+.parc-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:15px; color:var(--ink); margin-bottom:12px; align-items:center; }
+.psw { display:inline-block; width:16px; height:16px; border-radius:4px; margin-right:5px; vertical-align:-3px; }
 
 /* Sequences (repertoire de modules du referentiel, voir sequences-config.php)
    — meme visuel que Programme (grille de cartes, voir .card/.grid dans
@@ -1672,6 +1739,8 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 .doc-row-name{font-weight:700;color:var(--ink)}
 .doc-row-sub{font-size:11.5px;color:var(--muted);margin-top:3px}
 .doc-status-badge{display:inline-flex;align-items:center;padding:4px 10px;margin-left:-10px;border-radius:99px;font-size:11px;font-weight:700;white-space:nowrap}
+.doc-icon-btn{border:none;background:none;color:var(--muted);cursor:pointer;font-size:17px;padding:5px 7px;line-height:1;border-radius:7px;transition:background .12s,color .12s;text-decoration:none;display:inline-flex;align-items:center}
+.doc-icon-btn:hover{background:var(--bg);color:var(--ink)}
 @media(max-width:640px){
   /* Le tableau 4 colonnes (document / statut / action / envoi) deborde sur
      mobile et le bouton d'action se retrouve coupe hors ecran. On empile
@@ -1799,25 +1868,11 @@ h1 { font-size:20px; font-weight:800; margin:0 0 4px; }
 
 button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 @media(max-width:760px) {
-  /* Meme correctif que espace-formateur.php : le texte du libelle est un
-     noeud brut juste apres <span class="nav-ico">, sans span dedie a
-     cacher — font-size:0 sur le bouton le fait disparaitre, .nav-ico
-     garde sa propre taille (regle de base) et reste visible. Sans ca,
-     l'aside restait a ~90px malgre flex-basis:52px (min-content size par
-     defaut d'un flex item), resserrant tout le contenu principal.
-  */
-  aside { flex-basis:52px; }
-  aside button { font-size:0; }
-  /* Meme souci en haut de l'aside : le badge "Cohorte ..." fait jusqu'a
-     60px (max-width) + son propre padding, plus large que les 52px vises
-     — il forcait lui aussi l'aside a s'elargir. Coherent avec le menu
-     reduit aux icones : on masque le libelle "Eleve" et le badge. */
-  aside .nb-label, aside .cls-chip { display:none; }
-  /* Dernier contributeur : le logo a un style en ligne width:60px (plus
-     large que les 52px vises) — !important necessaire pour passer devant
-     l'inline style. */
-  aside .nav-brand img { width:28px !important; }
-  main { padding:16px 14px 60px; }
+  /* Le menu lateral n'est plus reduit a une colonne d'icones permanente ici
+     (ancien compromis) : il devient un vrai tiroir hors-ecran par defaut,
+     voir le bloc ".mobile-nav-toggle"/"aside.on" plus haut — question du
+     12/10/2026. 64px de marge haute = la place du bouton hamburger fixe. */
+  main { padding:64px 14px 60px; }
   .cols2 { grid-template-columns:1fr; }
   /* .cal-wrap (calendrier) annule le padding de "main" via une marge
      negative fixe (-24px -28px -80px), calquee sur le padding desktop de
@@ -1834,7 +1889,10 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 <body>
 <div class="app">
 
-<aside>
+<button type="button" class="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="Ouvrir le menu">&#9776;</button>
+<div class="mobile-nav-backdrop" id="mobile-nav-backdrop" onclick="closeMobileNav()"></div>
+
+<aside id="app-aside">
   <div class="nav-brand">
     <?php if (!empty($brand['logo_dark'])): ?>
       <img src="<?= $brand['logo_dark'] ?>" alt="<?= s($brand['name']) ?>" style="width:60px;height:auto;display:block;margin:0 auto">
@@ -1850,7 +1908,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
   </div>
   <button class="on" data-v="accueil"  onclick="nav(this)"><span class="nav-ico">🏠</span>Accueil</button>
   <button data-v="parcours" onclick="nav(this)"><span class="nav-ico">📚</span>Parcours</button>
-  <button data-v="cours"    onclick="nav(this)"><span class="nav-ico">▶</span>Modules</button>
+  <button data-v="cours"    onclick="nav(this)"><span class="nav-ico">▶</span>Programme</button>
   <button data-v="agenda"   onclick="nav(this)"><span class="nav-ico">📅</span>Agenda</button>
   <button data-v="docs"     onclick="nav(this)" id="nav-docs-btn"><span class="nav-ico">📄</span>Docs</button>
   <button data-v="params"   onclick="nav(this)"><span class="nav-ico">⚙</span>Réglages</button>
@@ -1977,7 +2035,7 @@ button:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
 
 <!-- VUE MODULES -->
 <div class="view" id="v-cours">
-  <p class="eyebrow">Mes formations</p>
+  <p class="eyebrow">Programme</p>
 
   <!-- Restructuration Matiere > Sous-matiere > Unite / sequences multi-etapes
        generalisee a tous les eleves le 17/09/2026 (etait reservee aux
@@ -2856,6 +2914,24 @@ function nav(btn) {
   var v = btn.dataset.v;
   document.getElementById('v-' + v).classList.add('on');
   go(v);
+  closeMobileNav();
+}
+
+// ── Menu drawer (navigation mobile) : le menu lateral (.aside) reste en
+// permanence sur desktop, mais passe hors-ecran par defaut en dessous de
+// 760px (voir media query) — ces 2 fonctions l'ouvrent/le ferment comme un
+// tiroir, question du 12/10/2026.
+function toggleMobileNav() {
+  var isOpen = document.getElementById('app-aside').classList.contains('on');
+  if (isOpen) closeMobileNav(); else openMobileNav();
+}
+function openMobileNav() {
+  document.getElementById('app-aside').classList.add('on');
+  document.getElementById('mobile-nav-backdrop').classList.add('on');
+}
+function closeMobileNav() {
+  document.getElementById('app-aside').classList.remove('on');
+  document.getElementById('mobile-nav-backdrop').classList.remove('on');
 }
 function go(v) {
   if (_rendered[v]) return;
@@ -3347,12 +3423,13 @@ var LIA_BLOCS_EX = [
   {n:'Animation d\'une sensibilisation',     m:['visio','pres']},
   {n:'Evaluation des pratiques',             m:['pres']}
 ];
+// CCP1/CCP2 retires le 09/10/2026 (question "a retirer") : ces blocs n'ont
+// pas d'equivalent dans le referentiel actuel (seul "Module Commun" y est
+// couvert, voir le champ "ref" de LIA_BLOCS_EX), ils restaient donc sur
+// l'ancien mecanisme base sur les cours Moodle en secours — incoherent avec
+// le reste de Parcours desormais entierement Programme/Sequences.
 var LIA_PHASES = [
-  {label:'Module Commun', blocs:[0,1,2,3,4,5,6], s:1, e:11, exam:null},
-  {label:'CCP1 · Former les apprentis conducteurs', blocs:[7,8,9,10,11,12,13], s:12, e:26,
-   exam:{label:'Examen CCP1', week:26, desc:'QCU · pédagogie en salle · pédagogie en véhicule · entretien. Réussi = autorisation temporaire d\'exercer, 12 mois pour valider le CCP2.'}},
-  {label:'CCP2 · Sensibiliser à la sécurité routière', blocs:[14,15,16,17], s:27, e:35,
-   exam:{label:'Session titre', week:35, desc:'Dossier professionnel + entretien final. Titre professionnel ECSR (niveau 5, RNCP).'}}
+  {label:'Module Commun', blocs:[0,1,2,3,4,5,6], s:1, e:11, exam:null}
 ];
 
 /* Gestionnaire d'auto-école et Support commercial & pédagogique : mêmes
@@ -3456,15 +3533,31 @@ function renderParcours() {
     return 'ns';
   }
 
+  // "Module Commun" (ecsr) genere dynamiquement depuis les Sous-matieres de
+  // la Matiere 1 du referentiel (voir $module_commun_sm cote PHP) plutot que
+  // depuis la liste figee LIA_BLOCS_EX — toute Sous-matiere ajoutee/retiree
+  // dans Programme apparait/disparait ici automatiquement (question du
+  // 09/10/2026). Les autres formations (gestionnaire/support) n'ont pas de
+  // Sous-matieres associees, elles gardent leurs phases/blocs figes.
+  var phasesToRender = ACTIVE_FORMATION.phases;
+  var blocsToRender  = ACTIVE_FORMATION.blocsEx;
+  if (ACTIVE_FORMATION === FORMATIONS.ecsr && d.module_commun_sm && d.module_commun_sm.length) {
+    blocsToRender = d.module_commun_sm.map(function(sm) { return { n: sm.nom, ref: sm.ref }; });
+    phasesToRender = [{
+      label: 'Module Commun', s: 1, e: ACTIVE_FORMATION.totalWeeks, exam: null,
+      blocs: blocsToRender.map(function(_, i) { return i; }),
+    }];
+  }
+
   var html = '';
-  ACTIVE_FORMATION.phases.forEach(function(phase) {
+  phasesToRender.forEach(function(phase) {
     var firstW = LIA_DIST_WEEKS[phase.blocs[0]] || phase.s;
     html += '<div class="parc-phase">';
     html += '<div class="parc-phase-head">' + esc(phase.label) +
             '<span class="parc-wrange">S' + firstW + ' → S' + phase.e + '</span></div>';
 
     phase.blocs.forEach(function(bIdx) {
-      var b       = ACTIVE_FORMATION.blocsEx[bIdx];
+      var b       = blocsToRender[bIdx];
       var status  = blocStatus(bIdx);
       var course  = sortedC[bIdx] || null;
       var refStat = b.ref ? (d.ref_sm_pct || {})[b.ref] : null;
@@ -3478,13 +3571,6 @@ function renderParcours() {
       } else {
         icoHtml = '<div class="pi-ns"></div>';
       }
-
-      var badgesHtml = b.m.map(function(mod) {
-        if (mod === 'el')    return '<span class="badge b-el">e-learning</span>';
-        if (mod === 'visio') return '<span class="badge b-visio">visio</span>';
-        if (mod === 'pres')  return '<span class="badge b-pres">présentiel</span>';
-        return '';
-      }).join('');
 
       var refArg = b.ref ? "'" + b.ref + "'" : 'null';
       var hasTarget = !!(refStat || course);
@@ -3514,7 +3600,6 @@ function renderParcours() {
         '<div class="parc-body">' +
           '<div class="parc-name">' + esc(b.n) + '</div>' +
           subHtml +
-          '<div class="parc-badges">' + badgesHtml + '</div>' +
         '</div>' +
         rightHtml +
         '</div>';
@@ -3589,9 +3674,13 @@ function renderProgSequences() {
       actionHtml = '<a class="btn mini primary" href="' + esc(open.action.url) + '" target="_blank" rel="noopener">🔴 Rejoindre la classe virtuelle</a>';
     } else if (PROG_IS_STUDENT && open.action && open.action.kind === 'etape') {
       actionHtml = open.action.completed
-        ? '<a class="btn mini ghost" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">✓ Étape terminée · Revoir</a>'
+        ? '<a class="btn mini ghost" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">✓ Séquence terminée · Revoir</a>'
         : '<a class="btn mini primary" href="' + PLAYERURL_PROG + '?seq=' + open.action.seqid + '&etape=' + open.action.etapeid + '">Commencer la séquence</a>';
     }
+    // "Demander a Lia" (chat IA), remis ici le 06/10/2026 : n'etait plus
+    // accessible que via l'ancien lecteur de cours (v-detail), rarement
+    // ouvert depuis le retrait de la grille "Mes modules".
+    actionHtml += ' <button type="button" class="btn mini ghost" onclick="openLiaChat(' + open.id + ',\'' + esc(open.titre).replace(/'/g, "\\'") + '\')">💬 Demander à Lia</button>';
     list.className = '';
     list.innerHTML =
       '<button type="button" class="seqp-back" onclick="progSeqOpen(null)">&larr; Retour aux séquences</button>' +
@@ -3798,17 +3887,24 @@ function closeLiaRemediation() {
 }
 
 // ── Chat IA "Demander a Lia" : questions libres sur le module en cours,
-// ancrees sur son contenu reel, historique conserve par eleve+module. ──
-var _liaChat = { messages: [], loaded: false, courseid: 0 };
+// ancrees sur son contenu reel, historique conserve par eleve+module.
+// Accepte aussi (seqid, titre) depuis la vue Sequences (bouton "Demander a
+// Lia" de renderProgSequences) en plus de l'ancien mode base sur _dv (vue
+// Parcours/detail de cours) — voir le handler 'lia_chat_send' cote PHP,
+// question du 06/10/2026 ("bouton absent depuis le retrait de Mes modules"). ──
+var _liaChat = { messages: [], loaded: false, key: '', isSeq: false, id: 0 };
 
-function openLiaChat() {
-  if (!_dv.id) return;
-  document.getElementById('lia-chat-course').textContent = _dv.name || '';
+function openLiaChat(seqid, titre) {
+  var ctxId = seqid || _dv.id;
+  if (!ctxId) return;
+  var isSeq = !!seqid;
+  document.getElementById('lia-chat-course').textContent = (isSeq ? titre : _dv.name) || '';
   document.getElementById('lia-chat-bg').classList.add('on');
-  if (!_liaChat.loaded || _liaChat.courseid !== _dv.id) {
-    _liaChat.messages = []; _liaChat.loaded = false; _liaChat.courseid = _dv.id;
+  var cacheKey = (isSeq ? 'seq' : 'course') + ctxId;
+  if (!_liaChat.loaded || _liaChat.key !== cacheKey) {
+    _liaChat.messages = []; _liaChat.loaded = false; _liaChat.key = cacheKey; _liaChat.isSeq = isSeq; _liaChat.id = ctxId;
     document.getElementById('lia-chat-body').innerHTML = '<div class="lia-chat-empty"><span class="dv-spinner"></span></div>';
-    apiPost({ action: 'lia_chat_history', courseid: _dv.id }).then(function(r) {
+    apiPost(isSeq ? { action: 'lia_chat_history', seqid: ctxId } : { action: 'lia_chat_history', courseid: ctxId }).then(function(r) {
       _liaChat.messages = (r.ok && r.messages) ? r.messages : [];
       _liaChat.loaded = true;
       liaChatRender();
@@ -3842,7 +3938,9 @@ function liaChatSend() {
   var ta = document.getElementById('lia-chat-input');
   var text = ta.value.trim();
   if (!text) return;
-  var courseid = _dv.id;
+  var params = _liaChat.isSeq
+    ? { action: 'lia_chat_send', seqid: _liaChat.id, message: text }
+    : { action: 'lia_chat_send', courseid: _liaChat.id, message: text };
   ta.value = '';
   ta.disabled = true;
   document.getElementById('lia-chat-send-btn').disabled = true;
@@ -3850,7 +3948,7 @@ function liaChatSend() {
   _liaChat.messages.push({ role: 'assistant', content: '…', pending: true });
   liaChatRender();
 
-  apiPost({ action: 'lia_chat_send', courseid: courseid, message: text }).then(function(r) {
+  apiPost(params).then(function(r) {
     ta.disabled = false;
     document.getElementById('lia-chat-send-btn').disabled = false;
     _liaChat.messages.pop();
@@ -4246,7 +4344,7 @@ function calGetEvents(year, month) {
         if (wt === 'e') {
           if (dow >= 1 && dow <= 5) addEv(cur, 'Examen', 'examen');
         } else if (wt === 's') {
-          if (dow >= 1 && dow <= 6) addEv(cur, 'Stage', 'stage');
+          if (dow >= 1 && dow <= 5) addEv(cur, 'Stage', 'stage');
         } else if (wt === 'r' || wt === 'rs') {
           if (dow >= 1 && dow <= 5) addEv(cur, 'Regroupement', 'presentiel');
         } else {
@@ -4255,7 +4353,6 @@ function calGetEvents(year, month) {
           if (dow === 3) addEv(cur, 'Suivi hebdo', 'visio');
           if (dow === 4) addEv(cur, 'Cours pédago', 'presentiel');
           if (dow === 5) addEv(cur, 'Quiz de bloc', 'elearning');
-          if (dow === 0) addEv(cur, 'Dépôt devoir', 'devoir');
         }
       }
     }
@@ -4415,7 +4512,7 @@ function calDrawListe(body, evs, cats, year, month, today) {
     html += '<div class="cal-wrow-title">' + esc(title) + chipsHtml + '</div>';
     html += '<div class="cal-wrow-desc">' + esc(desc) + '</div>';
     if (inCurWeek && (wt === 'c' || wt === 'e1')) {
-      html += '<div class="cal-wrow-detail">Mer · Suivi hebdo (visio) &nbsp;·&nbsp; Jeu · Cours pédago &nbsp;·&nbsp; Ven · Quiz &nbsp;·&nbsp; Dim · Dépôt devoir</div>';
+      html += '<div class="cal-wrow-detail">Mer · Suivi hebdo (visio) &nbsp;·&nbsp; Jeu · Cours pédago &nbsp;·&nbsp; Ven · Quiz</div>';
     }
     html += '</div></div>';
   });
@@ -4490,7 +4587,7 @@ function docsRenderList(docs, blockingCount) {
   var STATUS_ICONS = {signed:'✓ ', validated:'✓ ', pending:'⚠ ', future:''};
   var STATUS_LABELS_FR = {signed:'Signé', validated:'Validé', pending:'En attente', future:'À venir'};
   var ACTION_LABELS = {download:'Télécharger', sign:'Signer', view:'Consulter'};
-  var ACTION_CLASSES = {download:'', sign:'primary', view:''};
+  var ACTION_ICONS = {download:'⬇', view:'👁'};
 
   var html = '<table class="docs-table"><thead><tr><th>DOCUMENT</th><th>STATUT</th><th></th><th></th></tr></thead><tbody>';
   docs.forEach(function(doc) {
@@ -4498,8 +4595,11 @@ function docsRenderList(docs, blockingCount) {
     var sIcon  = STATUS_ICONS[doc.status_type] || '';
     var actionHtml = '';
     if (doc.action_type && doc.action_type !== 'none' && doc.action_url) {
-      var btnCls = ACTION_CLASSES[doc.action_type] || '';
-      actionHtml = '<a href="' + esc(doc.action_url) + '" target="_blank" rel="noopener" class="btn mini ' + btnCls + '">' + (ACTION_LABELS[doc.action_type] || doc.action_type) + '</a>';
+      if (doc.action_type === 'download' || doc.action_type === 'view') {
+        actionHtml = '<a href="' + esc(doc.action_url) + '" target="_blank" rel="noopener" class="doc-icon-btn" title="' + ACTION_LABELS[doc.action_type] + '" aria-label="' + ACTION_LABELS[doc.action_type] + '">' + ACTION_ICONS[doc.action_type] + '</a>';
+      } else {
+        actionHtml = '<a href="' + esc(doc.action_url) + '" target="_blank" rel="noopener" class="btn mini primary">' + (ACTION_LABELS[doc.action_type] || doc.action_type) + '</a>';
+      }
     }
     var sendHtml = '';
     if (doc.status_type === 'pending') {
